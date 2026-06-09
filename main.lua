@@ -197,8 +197,9 @@ local DetailsEndpoint = "https://scriptblox.com/api/script/"
 local RawEndpoint = "https://scriptblox.com/api/script/raw/"
 local RscriptsEndpoint = "https://rscripts.net/api/v2/scripts"
 local RscriptsDetailsEndpoint = "https://rscripts.net/api/v2/script"
-local GameSearchEndpoint = "https://games.roblox.com/v1/games/list"
+local GameSearchEndpoint = "https://www.roblox.com/games/list-json"
 local GameIconEndpoint = "https://thumbnails.roblox.com/v1/games/icons"
+local GameOmniSearchEndpoint = "https://apis.roblox.com/search-api/omni-search"
 local SiteURL = "https://scriptblox.com"
 local RscriptsSiteURL = "https://rscripts.net"
 local ImageFolder = "ScriptBloxFinderImages"
@@ -2932,50 +2933,117 @@ local function normalizeRobloxGame(item)
 		return nil
 	end
 
-	local universeId = tostring(firstNonEmpty(item.universeId, item.universeID, item.id, item.Id))
-	local placeId = tostring(firstNonEmpty(item.placeId, item.rootPlaceId, item.rootPlaceID, item.rootPlace, item.playRootPlaceId))
+	local creator = type(item.creator) == "table" and item.creator or {}
+	local universeId = tostring(firstNonEmpty(
+		item.universeId,
+		item.universeID,
+		item.UniverseId,
+		item.universe,
+		item.id,
+		item.Id
+	))
+
+	local placeId = tostring(firstNonEmpty(
+		item.placeId,
+		item.PlaceId,
+		item.rootPlaceId,
+		item.rootPlaceID,
+		item.rootPlace,
+		item.playRootPlaceId,
+		item.universeRootPlaceId,
+		item.primaryPlaceId
+	))
+
+	local name = firstNonEmpty(
+		item.name,
+		item.Name,
+		item.title,
+		item.Title,
+		item.gameName,
+		item.displayName
+	)
+
+	if name == "" then
+		return nil
+	end
 
 	if universeId == "" and placeId == "" then
 		return nil
 	end
 
 	return {
-		Name = firstNonEmpty(item.name, item.title, item.gameName, "Unknown Game"),
+		Name = name,
 		UniverseId = universeId,
 		PlaceId = placeId,
-		Image = firstNonEmpty(item.imageUrl, item.gameIconUrl, item.thumbnailUrl, item.iconUrl),
-		Playing = tonumber(item.playerCount or item.playing or item.players or item.concurrentUserCount or 0) or 0,
-		Visits = tonumber(item.visits or item.totalVisits or item.visitCount or 0) or 0,
-		Creator = firstNonEmpty(item.creatorName, item.creator, type(item.creator) == "table" and item.creator.name or ""),
-		Description = firstNonEmpty(item.description, item.gameDescription, "")
+		Image = firstNonEmpty(
+			item.imageUrl,
+			item.ImageUrl,
+			item.image,
+			item.Image,
+			item.gameIconUrl,
+			item.thumbnailUrl,
+			item.iconUrl
+		),
+		Playing = tonumber(item.playerCount or item.playing or item.players or item.concurrentUserCount or item.PlayerCount or 0) or 0,
+		Visits = tonumber(item.visits or item.totalVisits or item.visitCount or item.TotalVisits or 0) or 0,
+		Creator = firstNonEmpty(item.creatorName, item.CreatorName, item.creator, creator.name, creator.Name),
+		Description = firstNonEmpty(item.description, item.Description, item.gameDescription, "")
 	}
 end
 
-local function parseGamesResponse(decoded)
-	local sourceList = nil
+local function collectGameCandidates(value, output, seen, depth)
+	if type(value) ~= "table" or depth > 5 then
+		return
+	end
 
+	local normalized = normalizeRobloxGame(value)
+	if normalized then
+		local key = firstNonEmpty(normalized.UniverseId, normalized.PlaceId, normalized.Name)
+
+		if key ~= "" and not seen[key] then
+			seen[key] = true
+			table.insert(output, normalized)
+		end
+	end
+
+	for _, child in pairs(value) do
+		if type(child) == "table" then
+			collectGameCandidates(child, output, seen, depth + 1)
+		end
+	end
+end
+
+local function parseGamesResponse(decoded)
 	if type(decoded) ~= "table" then
 		return {}
 	end
 
-	if type(decoded.games) == "table" then
-		sourceList = decoded.games
-	elseif type(decoded.data) == "table" then
-		sourceList = decoded.data
-	elseif type(decoded.results) == "table" then
-		sourceList = decoded.results
-	elseif type(decoded.recommendations) == "table" then
-		sourceList = decoded.recommendations
-	else
-		sourceList = {}
-	end
-
 	local output = {}
+	local seen = {}
 
-	for _, item in ipairs(sourceList) do
-		local normalized = normalizeRobloxGame(item)
-		if normalized then
-			table.insert(output, normalized)
+	if type(decoded) == "table" and #decoded > 0 then
+		for _, item in ipairs(decoded) do
+			collectGameCandidates(item, output, seen, 1)
+		end
+	else
+		local preferred = {
+			decoded.games,
+			decoded.data,
+			decoded.results,
+			decoded.recommendations,
+			decoded.searchResults,
+			decoded.contents,
+			decoded.contentGroups
+		}
+
+		for _, sourceList in ipairs(preferred) do
+			if type(sourceList) == "table" then
+				collectGameCandidates(sourceList, output, seen, 1)
+			end
+		end
+
+		if #output == 0 then
+			collectGameCandidates(decoded, output, seen, 1)
 		end
 	end
 
@@ -3030,17 +3098,20 @@ local function buildGamesSearchUrl()
 	local query = trim(state.gameQuery or "")
 	local startRows = math.max(0, (tonumber(state.gamePage) or 1) - 1) * state.gameMax
 
-	local url = GameSearchEndpoint
-		.. "?model.maxRows=" .. encode(state.gameMax)
-		.. "&model.startRows=" .. encode(startRows)
-		.. "&maxRows=" .. encode(state.gameMax)
+	return GameSearchEndpoint
+		.. "?keyword=" .. encode(query)
 		.. "&startRows=" .. encode(startRows)
+		.. "&maxRows=" .. encode(state.gameMax)
+		.. "&isKeywordSuggestionEnabled=true"
+end
 
-	if query ~= "" then
-		url = url .. "&model.keyword=" .. encode(query) .. "&keyword=" .. encode(query)
-	end
+local function buildGamesOmniSearchUrl()
+	local query = trim(state.gameQuery or "")
 
-	return url
+	return GameOmniSearchEndpoint
+		.. "?searchQuery=" .. encode(query)
+		.. "&pageType=all"
+		.. "&sessionId=" .. encode(tostring(game.JobId or ""))
 end
 
 local function teleportToGame(gameData)
@@ -3172,7 +3243,7 @@ renderGames = function()
 
 	local page = GamesTab.Page
 
-	local top = createPanel(page, 126, 1, color("Card", Color3.fromRGB(17, 24, 39)))
+	local top = createPanel(page, 138, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 	top.Name = "GamesTop"
 
 	createText(top, {
@@ -3200,7 +3271,7 @@ renderGames = function()
 		"Type a game name",
 		state.gameQuery,
 		UDim2.fromOffset(14, 58),
-		UDim2.new(1, -240, 0, 34),
+		UDim2.new(1, -250, 0, 34),
 		function(value, enterPressed)
 			state.gameQuery = trim(value)
 			if enterPressed then
@@ -3210,12 +3281,12 @@ renderGames = function()
 		end
 	)
 
-	createButton(top, "Search", UDim2.new(1, -214, 0, 82), UDim2.fromOffset(96, 30), function()
+	createButton(top, "Search", UDim2.new(1, -224, 0, 84), UDim2.fromOffset(104, 30), function()
 		state.gamePage = 1
 		searchGames()
 	end, false)
 
-	createButton(top, "Clear", UDim2.new(1, -108, 0, 82), UDim2.fromOffset(82, 30), function()
+	createButton(top, "Clear", UDim2.new(1, -108, 0, 84), UDim2.fromOffset(82, 30), function()
 		state.gameQuery = ""
 		state.gamePage = 1
 		state.gameResults = {}
@@ -3320,30 +3391,48 @@ searchGames = function()
 	state.gameBusy = true
 	setStatus("Searching games...")
 
-	local ok, body = requestGet(buildGamesSearchUrl())
-	if not ok or type(body) ~= "string" then
+	local headers = {
+		["Accept"] = "application/json",
+		["User-Agent"] = "Roblox/WinInet"
+	}
+
+	local ok, body = requestGet(buildGamesSearchUrl(), headers)
+	local decodedOk, decoded = false, nil
+	local results = {}
+
+	if ok and type(body) == "string" then
+		decodedOk, decoded = pcall(function()
+			return HttpService:JSONDecode(body)
+		end)
+
+		if decodedOk and type(decoded) == "table" then
+			results = parseGamesResponse(decoded)
+		end
+	end
+
+	if #results == 0 then
+		local fallbackOk, fallbackBody = requestGet(buildGamesOmniSearchUrl(), headers)
+
+		if fallbackOk and type(fallbackBody) == "string" then
+			local fallbackDecodedOk, fallbackDecoded = pcall(function()
+				return HttpService:JSONDecode(fallbackBody)
+			end)
+
+			if fallbackDecodedOk and type(fallbackDecoded) == "table" then
+				results = parseGamesResponse(fallbackDecoded)
+			end
+		end
+	end
+
+	if not results or #results == 0 then
 		state.gameBusy = false
-		setStatus("Game search failed.")
 		state.gameResults = {}
 		renderGames()
 		safeSelectTab(GamesTab)
+		setStatus("No games found.")
 		return
 	end
 
-	local decodedOk, decoded = pcall(function()
-		return HttpService:JSONDecode(body)
-	end)
-
-	if not decodedOk or type(decoded) ~= "table" then
-		state.gameBusy = false
-		setStatus("Failed to decode game search.")
-		state.gameResults = {}
-		renderGames()
-		safeSelectTab(GamesTab)
-		return
-	end
-
-	local results = parseGamesResponse(decoded)
 	hydrateGameIcons(results)
 
 	state.gameResults = results
