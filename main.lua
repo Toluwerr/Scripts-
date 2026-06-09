@@ -5220,7 +5220,6 @@ searchScripts = function()
 		checkVisibleViewOnce()
 	end)
 end
-
 Window = Google:CreateWindow({
 	Title = "Script Finder",
 	Subtitle = "Powered by ScriptBlox.com and Rscripts.net",
@@ -5257,13 +5256,13 @@ FavoritesTab = Window:CreateTab({
 	Icon = "star"
 })
 
-local searchPage = preparePage(SearchTab)
+searchPage = preparePage(SearchTab)
 preparePage(ScriptsTab)
 preparePage(PeopleTab)
-local selectedPage = preparePage(SelectedTab)
+selectedPage = preparePage(SelectedTab)
 preparePage(FavoritesTab)
 
-local searchPanel = createPanel(searchPage, 290, 1, color("Card", Color3.fromRGB(17, 24, 39)))
+searchPanel = createPanel(searchPage, 290, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 
 ui.searchInput = createInput(
 	searchPanel,
@@ -5383,7 +5382,7 @@ createButton(searchPanel, "Clear", UDim2.fromOffset(120, 226), UDim2.fromOffset(
 	setStatus("Cleared.")
 end, true)
 
-local statusWrap = Instance.new("Frame")
+statusWrap = Instance.new("Frame")
 statusWrap.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
 statusWrap.BorderSizePixel = 0
 statusWrap.ClipsDescendants = true
@@ -5403,7 +5402,7 @@ ui.status = createText(statusWrap, {
 	Size = UDim2.new(1, -20, 1, 0)
 })
 
-local filtersPanel = createPanel(searchPage, 162, 2, color("Card", Color3.fromRGB(17, 24, 39)))
+filtersPanel = createPanel(searchPage, 162, 2, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(filtersPanel, {
 	Text = "Filters",
@@ -5433,8 +5432,8 @@ createCheck(filtersPanel, "Universal", UDim2.new(0.5, 6, 0, 82), UDim2.new(0.5, 
 	updateFilterSummary()
 end)
 
-local orderBox
-local sortBox = Instance.new("TextButton")
+orderBox
+sortBox = Instance.new("TextButton")
 sortBox.Text = "Sort: Newest"
 sortBox.Font = Enum.Font.GothamMedium
 sortBox.TextSize = 12
@@ -5448,13 +5447,13 @@ sortBox.Parent = filtersPanel
 addCorner(sortBox, 10)
 addStroke(sortBox, color("Border", Color3.fromRGB(51, 65, 85)), 0.08, 1)
 
-local sortModes = {
+sortModes = {
 	{"Newest", "updatedAt"},
 	{"Most Viewed", "views"},
 	{"Most Liked", "likeCount"},
 	{"Created", "createdAt"}
 }
-local sortIndex = 1
+sortIndex = 1
 
 sortBox.MouseButton1Click:Connect(function()
 	sortIndex = sortIndex + 1
@@ -5509,7 +5508,7 @@ ui.filterSummary.Visible = false
 ui.filterSummary.Size = UDim2.fromOffset(0, 0)
 ui.filterSummary.Parent = searchPage
 
-local startupPanel = createPanel(searchPage, 74, 3, color("Card", Color3.fromRGB(17, 24, 39)))
+startupPanel = createPanel(searchPage, 74, 3, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(startupPanel, {
 	Text = "Startup",
@@ -5523,7 +5522,7 @@ createCheck(startupPanel, "Auto Reopen", UDim2.fromOffset(14, 36), UDim2.new(1, 
 	setAutoRerun(value)
 end)
 
-local selectedTop = createPanel(selectedPage, 248, 1, color("Card", Color3.fromRGB(17, 24, 39)))
+selectedTop = createPanel(selectedPage, 248, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 
 ui.selectedImage = Instance.new("ImageLabel")
 ui.selectedImage.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
@@ -5537,7 +5536,7 @@ ui.selectedImage.Parent = selectedTop
 addCorner(ui.selectedImage, 12)
 addStroke(ui.selectedImage, color("Border", Color3.fromRGB(51, 65, 85)), 0.18, 1)
 
-local authorWrap = Instance.new("Frame")
+authorWrap = Instance.new("Frame")
 authorWrap.BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))
 authorWrap.BorderSizePixel = 0
 authorWrap.Position = UDim2.fromOffset(104, 104)
@@ -5617,7 +5616,7 @@ ui.favoriteButton = createButton(selectedTop, "Favorite Script", UDim2.fromOffse
 	favoriteSelected()
 end, true)
 
-local featurePanel = createPanel(selectedPage, 132, 2, color("Card", Color3.fromRGB(17, 24, 39)))
+featurePanel = createPanel(selectedPage, 132, 2, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(featurePanel, {
 	Text = "Features",
@@ -5638,7 +5637,7 @@ ui.selectedFeatures = createText(featurePanel, {
 	Size = UDim2.new(1, -28, 0, 82)
 })
 
-local tagsPanel = createPanel(selectedPage, 72, 3, color("Card", Color3.fromRGB(17, 24, 39)))
+tagsPanel = createPanel(selectedPage, 72, 3, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(tagsPanel, {
 	Text = "Tags",
@@ -5659,7 +5658,7 @@ ui.selectedTags = createText(tagsPanel, {
 	Size = UDim2.new(1, -28, 0, 28)
 })
 
-local previewPanel = createPanel(selectedPage, 340, 4, color("Card", Color3.fromRGB(17, 24, 39)))
+previewPanel = createPanel(selectedPage, 340, 4, color("Card", Color3.fromRGB(17, 24, 39)))
 previewPanel.Name = "ScriptPreview"
 
 createText(previewPanel, {
@@ -5674,7 +5673,7 @@ createButton(previewPanel, "Copy", UDim2.new(1, -96, 0, 8), UDim2.fromOffset(82,
 	copyText(ui.previewRaw or "")
 end, true)
 
-local codeFrame = Instance.new("Frame")
+codeFrame = Instance.new("Frame")
 codeFrame.BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))
 codeFrame.BorderSizePixel = 0
 codeFrame.ClipsDescendants = true
