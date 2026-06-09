@@ -201,6 +201,8 @@ local GameSearchEndpoint = "https://www.roblox.com/games/list-json"
 local GameSearchProxyEndpoint = "https://www.roproxy.com/games/list-json"
 local GameIconEndpoint = "https://thumbnails.roblox.com/v1/games/icons"
 local GameIconProxyEndpoint = "https://thumbnails.roproxy.com/v1/games/icons"
+local GameDetailsEndpoint = "https://games.roblox.com/v1/games"
+local GameDetailsProxyEndpoint = "https://games.roproxy.com/v1/games"
 local GameOmniSearchEndpoint = "https://apis.roblox.com/search-api/omni-search"
 local GameOmniSearchProxyEndpoint = "https://apis.roproxy.com/search-api/omni-search"
 local RolimonsGameListEndpoint = "https://api.rolimons.com/games/v1/gamelist"
@@ -3008,8 +3010,8 @@ local function normalizeRobloxGame(item)
 			item.thumbnailUrl,
 			item.iconUrl
 		),
-		Playing = tonumber(item.playerCount or item.playing or item.players or item.concurrentUserCount or item.PlayerCount or 0) or 0,
-		Visits = tonumber(item.visits or item.totalVisits or item.visitCount or item.TotalVisits or 0) or 0,
+		Playing = parseCount(item.playerCount or item.PlayerCount or item.playing or item.Playing or item.players or item.Players or item.concurrentUserCount or item.concurrentUsers or item.activePlayers or item.active_players or 0),
+		Visits = parseCount(item.visits or item.Visits or item.totalVisits or item.TotalVisits or item.visitCount or item.VisitCount or 0),
 		Creator = firstNonEmpty(item.creatorName, item.CreatorName, item.creator, creator.name, creator.Name),
 		Description = firstNonEmpty(item.description, item.Description, item.gameDescription, "")
 	}
@@ -3074,6 +3076,19 @@ local function parseGamesResponse(decoded)
 	return output
 end
 
+local function firstNumber(...)
+	local values = {...}
+
+	for _, value in ipairs(values) do
+		local parsed = parseCount(value)
+		if parsed and parsed > 0 then
+			return parsed
+		end
+	end
+
+	return 0
+end
+
 local function normalizeRolimonsGame(placeId, entry)
 	if type(entry) ~= "table" then
 		return nil
@@ -3086,15 +3101,50 @@ local function normalizeRolimonsGame(placeId, entry)
 
 	local image = firstNonEmpty(entry.image, entry.Image, entry.imageUrl, entry.thumbnail, entry.thumbnailUrl, entry.iconUrl)
 	for _, value in ipairs(entry) do
-		if type(value) == "string" and value ~= name and (value:find("http", 1, true) or value:find("rbxcdn", 1, true)) then
+		if type(value) == "string" and value ~= name and (value:find("http", 1, true) or value:find("rbxcdn", 1, true) or value:find("tr.rbxcdn", 1, true)) then
 			image = value
 			break
 		end
 	end
 
-	local playing = tonumber(entry.playing or entry.players or entry.playerCount or entry.PlayerCount or entry.active or entry.ccu or entry[2] or 0) or 0
-	local visits = tonumber(entry.visits or entry.totalVisits or entry.visitCount or entry.Visits or entry[3] or 0) or 0
-	local universeId = tostring(firstNonEmpty(entry.universeId, entry.UniverseId, entry.universe_id, entry[4]))
+	local playing = firstNumber(
+		entry.playing,
+		entry.Playing,
+		entry.players,
+		entry.Players,
+		entry.playerCount,
+		entry.PlayerCount,
+		entry.activePlayers,
+		entry.active_players,
+		entry.active,
+		entry.ccu,
+		entry.concurrentUsers,
+		entry[2]
+	)
+
+	if playing <= 0 then
+		for index = 2, math.min(#entry, 6) do
+			local value = entry[index]
+			if type(value) == "number" and value >= 0 and value < 10000000 then
+				playing = value
+				break
+			end
+		end
+	end
+
+	local visits = firstNumber(
+		entry.visits,
+		entry.Visits,
+		entry.totalVisits,
+		entry.TotalVisits,
+		entry.visitCount,
+		entry.VisitCount,
+		entry[4],
+		entry[5],
+		entry[6]
+	)
+
+	local universeId = tostring(firstNonEmpty(entry.universeId, entry.UniverseId, entry.universe_id, entry[4], entry[5]))
 
 	return {
 		Name = name,
@@ -3238,6 +3288,120 @@ local function tryRolimonsGameSearch()
 
 	return results
 end
+
+local function hydrateGameStats(games)
+	games = type(games) == "table" and games or {}
+
+	if #games == 0 then
+		return
+	end
+
+	local rolimonsByPlace = {}
+	local rolimonsByUniverse = {}
+
+	if loadRolimonsGames() then
+		for _, gameData in ipairs(state.rolimonsGames or {}) do
+			local placeId = getGamePlaceId(gameData)
+			local universeId = getGameUniverseId(gameData)
+
+			if placeId ~= "" then
+				rolimonsByPlace[placeId] = gameData
+			end
+
+			if universeId ~= "" then
+				rolimonsByUniverse[universeId] = gameData
+			end
+		end
+	end
+
+	for _, gameData in ipairs(games) do
+		local placeId = getGamePlaceId(gameData)
+		local universeId = getGameUniverseId(gameData)
+		local rolimonsData = (placeId ~= "" and rolimonsByPlace[placeId]) or (universeId ~= "" and rolimonsByUniverse[universeId])
+
+		if rolimonsData then
+			local rolimonsPlayers = tonumber(rolimonsData.Playing) or 0
+			local currentPlayers = tonumber(gameData.Playing) or 0
+
+			if rolimonsPlayers > currentPlayers then
+				gameData.Playing = rolimonsPlayers
+			end
+
+			if (tonumber(gameData.Visits) or 0) <= 0 and (tonumber(rolimonsData.Visits) or 0) > 0 then
+				gameData.Visits = rolimonsData.Visits
+			end
+
+			if getGameUniverseId(gameData) == "" and getGameUniverseId(rolimonsData) ~= "" then
+				gameData.UniverseId = getGameUniverseId(rolimonsData)
+			end
+
+			if getGameImage(gameData) == "" and getGameImage(rolimonsData) ~= "" then
+				gameData.Image = getGameImage(rolimonsData)
+			end
+		end
+	end
+
+	local universeIds = {}
+	local lookup = {}
+
+	for _, gameData in ipairs(games) do
+		local universeId = getGameUniverseId(gameData)
+		if universeId ~= "" and not lookup[universeId] then
+			lookup[universeId] = gameData
+			table.insert(universeIds, universeId)
+		end
+	end
+
+	if #universeIds == 0 then
+		return
+	end
+
+	local suffix = "?universeIds=" .. encode(table.concat(universeIds, ","))
+	local ok, body = requestGet(GameDetailsEndpoint .. suffix)
+
+	if not ok or type(body) ~= "string" then
+		ok, body = requestGet(GameDetailsProxyEndpoint .. suffix)
+	end
+
+	if not ok or type(body) ~= "string" then
+		return
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+		return
+	end
+
+	for _, info in ipairs(decoded.data) do
+		local universeId = tostring(firstNonEmpty(info.id, info.universeId, info.universeID))
+		local gameData = lookup[universeId]
+
+		if gameData then
+			local playing = parseCount(info.playing or info.playerCount or info.PlayerCount or info.activePlayers or 0)
+			if playing > 0 or (tonumber(gameData.Playing) or 0) <= 0 then
+				gameData.Playing = playing
+			end
+
+			local visits = parseCount(info.visits or info.visitCount or info.TotalVisits or 0)
+			if visits > 0 then
+				gameData.Visits = visits
+			end
+
+			local rootPlaceId = firstNonEmpty(info.rootPlaceId, info.placeId, info.primaryPlaceId)
+			if getGamePlaceId(gameData) == "" and tostring(rootPlaceId) ~= "" then
+				gameData.PlaceId = tostring(rootPlaceId)
+			end
+
+			if getGameTitle(gameData) == "Unknown Game" then
+				gameData.Name = firstNonEmpty(info.name, info.Name, gameData.Name)
+			end
+		end
+	end
+end
+
 
 
 local function hydrateGameIcons(games)
@@ -3413,7 +3577,7 @@ local function createGameCard(parent, gameData, index)
 	})
 
 	createText(card, {
-		Text = "Players " .. compactNumber(gameData.Playing or 0),
+		Text = "Players " .. compactNumber(tonumber(gameData.Playing) or 0),
 		Font = Enum.Font.GothamMedium,
 		TextSize = 11,
 		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
@@ -3882,6 +4046,7 @@ searchGames = function()
 		return
 	end
 
+	hydrateGameStats(results)
 	hydrateGameIcons(results)
 
 	state.gameResults = results
