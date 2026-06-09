@@ -171,6 +171,7 @@ local DetailsEndpoint = "https://scriptblox.com/api/script/"
 local RawEndpoint = "https://scriptblox.com/api/script/raw/"
 local SiteURL = "https://scriptblox.com"
 local ImageFolder = "ScriptBloxFinderImages"
+local FavoritesFile = AutoRerunFolder .. "/Favorites.json"
 
 local state = {
 	query = "",
@@ -187,7 +188,9 @@ local state = {
 	selected = nil,
 	totalPages = 0,
 	busy = false,
-	lastUrl = ""
+	lastUrl = "",
+	favorites = {},
+	favoriteMode = "Current Game"
 }
 
 local ui = {
@@ -209,14 +212,23 @@ local ui = {
 	previewRaw = "",
 	previewScroll = nil,
 	previewCode = nil,
-	previewLines = nil
+	previewLines = nil,
+	favoriteButton = nil,
+	favoriteInfo = nil,
+	favoriteCurrentButton = nil,
+	favoriteUniversalButton = nil
 }
 
 local Window
 local SearchTab
 local ScriptsTab
 local SelectedTab
+local FavoritesTab
 local searchScripts
+local selectScript
+local renderFavorites
+local updateFavoriteButton
+local favoriteSelected
 
 local function theme()
 	return Google.Theme or {}
@@ -863,6 +875,247 @@ local function tagsToText(tags)
 	return #result > 0 and table.concat(result, ", ") or "None"
 end
 
+
+local function truthy(value)
+	return value == true or value == 1 or value == "1" or tostring(value):lower() == "true" or tostring(value):lower() == "yes"
+end
+
+local function currentPlaceId()
+	return tostring(game.PlaceId or "")
+end
+
+local function getScriptPlaceId(scriptData)
+	if not scriptData then
+		return ""
+	end
+
+	local candidates = {
+		scriptData.placeId,
+		scriptData.gameId,
+		scriptData.rootPlaceId,
+		scriptData.PlaceId
+	}
+
+	if type(scriptData.game) == "table" then
+		table.insert(candidates, scriptData.game.placeId)
+		table.insert(candidates, scriptData.game.gameId)
+		table.insert(candidates, scriptData.game.rootPlaceId)
+		table.insert(candidates, scriptData.game.id)
+	end
+
+	for _, value in ipairs(candidates) do
+		if value ~= nil and tostring(value) ~= "" and tostring(value) ~= "0" then
+			return tostring(value)
+		end
+	end
+
+	return ""
+end
+
+local function isUniversalScript(scriptData)
+	if not scriptData then
+		return false
+	end
+
+	return truthy(scriptData.isUniversal) or truthy(scriptData.universal) or tostring(getGameName(scriptData)):lower() == "universal"
+end
+
+local function favoriteItems()
+	local items = {}
+
+	for _, item in pairs(state.favorites) do
+		if type(item) == "table" then
+			table.insert(items, item)
+		end
+	end
+
+	table.sort(items, function(a, b)
+		return tonumber(a.AddedAt or 0) > tonumber(b.AddedAt or 0)
+	end)
+
+	return items
+end
+
+local function loadFavorites()
+	state.favorites = {}
+
+	if type(isfile) ~= "function" or type(readfile) ~= "function" then
+		return
+	end
+
+	local ok, exists = pcall(function()
+		return isfile(FavoritesFile)
+	end)
+
+	if not ok or not exists then
+		return
+	end
+
+	local readOk, raw = pcall(function()
+		return readfile(FavoritesFile)
+	end)
+
+	if not readOk or type(raw) ~= "string" or raw == "" then
+		return
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(raw)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" then
+		return
+	end
+
+	local source = decoded.Items or decoded
+
+	if type(source) ~= "table" then
+		return
+	end
+
+	for key, item in pairs(source) do
+		if type(item) == "table" then
+			local id = tostring(item.Id or item.ID or item.id or key or "")
+			if id ~= "" then
+				item.Id = id
+				state.favorites[id] = item
+			end
+		end
+	end
+end
+
+local function saveFavorites()
+	if type(writefile) ~= "function" then
+		return false
+	end
+
+	ensureAutoRerunFolder()
+
+	local data = {
+		Version = 1,
+		Items = favoriteItems()
+	}
+
+	local ok, encoded = pcall(function()
+		return HttpService:JSONEncode(data)
+	end)
+
+	if not ok then
+		return false
+	end
+
+	local writeOk = pcall(function()
+		writefile(FavoritesFile, encoded)
+	end)
+
+	return writeOk == true
+end
+
+local function makeFavoriteEntry(scriptData)
+	local id = getScriptIdentifier(scriptData)
+	if not id then
+		return nil
+	end
+
+	local universal = isUniversalScript(scriptData)
+	local placeId = getScriptPlaceId(scriptData)
+	local activePlaceId = trim(state.placeId or "")
+
+	if universal then
+		placeId = ""
+	elseif activePlaceId ~= "" then
+		placeId = activePlaceId
+	elseif placeId == "" then
+		placeId = currentPlaceId()
+	end
+
+	return {
+		Id = tostring(id),
+		Title = getScriptTitle(scriptData),
+		Game = getGameName(scriptData),
+		Image = getScriptImage(scriptData),
+		PlaceId = placeId,
+		Universal = universal,
+		AddedAt = os.time(),
+		Data = scriptData
+	}
+end
+
+local function isFavorite(scriptData)
+	local id = getScriptIdentifier(scriptData)
+	return id ~= nil and state.favorites[tostring(id)] ~= nil
+end
+
+updateFavoriteButton = function()
+	if not ui.favoriteButton then
+		return
+	end
+
+	if not state.selected then
+		ui.favoriteButton.Text = "Favorite Script"
+		return
+	end
+
+	ui.favoriteButton.Text = isFavorite(state.selected) and "Favorited" or "Favorite Script"
+end
+
+local function removeFavorite(id)
+	id = tostring(id or "")
+	if id == "" then
+		return
+	end
+
+	state.favorites[id] = nil
+	saveFavorites()
+
+	if renderFavorites then
+		renderFavorites()
+	end
+
+	if updateFavoriteButton then
+		updateFavoriteButton()
+	end
+
+	setStatus("Removed favorite.")
+end
+
+favoriteSelected = function()
+	if not state.selected then
+		setStatus("Select a script first.")
+		return
+	end
+
+	local entry = makeFavoriteEntry(state.selected)
+	if not entry then
+		setStatus("Missing script identifier.")
+		return
+	end
+
+	if state.favorites[entry.Id] then
+		setStatus("Already in favorites.")
+		updateFavoriteButton()
+		return
+	end
+
+	state.favorites[entry.Id] = entry
+	local saved = saveFavorites()
+
+	if renderFavorites then
+		renderFavorites()
+	end
+
+	if updateFavoriteButton then
+		updateFavoriteButton()
+	end
+
+	if saved then
+		setStatus("Added to favorites.")
+	else
+		setStatus("Added to favorites for this session. File save unavailable.")
+	end
+end
+
+
 local function mergeTables(base, extra)
 	local merged = {}
 
@@ -1477,6 +1730,9 @@ local function updateSelected()
 		ui.selectedTags.Text = "Tags will appear here."
 		setPreviewCode("Script preview will appear here.")
 		ui.selectedImage.Image = ""
+		if updateFavoriteButton then
+			updateFavoriteButton()
+		end
 		return
 	end
 
@@ -1521,6 +1777,10 @@ local function updateSelected()
 	else
 		setPreviewCode("Use Copy Raw to fetch the raw script.")
 	end
+
+	if updateFavoriteButton then
+		updateFavoriteButton()
+	end
 end
 
 
@@ -1539,7 +1799,7 @@ local function executeSelected()
 	end
 end
 
-local function selectScript(scriptData)
+selectScript = function(scriptData)
 	state.selected = fetchDetails(scriptData)
 
 	if not (type(state.selected.script) == "string" and state.selected.script ~= "") then
@@ -1663,6 +1923,222 @@ local function createScriptCard(parent, scriptData, index)
 
 	return card
 end
+
+
+local function clearFavoritesPage()
+	local page = FavoritesTab and FavoritesTab.Page
+	if not page then
+		return
+	end
+
+	for _, child in ipairs(page:GetChildren()) do
+		if not child:IsA("UILayout") and not child:IsA("UIPadding") then
+			child:Destroy()
+		end
+	end
+end
+
+local function getVisibleFavorites()
+	local visible = {}
+	local placeId = currentPlaceId()
+
+	for _, item in ipairs(favoriteItems()) do
+		if state.favoriteMode == "Universal" then
+			if item.Universal == true then
+				table.insert(visible, item)
+			end
+		else
+			if item.Universal ~= true and tostring(item.PlaceId or "") == placeId then
+				table.insert(visible, item)
+			end
+		end
+	end
+
+	return visible
+end
+
+local function createFavoriteCard(parent, item, index)
+	local data = item.Data or item
+	local card = Instance.new("TextButton")
+	card.Name = "FavoriteCard_" .. tostring(index)
+	card.AutoButtonColor = false
+	card.Text = ""
+	card.BackgroundColor3 = color("Card", Color3.fromRGB(24, 24, 27))
+	card.BorderSizePixel = 0
+	card.ClipsDescendants = true
+	card.LayoutOrder = index
+	card.Parent = parent
+
+	addCorner(card, 12)
+	addStroke(card, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
+
+	local title = firstNonEmpty(item.Title, getScriptTitle(data))
+	local imageAsset = resolveImage(firstNonEmpty(item.Image, getScriptImage(data)), item.Id or getScriptIdentifier(data) or title)
+
+	local thumbnail = Instance.new("ImageLabel")
+	thumbnail.Name = "Thumbnail"
+	thumbnail.BackgroundColor3 = color("CardAlt", Color3.fromRGB(39, 39, 42))
+	thumbnail.BorderSizePixel = 0
+	thumbnail.Position = UDim2.fromOffset(10, 10)
+	thumbnail.Size = UDim2.new(1, -20, 0, 82)
+	thumbnail.ScaleType = Enum.ScaleType.Crop
+	thumbnail.Image = imageAsset
+	thumbnail.Parent = card
+	addCorner(thumbnail, 10)
+
+	if imageAsset == "" then
+		createText(thumbnail, {
+			Text = "No Image",
+			Font = Enum.Font.GothamMedium,
+			TextSize = 12,
+			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+			Size = UDim2.fromScale(1, 1)
+		})
+	end
+
+	createText(card, {
+		Text = title,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		Position = UDim2.fromOffset(10, 98),
+		Size = UDim2.new(1, -20, 0, 18),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	createText(card, {
+		Text = item.Universal and "Universal" or ("PlaceId: " .. tostring(item.PlaceId or "Unknown")),
+		Font = Enum.Font.GothamMedium,
+		TextSize = 11,
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+		Position = UDim2.fromOffset(10, 118),
+		Size = UDim2.new(1, -20, 0, 16),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	local remove = createButton(card, "Remove", UDim2.new(1, -82, 1, -30), UDim2.fromOffset(70, 22), function()
+		removeFavorite(item.Id)
+	end, true)
+
+	remove.TextSize = 11
+
+	card.MouseEnter:Connect(function()
+		card.BackgroundColor3 = color("Hover", Color3.fromRGB(39, 39, 42))
+	end)
+
+	card.MouseLeave:Connect(function()
+		card.BackgroundColor3 = color("Card", Color3.fromRGB(24, 24, 27))
+	end)
+
+	card.MouseButton1Click:Connect(function()
+		selectScript(data)
+	end)
+
+	return card
+end
+
+renderFavorites = function()
+	if not FavoritesTab then
+		return
+	end
+
+	clearFavoritesPage()
+
+	local page = FavoritesTab.Page
+	local visible = getVisibleFavorites()
+
+	local top = createPanel(page, 104, 1, color("PrimarySoft", Color3.fromRGB(69, 26, 26)))
+	top.Name = "FavoritesTop"
+
+	createText(top, {
+		Text = "Favorite scripts",
+		Font = Enum.Font.GothamBold,
+		TextSize = 15,
+		TextColor3 = color("Primary", Color3.fromRGB(248, 81, 73)),
+		Position = UDim2.fromOffset(14, 10),
+		Size = UDim2.new(1, -28, 0, 22)
+	})
+
+	ui.favoriteInfo = createText(top, {
+		Text = state.favoriteMode .. "  •  " .. tostring(#visible) .. " saved",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = color("Primary", Color3.fromRGB(248, 81, 73)),
+		Position = UDim2.fromOffset(14, 36),
+		Size = UDim2.new(1, -28, 0, 18)
+	})
+
+	ui.favoriteCurrentButton = createButton(top, "Current Game", UDim2.fromOffset(14, 66), UDim2.fromOffset(130, 28), function()
+		state.favoriteMode = "Current Game"
+		renderFavorites()
+	end, state.favoriteMode ~= "Current Game")
+
+	ui.favoriteUniversalButton = createButton(top, "Universal", UDim2.fromOffset(154, 66), UDim2.fromOffset(110, 28), function()
+		state.favoriteMode = "Universal"
+		renderFavorites()
+	end, state.favoriteMode ~= "Universal")
+
+	createText(top, {
+		Text = "Current PlaceId: " .. currentPlaceId(),
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+		TextColor3 = color("Muted", Color3.fromRGB(187, 153, 150)),
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Position = UDim2.new(1, -292, 0, 70),
+		Size = UDim2.fromOffset(278, 18),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	if #visible == 0 then
+		local empty = createPanel(page, 96, 2, color("Card", Color3.fromRGB(24, 24, 27)))
+
+		createText(empty, {
+			Text = state.favoriteMode == "Universal" and "No universal favorites yet" or "No favorites for this game yet",
+			Font = Enum.Font.GothamBold,
+			TextSize = 15,
+			Position = UDim2.fromOffset(14, 14),
+			Size = UDim2.new(1, -28, 0, 24)
+		})
+
+		createText(empty, {
+			Text = "Use the Selected tab to add a script to favorites.",
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+			Position = UDim2.fromOffset(14, 46),
+			Size = UDim2.new(1, -28, 0, 22)
+		})
+
+		return
+	end
+
+	local grid = Instance.new("Frame")
+	grid.Name = "FavoritesGrid"
+	grid.BackgroundTransparency = 1
+	grid.BorderSizePixel = 0
+	grid.ClipsDescendants = true
+	grid.LayoutOrder = 2
+	grid.Size = UDim2.new(1, -10, 0, 0)
+	grid.Parent = page
+
+	local gridLayout = Instance.new("UIGridLayout")
+	gridLayout.CellSize = UDim2.new(0.333333, -10, 0, 172)
+	gridLayout.CellPadding = UDim2.fromOffset(10, 10)
+	gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	gridLayout.Parent = grid
+
+	for index, item in ipairs(visible) do
+		createFavoriteCard(grid, item, index)
+	end
+
+	gridLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		grid.Size = UDim2.new(1, -10, 0, gridLayout.AbsoluteContentSize.Y + 8)
+	end)
+
+	grid.Size = UDim2.new(1, -10, 0, gridLayout.AbsoluteContentSize.Y + 8)
+end
+
 
 local function renderScripts()
 	clearScriptsPage()
@@ -1900,9 +2376,15 @@ SelectedTab = Window:CreateTab({
 	Icon = "info"
 })
 
+FavoritesTab = Window:CreateTab({
+	Name = "Favorite scripts",
+	Icon = "star"
+})
+
 local searchPage = preparePage(SearchTab)
 preparePage(ScriptsTab)
 local selectedPage = preparePage(SelectedTab)
+preparePage(FavoritesTab)
 
 local searchPanel = createPanel(searchPage, 218, 1, color("Card", Color3.fromRGB(24, 24, 27)))
 
@@ -2209,6 +2691,10 @@ createButton(selectedTop, "Execute", UDim2.fromOffset(414, 168), UDim2.fromOffse
 	executeSelected()
 end, false)
 
+ui.favoriteButton = createButton(selectedTop, "Favorite Script", UDim2.fromOffset(520, 168), UDim2.fromOffset(136, 30), function()
+	favoriteSelected()
+end, true)
+
 local featurePanel = createPanel(selectedPage, 132, 2, color("Card", Color3.fromRGB(24, 24, 27)))
 
 createText(featurePanel, {
@@ -2329,7 +2815,9 @@ ui.previewCode = createText(ui.previewScroll, {
 
 ui.selectedPreview = ui.previewCode
 
+loadFavorites()
 createEmptyScripts()
+renderFavorites()
 updateFilterSummary()
 updateSelected()
 safeSelectTab(SearchTab)
