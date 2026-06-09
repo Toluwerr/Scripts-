@@ -6,7 +6,61 @@ local LocalPlayer = Players.LocalPlayer
 
 
 local AutoRerunURL = "https://raw.githubusercontent.com/Toluwerr/Script-Finder/refs/heads/main/main.lua"
-local AutoRerunLoader = 'loadstring(game:HttpGet("' .. AutoRerunURL .. '?cache=" .. tostring(os.time()) .. tostring(math.random(1000,9999))))()'
+local AutoRerunFolder = "ScriptFinderSettings"
+local AutoRerunConfig = AutoRerunFolder .. "/AutoRerun.txt"
+local AutoRerunAutoexec = "autoexec/ScriptFinder.lua"
+
+local function ensureAutoRerunFolder()
+	if type(makefolder) == "function" and type(isfolder) == "function" then
+		pcall(function()
+			if not isfolder(AutoRerunFolder) then
+				makefolder(AutoRerunFolder)
+			end
+		end)
+	end
+end
+
+local function getAutoRerunEnabled()
+	if type(isfile) == "function" and type(readfile) == "function" then
+		local ok, result = pcall(function()
+			if isfile(AutoRerunConfig) then
+				return readfile(AutoRerunConfig)
+			end
+		end)
+
+		if ok and type(result) == "string" then
+			return result ~= "false"
+		end
+	end
+
+	return true
+end
+
+local function writeAutoRerunEnabled(value)
+	if type(writefile) ~= "function" then
+		return
+	end
+
+	ensureAutoRerunFolder()
+
+	pcall(function()
+		writefile(AutoRerunConfig, value and "true" or "false")
+	end)
+end
+
+local AutoRerunEnabled = getAutoRerunEnabled()
+
+local AutoRerunLoader = [[
+local Enabled = true
+pcall(function()
+	if type(isfile) == "function" and type(readfile) == "function" and isfile("ScriptFinderSettings/AutoRerun.txt") then
+		Enabled = readfile("ScriptFinderSettings/AutoRerun.txt") ~= "false"
+	end
+end)
+if Enabled then
+	loadstring(game:HttpGet("]] .. AutoRerunURL .. [[?cache=" .. tostring(os.time()) .. tostring(math.random(1000, 9999))))()
+end
+]]
 
 local function getTeleportQueue()
 	if type(queue_on_teleport) == "function" then
@@ -29,6 +83,10 @@ local function getTeleportQueue()
 end
 
 local function queueSelfOnTeleport()
+	if not AutoRerunEnabled then
+		return
+	end
+
 	local queueTeleport = getTeleportQueue()
 
 	if queueTeleport then
@@ -48,8 +106,29 @@ local function saveAutoExecuteLoader()
 			makefolder("autoexec")
 		end
 
-		writefile("autoexec/ScriptFinder.lua", AutoRerunLoader)
+		if AutoRerunEnabled then
+			writefile(AutoRerunAutoexec, AutoRerunLoader)
+		else
+			if type(delfile) == "function" and type(isfile) == "function" and isfile(AutoRerunAutoexec) then
+				delfile(AutoRerunAutoexec)
+			else
+				writefile(AutoRerunAutoexec, "-- Script Finder auto rerun disabled")
+			end
+		end
 	end)
+end
+
+local function setAutoRerun(value)
+	AutoRerunEnabled = value == true
+	writeAutoRerunEnabled(AutoRerunEnabled)
+	saveAutoExecuteLoader()
+
+	if AutoRerunEnabled then
+		queueSelfOnTeleport()
+		setStatus("Auto reopen enabled.")
+	else
+		setStatus("Auto reopen disabled.")
+	end
 end
 
 queueSelfOnTeleport()
@@ -60,7 +139,6 @@ pcall(function()
 		queueSelfOnTeleport()
 	end)
 end)
-
 
 local Google = "https://raw.githubusercontent.com/Toluwerr/Google-UI/refs/heads/main/main.lua"
 
@@ -2050,6 +2128,20 @@ ui.filterSummary = createText(filterWrap, {
 	Position = UDim2.fromOffset(12, 0),
 	Size = UDim2.new(1, -24, 1, 0)
 })
+
+local startupPanel = createPanel(searchPage, 74, 4, color("Card", Color3.fromRGB(24, 24, 27)))
+
+createText(startupPanel, {
+	Text = "Startup",
+	Font = Enum.Font.GothamBold,
+	TextSize = 14,
+	Position = UDim2.fromOffset(14, 10),
+	Size = UDim2.new(1, -28, 0, 20)
+})
+
+createCheck(startupPanel, "Auto Reopen", UDim2.fromOffset(14, 36), UDim2.new(1, -28, 0, 32), AutoRerunEnabled, function(value)
+	setAutoRerun(value)
+end)
 
 local selectedTop = createPanel(selectedPage, 210, 1, color("Card", Color3.fromRGB(24, 24, 27)))
 
