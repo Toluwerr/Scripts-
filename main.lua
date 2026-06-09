@@ -172,9 +172,9 @@ pcall(function()
 	elseif Google.Themes and Google.Themes.DarkGoogle then
 		Google.ActiveTheme = "DarkGoogle"
 		Google.Theme = Google.Themes.DarkGoogle
-	elseif Google.Themes and Google.Themes.DarkGoogle then
-		Google.ActiveTheme = "DarkGoogle"
-		Google.Theme = Google.Themes.DarkGoogle
+	elseif Google.Themes and Google.Themes.DarkRed then
+		Google.ActiveTheme = "DarkRed"
+		Google.Theme = Google.Themes.DarkRed
 	end
 end)
 
@@ -2663,7 +2663,7 @@ local function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
 	button.BackgroundColor3 = active and color("PrimarySoft", Color3.fromRGB(30, 58, 105)) or color("CardAlt", Color3.fromRGB(30, 41, 59))
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
-	button.Position = UDim2.new(1, xOffset, 0, 8)
+	button.Position = UDim2.new(1, xOffset, 0, 4)
 	button.Size = UDim2.fromOffset(46, 46)
 	button.Parent = parent
 	addCorner(button, 8)
