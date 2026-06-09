@@ -2663,7 +2663,7 @@ local function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
 	button.BackgroundColor3 = active and color("PrimarySoft", Color3.fromRGB(30, 58, 105)) or color("CardAlt", Color3.fromRGB(30, 41, 59))
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
-	button.Position = UDim2.new(1, xOffset, 0, 4)
+	button.Position = UDim2.new(1, xOffset, 0, 6)
 	button.Size = UDim2.fromOffset(46, 46)
 	button.Parent = parent
 	addCorner(button, 8)
@@ -2707,7 +2707,7 @@ local function renderScripts()
 
 	local page = ScriptsTab.Page
 
-	local top = createPanel(page, 96, 1, color("Card", Color3.fromRGB(17, 24, 39)))
+	local top = createPanel(page, 110, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 	top.Name = "ScriptsTop"
 
 	createText(top, {
@@ -2724,14 +2724,14 @@ local function renderScripts()
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
 		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
-		Position = UDim2.fromOffset(14, 38),
-		Size = UDim2.new(1, -300, 0, 18)
+		Position = UDim2.fromOffset(14, 40),
+		Size = UDim2.new(1, -320, 0, 18)
 	})
 
 	createSourceCircle(top, "scriptblox", -114, "SB", ScriptBloxLogoURL)
 	createSourceCircle(top, "rscripts", -60, "R", RscriptsLogoURL)
 
-	createButton(top, "Previous", UDim2.new(1, -214, 0, 56), UDim2.fromOffset(96, 28), function()
+	createButton(top, "Previous", UDim2.new(1, -214, 0, 66), UDim2.fromOffset(96, 28), function()
 		if state.page <= 1 then
 			setStatus("Already on the first page.")
 			return
@@ -2740,7 +2740,7 @@ local function renderScripts()
 		searchScripts()
 	end, true)
 
-	createButton(top, "Next", UDim2.new(1, -108, 0, 56), UDim2.fromOffset(82, 28), function()
+	createButton(top, "Next", UDim2.new(1, -108, 0, 66), UDim2.fromOffset(82, 28), function()
 		if state.totalPages <= 0 or state.page >= state.totalPages then
 			setStatus("Already on the last page.")
 			return
