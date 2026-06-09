@@ -2721,14 +2721,33 @@ orderBox.MouseButton1Click:Connect(function()
 	updateFilterSummary()
 end)
 
-local filterWrap = createPanel(searchPage, 38, 3, color("PrimarySoft", Color3.fromRGB(69, 26, 26)))
+local filterWrap = createPanel(searchPage, 46, 3, color("Card", Color3.fromRGB(36, 26, 25)))
+filterWrap.Name = "FilterSummary"
+pcall(function()
+	for _, child in ipairs(filterWrap:GetChildren()) do
+		if child:IsA("UICorner") then
+			child.CornerRadius = UDim.new(0, 10)
+		end
+	end
+end)
+
+createText(filterWrap, {
+	Text = "Active filters",
+	Font = Enum.Font.GothamBold,
+	TextSize = 12,
+	TextColor3 = color("Muted", Color3.fromRGB(187, 153, 150)),
+	Position = UDim2.fromOffset(14, 6),
+	Size = UDim2.new(1, -28, 0, 16)
+})
+
 ui.filterSummary = createText(filterWrap, {
 	Text = "",
 	Font = Enum.Font.GothamMedium,
 	TextSize = 12,
-	TextColor3 = color("Primary", Color3.fromRGB(248, 81, 73)),
-	Position = UDim2.fromOffset(12, 0),
-	Size = UDim2.new(1, -24, 1, 0)
+	TextColor3 = color("Text", Color3.fromRGB(248, 238, 237)),
+	Position = UDim2.fromOffset(14, 23),
+	Size = UDim2.new(1, -28, 0, 18),
+	TextTruncate = Enum.TextTruncate.AtEnd
 })
 
 local startupPanel = createPanel(searchPage, 74, 4, color("Card", Color3.fromRGB(24, 24, 27)))
@@ -2885,7 +2904,7 @@ addStroke(codeFrame, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
 local lineWrap = Instance.new("Frame")
 lineWrap.BackgroundColor3 = color("CardAlt", Color3.fromRGB(39, 39, 42))
 lineWrap.BorderSizePixel = 0
-lineWrap.Size = UDim2.new(0, 36, 1, 0)
+lineWrap.Size = UDim2.new(0, 32, 1, 0)
 lineWrap.Parent = codeFrame
 
 ui.previewLines = createText(lineWrap, {
@@ -2898,15 +2917,15 @@ ui.previewLines = createText(lineWrap, {
 	TextWrapped = false,
 	TextTruncate = Enum.TextTruncate.None,
 	Position = UDim2.fromOffset(0, 10),
-	Size = UDim2.new(1, -6, 0, 120),
+	Size = UDim2.new(1, -4, 0, 120),
 	ClipsDescendants = false
 })
 
 ui.previewScroll = Instance.new("ScrollingFrame")
 ui.previewScroll.BackgroundTransparency = 1
 ui.previewScroll.BorderSizePixel = 0
-ui.previewScroll.Position = UDim2.fromOffset(36, 0)
-ui.previewScroll.Size = UDim2.new(1, -36, 1, 0)
+ui.previewScroll.Position = UDim2.fromOffset(32, 0)
+ui.previewScroll.Size = UDim2.new(1, -32, 1, 0)
 ui.previewScroll.CanvasSize = UDim2.fromOffset(0, 0)
 ui.previewScroll.ScrollBarThickness = 6
 ui.previewScroll.ScrollingDirection = Enum.ScrollingDirection.XY
