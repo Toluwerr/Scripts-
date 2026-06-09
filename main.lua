@@ -1,7 +1,66 @@
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
 
 local LocalPlayer = Players.LocalPlayer
+
+
+local AutoRerunURL = "https://raw.githubusercontent.com/Toluwerr/Script-Finder/refs/heads/main/main.lua"
+local AutoRerunLoader = 'loadstring(game:HttpGet("' .. AutoRerunURL .. '?cache=" .. tostring(os.time()) .. tostring(math.random(1000,9999))))()'
+
+local function getTeleportQueue()
+	if type(queue_on_teleport) == "function" then
+		return queue_on_teleport
+	end
+
+	if type(queueonteleport) == "function" then
+		return queueonteleport
+	end
+
+	if syn and type(syn.queue_on_teleport) == "function" then
+		return syn.queue_on_teleport
+	end
+
+	if fluxus and type(fluxus.queue_on_teleport) == "function" then
+		return fluxus.queue_on_teleport
+	end
+
+	return nil
+end
+
+local function queueSelfOnTeleport()
+	local queueTeleport = getTeleportQueue()
+
+	if queueTeleport then
+		pcall(function()
+			queueTeleport(AutoRerunLoader)
+		end)
+	end
+end
+
+local function saveAutoExecuteLoader()
+	if type(writefile) ~= "function" then
+		return
+	end
+
+	pcall(function()
+		if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("autoexec") then
+			makefolder("autoexec")
+		end
+
+		writefile("autoexec/ScriptFinder.lua", AutoRerunLoader)
+	end)
+end
+
+queueSelfOnTeleport()
+saveAutoExecuteLoader()
+
+pcall(function()
+	TeleportService.TeleportInitFailed:Connect(function()
+		queueSelfOnTeleport()
+	end)
+end)
+
 
 local Google = "https://raw.githubusercontent.com/Toluwerr/Google-UI/refs/heads/main/main.lua"
 
@@ -29,6 +88,7 @@ pcall(function()
 end)
 
 local SearchEndpoint = "https://scriptblox.com/api/script/search"
+local FetchEndpoint = "https://scriptblox.com/api/script/fetch"
 local DetailsEndpoint = "https://scriptblox.com/api/script/"
 local RawEndpoint = "https://scriptblox.com/api/script/raw/"
 local SiteURL = "https://scriptblox.com"
@@ -40,6 +100,7 @@ local state = {
 	max = 12,
 	sortBy = "updatedAt",
 	order = "desc",
+	placeId = "",
 	unpatchedOnly = true,
 	noKeyOnly = false,
 	verifiedOnly = false,
@@ -54,6 +115,7 @@ local state = {
 local ui = {
 	searchInput = nil,
 	maxInput = nil,
+	gameInput = nil,
 	sortDropdown = nil,
 	orderDropdown = nil,
 	status = nil,
@@ -65,7 +127,11 @@ local ui = {
 	selectedMeta = nil,
 	selectedFeatures = nil,
 	selectedTags = nil,
-	selectedPreview = nil
+	selectedPreview = nil,
+	previewRaw = "",
+	previewScroll = nil,
+	previewCode = nil,
+	previewLines = nil
 }
 
 local Window
@@ -765,14 +831,31 @@ local function fetchDetails(scriptData)
 end
 
 local function buildSearchUrl()
-	local url = SearchEndpoint
-	url = url .. "?q=" .. encode(state.query)
-	url = url .. "&page=" .. encode(state.page)
+	local hasQuery = trim(state.query) ~= ""
+	local url = hasQuery and SearchEndpoint or FetchEndpoint
+
+	if hasQuery then
+		url = url .. "?q=" .. encode(state.query)
+	else
+		url = url .. "?page=" .. encode(state.page)
+	end
+
+	if hasQuery then
+		url = url .. "&page=" .. encode(state.page)
+	end
+
 	url = url .. "&max=" .. encode(state.max)
-	url = url .. "&sortBy=" .. encode(state.sortBy)
-	url = url .. "&order=" .. encode(state.order)
-	url = url .. "&strict=false"
+	url = url .. "&sortBy=" .. encode(state.sortBy ~= "" and state.sortBy or "updatedAt")
+	url = url .. "&order=" .. encode(state.order ~= "" and state.order or "desc")
 	url = url .. "&mode=free"
+
+	if tostring(state.placeId or "") ~= "" then
+		url = url .. "&placeId=" .. encode(state.placeId)
+	end
+
+	if hasQuery then
+		url = url .. "&strict=false"
+	end
 
 	if state.unpatchedOnly then
 		url = url .. "&patched=0"
@@ -817,6 +900,14 @@ local function updateFilterSummary()
 		table.insert(filters, "Universal")
 	end
 
+	if tostring(state.placeId or "") ~= "" then
+		table.insert(filters, "Game: " .. tostring(state.placeId))
+	end
+
+	if trim(state.query) == "" then
+		table.insert(filters, "Blank search: " .. getSortLabel())
+	end
+
 	ui.filterSummary.Text = #filters > 0 and table.concat(filters, "  •  ") or "No filters"
 end
 
@@ -842,6 +933,168 @@ local function getOrderFromLabel(label)
 	return "desc"
 end
 
+local function getSortLabel()
+	if state.sortBy == "views" then
+		return state.order == "asc" and "Least Viewed" or "Most Viewed"
+	elseif state.sortBy == "likeCount" then
+		return state.order == "asc" and "Least Liked" or "Most Liked"
+	elseif state.sortBy == "createdAt" then
+		return state.order == "asc" and "Oldest Created" or "Newest Created"
+	end
+
+	return state.order == "asc" and "Oldest Updated" or "Latest"
+end
+
+local function getScriptsTitle()
+	if state.query ~= "" then
+		return "Scripts"
+	end
+
+	if tostring(state.placeId or "") ~= "" then
+		return getSortLabel() .. " Game Scripts"
+	end
+
+	return getSortLabel() .. " Scripts"
+end
+
+local function getLoadingText()
+	if state.query ~= "" then
+		return "Searching..."
+	end
+
+	if tostring(state.placeId or "") ~= "" then
+		return "Loading " .. string.lower(getSortLabel()) .. " game scripts..."
+	end
+
+	return "Loading " .. string.lower(getSortLabel()) .. " scripts..."
+end
+
+local setPreviewCode
+
+local function normalizeCodeText(text)
+	text = tostring(text or "")
+	text = text:gsub("\r\n", "\n")
+	text = text:gsub("\r", "\n")
+	text = text:gsub("\t", "    ")
+	return text
+end
+
+
+local function extractScriptText(value)
+	local text = tostring(value or "")
+	local stripped = trim(text)
+
+	if stripped == "" then
+		return ""
+	end
+
+	local ok, decoded = pcall(function()
+		return HttpService:JSONDecode(stripped)
+	end)
+
+	if ok and type(decoded) == "table" then
+		if type(decoded.script) == "string" then
+			return decoded.script
+		end
+
+		if type(decoded.code) == "string" then
+			return decoded.code
+		end
+
+		if type(decoded.raw) == "string" then
+			return decoded.raw
+		end
+
+		if type(decoded.content) == "string" then
+			return decoded.content
+		end
+
+		if type(decoded.result) == "table" then
+			if type(decoded.result.script) == "string" then
+				return decoded.result.script
+			end
+
+			if type(decoded.result.code) == "string" then
+				return decoded.result.code
+			end
+
+			if type(decoded.result.raw) == "string" then
+				return decoded.result.raw
+			end
+
+			if type(decoded.result.content) == "string" then
+				return decoded.result.content
+			end
+		end
+	end
+
+	return normalizeCodeText(text)
+end
+
+local function resolveExecutableText(value)
+	local text = extractScriptText(value)
+	local stripped = trim(text)
+
+	if stripped:match("^https?://") then
+		setStatus("Fetching script URL...")
+
+		local ok, body = requestGet(stripped)
+
+		if ok and type(body) == "string" and body ~= "" then
+			return extractScriptText(body)
+		end
+
+		setStatus("Failed to fetch script URL.")
+		return nil
+	end
+
+	return text
+end
+
+local function runExecutableText(text)
+	text = resolveExecutableText(text)
+
+	if not text or trim(text) == "" then
+		setStatus("No executable code found.")
+		return false
+	end
+
+	if type(loadstring) ~= "function" then
+		setStatus("loadstring is unavailable in this environment.")
+		return false
+	end
+
+	local compiled, compileError = loadstring(text)
+
+	if not compiled then
+		setStatus("Compile failed.")
+		warn(compileError)
+		return false
+	end
+
+	local packed = {pcall(compiled)}
+	local ok = table.remove(packed, 1)
+
+	if not ok then
+		setStatus("Runtime error.")
+		warn(packed[1])
+		return false
+	end
+
+	if type(packed[1]) == "function" then
+		local returnedOk, returnedError = pcall(packed[1])
+
+		if not returnedOk then
+			setStatus("Returned function failed.")
+			warn(returnedError)
+			return false
+		end
+	end
+
+	return true
+end
+
+
 local function fetchRawSelected()
 	if not state.selected then
 		setStatus("Select a script first.")
@@ -849,7 +1102,13 @@ local function fetchRawSelected()
 	end
 
 	if type(state.selected.script) == "string" and state.selected.script ~= "" then
-		return state.selected.script
+		local codeText = extractScriptText(state.selected.script)
+
+		if setPreviewCode then
+			setPreviewCode(codeText)
+		end
+
+		return codeText
 	end
 
 	local identifier = getScriptIdentifier(state.selected)
@@ -861,30 +1120,269 @@ local function fetchRawSelected()
 	setStatus("Fetching raw script...")
 
 	local ok, body = requestGet(RawEndpoint .. encode(identifier))
-	if not ok then
+	if not ok or type(body) ~= "string" then
 		setStatus("Failed to fetch raw script.")
 		return nil
 	end
 
-	return body
+	local codeText = extractScriptText(body)
+	state.selected.script = codeText
+
+	if setPreviewCode then
+		setPreviewCode(codeText)
+	end
+
+	return codeText
 end
 
 
-local function setPreviewCode(text)
-	text = tostring(text or "")
 
-	if not ui.selectedPreview then
+local function escapeRichText(value)
+	value = tostring(value or "")
+	value = value:gsub("&", "&amp;")
+	value = value:gsub("<", "&lt;")
+	value = value:gsub(">", "&gt;")
+	value = value:gsub('"', "&quot;")
+	return value
+end
+
+local syntaxColors = {
+	Text = "224,214,212",
+	Comment = "106,153,85",
+	String = "214,157,133",
+	Number = "181,206,168",
+	Keyword = "197,134,192",
+	Constant = "86,156,214",
+	Global = "78,201,176",
+	Service = "86,182,194",
+	Builtin = "220,220,170",
+	Method = "156,220,254",
+	Operator = "212,121,121",
+	Punctuation = "145,130,128"
+}
+
+local keywordSet = {
+	["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true, ["elseif"] = true,
+	["end"] = true, ["for"] = true, ["function"] = true, ["if"] = true, ["in"] = true,
+	["local"] = true, ["not"] = true, ["or"] = true, ["repeat"] = true, ["return"] = true,
+	["then"] = true, ["until"] = true, ["while"] = true, ["continue"] = true, ["export"] = true,
+	["type"] = true
+}
+
+local constantSet = {
+	["true"] = true, ["false"] = true, ["nil"] = true, ["self"] = true
+}
+
+local globalSet = {
+	game = true, workspace = true, script = true,
+	Instance = true, Enum = true, Color3 = true, Vector2 = true, Vector3 = true,
+	UDim = true, UDim2 = true, CFrame = true, TweenInfo = true,
+	RaycastParams = true, NumberRange = true, NumberSequence = true,
+	ColorSequence = true, BrickColor = true, Region3 = true
+}
+
+local serviceSet = {
+	Players = true, RunService = true, UserInputService = true, TweenService = true,
+	HttpService = true, CoreGui = true, Workspace = true, ReplicatedStorage = true,
+	Lighting = true, StarterGui = true, StarterPack = true, StarterPlayer = true,
+	Teams = true, SoundService = true, TextService = true, CollectionService = true,
+	TeleportService = true, MarketplaceService = true, Debris = true, PathfindingService = true
+}
+
+local builtinSet = {
+	print = true, warn = true, error = true, pcall = true, xpcall = true,
+	pairs = true, ipairs = true, next = true, type = true, typeof = true,
+	tostring = true, tonumber = true, require = true, loadstring = true,
+	assert = true, select = true, unpack = true, getfenv = true, setfenv = true,
+	rawequal = true, rawget = true, rawset = true, newproxy = true,
+	math = true, table = true, string = true, task = true, coroutine = true,
+	os = true, debug = true, utf8 = true, wait = true, spawn = true, delay = true
+}
+
+local function paint(value, colorName)
+	return '<font color="rgb(' .. syntaxColors[colorName] .. ')">' .. escapeRichText(value) .. '</font>'
+end
+
+local function isAlpha(value)
+	return value:match("[%a_]") ~= nil
+end
+
+local function isAlnum(value)
+	return value:match("[%w_]") ~= nil
+end
+
+local function previousNonSpace(text, index)
+	for i = index, 1, -1 do
+		local char = text:sub(i, i)
+		if char ~= " " and char ~= "\t" and char ~= "\n" then
+			return char
+		end
+	end
+	return ""
+end
+
+local function highlightLuau(source)
+	source = normalizeCodeText(source)
+	local result = {}
+	local i = 1
+	local length = #source
+
+	while i <= length do
+		local char = source:sub(i, i)
+		local nextTwo = source:sub(i, i + 1)
+
+		if nextTwo == "--" then
+			if source:sub(i + 2, i + 3) == "[[" then
+				local closeStart, closeEnd = source:find("%]%]", i + 4)
+				local stop = closeEnd or length
+				table.insert(result, paint(source:sub(i, stop), "Comment"))
+				i = stop + 1
+			else
+				local lineEnd = source:find("\n", i + 2, true)
+				local stop = lineEnd and (lineEnd - 1) or length
+				table.insert(result, paint(source:sub(i, stop), "Comment"))
+				i = stop + 1
+			end
+		elseif source:sub(i, i + 1) == "[[" then
+			local closeStart, closeEnd = source:find("%]%]", i + 2)
+			local stop = closeEnd or length
+			table.insert(result, paint(source:sub(i, stop), "String"))
+			i = stop + 1
+		elseif char == '"' or char == "'" then
+			local quote = char
+			local j = i + 1
+			while j <= length do
+				local current = source:sub(j, j)
+				if current == "\\" then
+					j = j + 2
+				elseif current == quote then
+					j = j + 1
+					break
+				else
+					j = j + 1
+				end
+			end
+			table.insert(result, paint(source:sub(i, math.min(j - 1, length)), "String"))
+			i = j
+		elseif char:match("%d") then
+			local j = i
+			while j <= length and source:sub(j, j):match("[%w_%.]") do
+				j = j + 1
+			end
+			table.insert(result, paint(source:sub(i, j - 1), "Number"))
+			i = j
+		elseif isAlpha(char) then
+			local j = i
+			while j <= length and isAlnum(source:sub(j, j)) do
+				j = j + 1
+			end
+
+			local word = source:sub(i, j - 1)
+			local previous = previousNonSpace(source, i - 1)
+
+			if previous == "." or previous == ":" then
+				table.insert(result, paint(word, "Method"))
+			elseif keywordSet[word] then
+				table.insert(result, paint(word, "Keyword"))
+			elseif constantSet[word] then
+				table.insert(result, paint(word, "Constant"))
+			elseif serviceSet[word] then
+				table.insert(result, paint(word, "Service"))
+			elseif globalSet[word] then
+				table.insert(result, paint(word, "Global"))
+			elseif builtinSet[word] then
+				table.insert(result, paint(word, "Builtin"))
+			else
+				table.insert(result, paint(word, "Text"))
+			end
+
+			i = j
+		elseif char:match("[%+%-%*/%%%^#=<>~]") then
+			table.insert(result, paint(char, "Operator"))
+			i = i + 1
+		elseif char:match("[%(%){%}%[%],;:]") or char == "." then
+			table.insert(result, paint(char, "Punctuation"))
+			i = i + 1
+		else
+			table.insert(result, escapeRichText(char))
+			i = i + 1
+		end
+	end
+
+	return table.concat(result)
+end
+
+local function buildLineNumbers(text)
+	text = normalizeCodeText(text)
+	local lineCount = 1
+	for _ in text:gmatch("\n") do
+		lineCount = lineCount + 1
+	end
+
+	local lines = {}
+	for i = 1, lineCount do
+		lines[i] = tostring(i)
+	end
+
+	return table.concat(lines, "\n")
+end
+
+local function updateCustomCodeBlock(text)
+	text = normalizeCodeText(text)
+	ui.previewRaw = text
+
+	if not ui.previewCode or not ui.previewScroll then
 		return
 	end
 
-	if ui.selectedPreview.SetCode then
-		ui.selectedPreview:SetCode(text)
-	elseif ui.selectedPreview.SetText then
-		ui.selectedPreview:SetText(text)
-	elseif ui.selectedPreview.Label then
-		ui.selectedPreview.Label.Text = text
-	elseif ui.selectedPreview.Text ~= nil then
-		ui.selectedPreview.Text = text
+	ui.previewCode.RichText = true
+	ui.previewCode.TextWrapped = false
+	ui.previewCode.TextTruncate = Enum.TextTruncate.None
+	ui.previewCode.Text = highlightLuau(text)
+
+	if ui.previewLines then
+		ui.previewLines.Text = buildLineNumbers(text)
+		ui.previewLines.Position = UDim2.fromOffset(0, 10 - (ui.previewScroll and ui.previewScroll.CanvasPosition.Y or 0))
+	end
+
+	task.defer(function()
+		if not ui.previewCode or not ui.previewScroll then
+			return
+		end
+
+		local bounds = ui.previewCode.TextBounds
+		local width = math.max(bounds.X + 30, ui.previewScroll.AbsoluteSize.X + 1)
+		local height = math.max(bounds.Y + 30, ui.previewScroll.AbsoluteSize.Y + 1)
+
+		ui.previewCode.Size = UDim2.fromOffset(width, height)
+
+		if ui.previewLines then
+			ui.previewLines.Size = UDim2.fromOffset(38, height)
+		end
+
+		ui.previewScroll.CanvasSize = UDim2.fromOffset(width + 12, height + 12)
+	end)
+end
+
+setPreviewCode = function(text)
+	updateCustomCodeBlock(text)
+
+	if ui.selectedPreview and ui.selectedPreview ~= ui.previewCode then
+		text = normalizeCodeText(text)
+
+		if type(ui.selectedPreview.SetCode) == "function" then
+			pcall(function()
+				ui.selectedPreview:SetCode(text)
+			end)
+		elseif type(ui.selectedPreview.SetText) == "function" then
+			pcall(function()
+				ui.selectedPreview:SetText(text)
+			end)
+		elseif ui.selectedPreview.Text ~= nil then
+			pcall(function()
+				ui.selectedPreview.Text = text
+			end)
+		end
 	end
 end
 
@@ -941,17 +1439,41 @@ local function updateSelected()
 	local raw = tostring(scriptData.script or "")
 	if raw ~= "" then
 		raw = raw:gsub("\r", "")
-		if #raw > 1100 then
-			raw = raw:sub(1, 1100) .. "\n..."
-		end
 		setPreviewCode(raw)
 	else
 		setPreviewCode("Use Copy Raw to fetch the raw script.")
 	end
 end
 
+
+local function executeSelected()
+	local raw = fetchRawSelected()
+
+	if not raw or trim(raw) == "" then
+		setStatus("No script available to execute.")
+		return
+	end
+
+	setStatus("Executing selected script...")
+
+	if runExecutableText(raw) then
+		setStatus("Executed selected script.")
+	end
+end
+
 local function selectScript(scriptData)
 	state.selected = fetchDetails(scriptData)
+
+	if not (type(state.selected.script) == "string" and state.selected.script ~= "") then
+		local identifier = getScriptIdentifier(state.selected)
+		if identifier then
+			local ok, body = requestGet(RawEndpoint .. encode(identifier))
+			if ok and type(body) == "string" and body ~= "" then
+				state.selected.script = extractScriptText(body)
+			end
+		end
+	end
+
 	updateSelected()
 	safeSelectTab(SelectedTab)
 	setStatus("Selected: " .. getScriptTitle(state.selected))
@@ -1073,7 +1595,7 @@ local function renderScripts()
 	top.Name = "ScriptsTop"
 
 	createText(top, {
-		Text = "Scripts",
+		Text = getScriptsTitle(),
 		Font = Enum.Font.GothamBold,
 		TextSize = 15,
 		TextColor3 = color("Primary", Color3.fromRGB(248, 81, 73)),
@@ -1100,7 +1622,7 @@ local function renderScripts()
 	end, true)
 
 	createButton(top, "Next", UDim2.new(1, -108, 0, 36), UDim2.fromOffset(82, 28), function()
-		if state.totalPages > 0 and state.page >= state.totalPages then
+		if state.totalPages <= 0 or state.page >= state.totalPages then
 			setStatus("Already on the last page.")
 			return
 		end
@@ -1127,7 +1649,31 @@ local function renderScripts()
 		createScriptCard(grid, scriptData, index)
 	end
 
-	local rows = math.max(1, math.ceil(#state.results / 3))
+	if #state.results == 0 then
+		local empty = createPanel(page, 92, 3, color("Card", Color3.fromRGB(24, 24, 27)))
+		empty.Name = "NoResults"
+
+		createText(empty, {
+			Text = "No scripts found",
+			Font = Enum.Font.GothamBold,
+			TextSize = 15,
+			Position = UDim2.fromOffset(14, 14),
+			Size = UDim2.new(1, -28, 0, 24)
+		})
+
+		createText(empty, {
+			Text = "Try removing filters, changing the game PlaceId, or searching by name.",
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+			TextWrapped = true,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			Position = UDim2.fromOffset(14, 44),
+			Size = UDim2.new(1, -28, 0, 36)
+		})
+	end
+
+	local rows = math.max(0, math.ceil(#state.results / 3))
 	grid.Size = UDim2.new(1, -10, 0, rows * 158)
 end
 
@@ -1145,6 +1691,24 @@ searchScripts = function()
 		if parsed then
 			state.max = math.clamp(math.floor(parsed), 1, 30)
 			ui.maxInput.Text = tostring(state.max)
+		end
+	end
+
+	if ui.gameInput then
+		local rawPlaceId = trim(ui.gameInput.Text)
+		if rawPlaceId ~= "" then
+			local parsedPlaceId = tonumber(rawPlaceId)
+			if parsedPlaceId then
+				state.placeId = tostring(math.floor(parsedPlaceId))
+				ui.gameInput.Text = state.placeId
+			else
+				state.placeId = ""
+				ui.gameInput.Text = ""
+				setStatus("Game filter must be a numeric PlaceId.")
+				return
+			end
+		else
+			state.placeId = ""
 		end
 	end
 
@@ -1172,14 +1736,11 @@ searchScripts = function()
 		end
 	end
 
-	if state.query == "" then
-		setStatus("Enter a search query.")
-		return
-	end
-
 	state.busy = true
-	setStatus("Searching...")
-	createEmptyScripts("Searching...")
+
+	local loadingText = getLoadingText()
+	setStatus(loadingText)
+	createEmptyScripts(loadingText)
 
 	local ok, body = requestGet(buildSearchUrl())
 	if not ok then
@@ -1227,7 +1788,13 @@ searchScripts = function()
 
 	renderScripts()
 	safeSelectTab(ScriptsTab)
-	setStatus("Found " .. tostring(#state.results) .. " scripts.")
+	if state.query == "" and tostring(state.placeId or "") ~= "" then
+		setStatus("Loaded " .. tostring(#state.results) .. " " .. string.lower(getSortLabel()) .. " scripts for selected game.")
+	elseif state.query == "" then
+		setStatus("Loaded " .. tostring(#state.results) .. " " .. string.lower(getSortLabel()) .. " scripts.")
+	else
+		setStatus("Found " .. tostring(#state.results) .. " scripts.")
+	end
 	state.busy = false
 end
 
@@ -1259,12 +1826,12 @@ local searchPage = preparePage(SearchTab)
 preparePage(ScriptsTab)
 local selectedPage = preparePage(SelectedTab)
 
-local searchPanel = createPanel(searchPage, 178, 1, color("Card", Color3.fromRGB(24, 24, 27)))
+local searchPanel = createPanel(searchPage, 218, 1, color("Card", Color3.fromRGB(24, 24, 27)))
 
 ui.searchInput = createInput(
 	searchPanel,
 	"Search",
-	"Search scripts or games",
+	"Search scripts or leave blank for latest",
 	"",
 	UDim2.fromOffset(14, 12),
 	UDim2.new(1, -28, 0, 36),
@@ -1292,12 +1859,48 @@ ui.maxInput = createInput(
 	end
 )
 
-createButton(searchPanel, "Search", UDim2.fromOffset(116, 106), UDim2.fromOffset(96, 34), function()
+ui.gameInput = createInput(
+	searchPanel,
+	"Game PlaceId",
+	"Optional exact game filter",
+	"",
+	UDim2.fromOffset(116, 84),
+	UDim2.new(1, -246, 0, 34),
+	function(value)
+		local rawPlaceId = trim(value)
+		if rawPlaceId == "" then
+			state.placeId = ""
+			return
+		end
+
+		local parsedPlaceId = tonumber(rawPlaceId)
+		if parsedPlaceId then
+			state.placeId = tostring(math.floor(parsedPlaceId))
+			ui.gameInput.Text = state.placeId
+		else
+			state.placeId = ""
+			ui.gameInput.Text = ""
+			setStatus("Game filter must be a numeric PlaceId.")
+		end
+	end
+)
+
+createButton(searchPanel, "Current Game", UDim2.new(1, -116, 0, 108), UDim2.fromOffset(102, 32), function()
+	state.placeId = tostring(game.PlaceId)
+
+	if ui.gameInput then
+		ui.gameInput.Text = state.placeId
+	end
+
+	setStatus("Game filter set to current game.")
+end, true)
+
+createButton(searchPanel, "Search", UDim2.fromOffset(14, 154), UDim2.fromOffset(96, 34), function()
 	state.page = 1
 	searchScripts()
 end, false)
 
-createButton(searchPanel, "Clear", UDim2.fromOffset(222, 106), UDim2.fromOffset(82, 34), function()
+createButton(searchPanel, "Clear", UDim2.fromOffset(120, 154), UDim2.fromOffset(82, 34), function()
 	state.query = ""
 	state.results = {}
 	state.totalPages = 0
@@ -1311,6 +1914,12 @@ createButton(searchPanel, "Clear", UDim2.fromOffset(222, 106), UDim2.fromOffset(
 		ui.maxInput.Text = tostring(state.max)
 	end
 
+	if ui.gameInput then
+		ui.gameInput.Text = ""
+	end
+
+	state.placeId = ""
+
 	createEmptyScripts()
 	updateSelected()
 	setStatus("Cleared.")
@@ -1320,8 +1929,8 @@ local statusWrap = Instance.new("Frame")
 statusWrap.BackgroundColor3 = color("PrimarySoft", Color3.fromRGB(69, 26, 26))
 statusWrap.BorderSizePixel = 0
 statusWrap.ClipsDescendants = true
-statusWrap.Position = UDim2.fromOffset(14, 148)
-statusWrap.Size = UDim2.new(1, -28, 0, 22)
+statusWrap.Position = UDim2.fromOffset(214, 160)
+statusWrap.Size = UDim2.new(1, -228, 0, 22)
 statusWrap.Parent = searchPanel
 
 addCorner(statusWrap, 8)
@@ -1365,6 +1974,7 @@ createCheck(filtersPanel, "Universal", UDim2.new(0.5, 6, 0, 82), UDim2.new(0.5, 
 	updateFilterSummary()
 end)
 
+local orderBox
 local sortBox = Instance.new("TextButton")
 sortBox.Text = "Sort: Newest"
 sortBox.Font = Enum.Font.GothamMedium
@@ -1394,9 +2004,18 @@ sortBox.MouseButton1Click:Connect(function()
 	end
 	sortBox.Text = "Sort: " .. sortModes[sortIndex][1]
 	state.sortBy = sortModes[sortIndex][2]
+
+	if state.sortBy == "views" then
+		state.order = "desc"
+		if orderBox then
+			orderBox.Text = "Order: Desc"
+		end
+	end
+
+	updateFilterSummary()
 end)
 
-local orderBox = Instance.new("TextButton")
+orderBox = Instance.new("TextButton")
 orderBox.Text = "Order: Desc"
 orderBox.Font = Enum.Font.GothamMedium
 orderBox.TextSize = 12
@@ -1418,6 +2037,8 @@ orderBox.MouseButton1Click:Connect(function()
 		state.order = "desc"
 		orderBox.Text = "Order: Desc"
 	end
+
+	updateFilterSummary()
 end)
 
 local filterWrap = createPanel(searchPage, 38, 3, color("PrimarySoft", Color3.fromRGB(69, 26, 26)))
@@ -1492,6 +2113,10 @@ createButton(selectedTop, "Copy Page", UDim2.fromOffset(294, 168), UDim2.fromOff
 	end
 end, true)
 
+createButton(selectedTop, "Execute", UDim2.fromOffset(414, 168), UDim2.fromOffset(96, 30), function()
+	executeSelected()
+end, false)
+
 local featurePanel = createPanel(selectedPage, 132, 2, color("Card", Color3.fromRGB(24, 24, 27)))
 
 createText(featurePanel, {
@@ -1534,46 +2159,83 @@ ui.selectedTags = createText(tagsPanel, {
 	Size = UDim2.new(1, -28, 0, 28)
 })
 
-local previewSection = SelectedTab:CreateSection({
-	Name = "Script Preview",
-	Icon = "file",
-	Collapsed = false
+local previewPanel = createPanel(selectedPage, 340, 4, color("Card", Color3.fromRGB(24, 24, 27)))
+previewPanel.Name = "ScriptPreview"
+
+createText(previewPanel, {
+	Text = "Script Preview",
+	Font = Enum.Font.GothamBold,
+	TextSize = 14,
+	Position = UDim2.fromOffset(14, 10),
+	Size = UDim2.new(1, -150, 0, 22)
 })
 
-if previewSection and previewSection.Instance then
-	previewSection.Instance.LayoutOrder = 4
-end
+createButton(previewPanel, "Copy", UDim2.new(1, -96, 0, 8), UDim2.fromOffset(82, 28), function()
+	copyText(ui.previewRaw or "")
+end, true)
 
-if previewSection and previewSection.CreateCodeBlock then
-	ui.selectedPreview = previewSection:CreateCodeBlock({
-		Code = "Script preview will appear here.",
-		Language = "lua",
-		CopyButton = true,
-		MaxHeight = 190,
-		Wrap = true
-	})
-else
-	local previewPanel = createPanel(selectedPage, 180, 4, color("Card", Color3.fromRGB(24, 24, 27)))
+local codeFrame = Instance.new("Frame")
+codeFrame.BackgroundColor3 = color("Input", Color3.fromRGB(31, 31, 35))
+codeFrame.BorderSizePixel = 0
+codeFrame.ClipsDescendants = true
+codeFrame.Position = UDim2.fromOffset(14, 44)
+codeFrame.Size = UDim2.new(1, -28, 1, -58)
+codeFrame.Parent = previewPanel
+addCorner(codeFrame, 10)
+addStroke(codeFrame, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
 
-	createText(previewPanel, {
-		Text = "Script Preview",
-		Font = Enum.Font.GothamBold,
-		TextSize = 14,
-		Position = UDim2.fromOffset(14, 10),
-		Size = UDim2.new(1, -28, 0, 20)
-	})
+local lineWrap = Instance.new("Frame")
+lineWrap.BackgroundColor3 = color("CardAlt", Color3.fromRGB(39, 39, 42))
+lineWrap.BorderSizePixel = 0
+lineWrap.Size = UDim2.new(0, 44, 1, 0)
+lineWrap.Parent = codeFrame
 
-	ui.selectedPreview = createText(previewPanel, {
-		Text = "Script preview will appear here.",
-		Font = Enum.Font.Code,
-		TextSize = 11,
-		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
-		TextWrapped = true,
-		TextYAlignment = Enum.TextYAlignment.Top,
-		Position = UDim2.fromOffset(14, 38),
-		Size = UDim2.new(1, -28, 0, 128)
-	})
-end
+ui.previewLines = createText(lineWrap, {
+	Text = "1",
+	Font = Enum.Font.Code,
+	TextSize = 12,
+	TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+	TextXAlignment = Enum.TextXAlignment.Right,
+	TextYAlignment = Enum.TextYAlignment.Top,
+	TextWrapped = false,
+	TextTruncate = Enum.TextTruncate.None,
+	Position = UDim2.fromOffset(0, 10),
+	Size = UDim2.new(1, -8, 0, 120),
+	ClipsDescendants = false
+})
+
+ui.previewScroll = Instance.new("ScrollingFrame")
+ui.previewScroll.BackgroundTransparency = 1
+ui.previewScroll.BorderSizePixel = 0
+ui.previewScroll.Position = UDim2.fromOffset(44, 0)
+ui.previewScroll.Size = UDim2.new(1, -44, 1, 0)
+ui.previewScroll.CanvasSize = UDim2.fromOffset(0, 0)
+ui.previewScroll.ScrollBarThickness = 6
+ui.previewScroll.ScrollingDirection = Enum.ScrollingDirection.XY
+ui.previewScroll.ScrollBarImageColor3 = color("BorderStrong", Color3.fromRGB(107, 114, 128))
+ui.previewScroll.Parent = codeFrame
+
+ui.previewScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+	if ui.previewLines then
+		ui.previewLines.Position = UDim2.fromOffset(0, 10 - ui.previewScroll.CanvasPosition.Y)
+	end
+end)
+
+ui.previewCode = createText(ui.previewScroll, {
+	Text = "Script preview will appear here.",
+	Font = Enum.Font.Code,
+	TextSize = 12,
+	TextColor3 = color("Text", Color3.fromRGB(241, 245, 249)),
+	TextWrapped = false,
+	TextTruncate = Enum.TextTruncate.None,
+	TextYAlignment = Enum.TextYAlignment.Top,
+	Position = UDim2.fromOffset(10, 10),
+	Size = UDim2.fromOffset(500, 120),
+	RichText = true,
+	ClipsDescendants = false
+})
+
+ui.selectedPreview = ui.previewCode
 
 createEmptyScripts()
 updateFilterSummary()
