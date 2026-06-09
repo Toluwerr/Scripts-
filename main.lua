@@ -200,6 +200,7 @@ local RscriptsDetailsEndpoint = "https://rscripts.net/api/v2/script"
 local GameSearchEndpoint = "https://www.roblox.com/games/list-json"
 local GameIconEndpoint = "https://thumbnails.roblox.com/v1/games/icons"
 local GameOmniSearchEndpoint = "https://apis.roblox.com/search-api/omni-search"
+local RolimonsGameListEndpoint = "https://api.rolimons.com/games/v1/gamelist"
 local SiteURL = "https://scriptblox.com"
 local RscriptsSiteURL = "https://rscripts.net"
 local ImageFolder = "ScriptBloxFinderImages"
@@ -232,6 +233,11 @@ local state = {
 	gameMax = 18,
 	gameResults = {},
 	gameBusy = false,
+	rolimonsGamesLoaded = false,
+	rolimonsGames = {},
+	gameLastError = "",
+	gameSearchDebug = "",
+	gameBusyToken = 0,
 	liveEnabled = true,
 	liveInterval = 25,
 	liveIdleInterval = 25,
@@ -2906,10 +2912,14 @@ local function getGamePlaceId(gameData)
 	return tostring(firstNonEmpty(
 		gameData.PlaceId,
 		gameData.placeId,
+		gameData.RootPlaceId,
 		gameData.rootPlaceId,
 		gameData.rootPlaceID,
 		gameData.rootPlace,
-		gameData.playRootPlaceId
+		gameData.playRootPlaceId,
+		gameData.primaryPlaceId,
+		gameData.Place,
+		gameData.place
 	))
 end
 
@@ -3049,6 +3059,172 @@ local function parseGamesResponse(decoded)
 
 	return output
 end
+
+local function normalizeRolimonsGame(placeId, entry)
+	if type(entry) ~= "table" then
+		return nil
+	end
+
+	local name = firstNonEmpty(entry.name, entry.Name, entry.title, entry.Title, entry[1])
+	if name == "" then
+		return nil
+	end
+
+	local image = firstNonEmpty(entry.image, entry.Image, entry.imageUrl, entry.thumbnail, entry.thumbnailUrl, entry.iconUrl)
+	for _, value in ipairs(entry) do
+		if type(value) == "string" and value ~= name and (value:find("http", 1, true) or value:find("rbxcdn", 1, true)) then
+			image = value
+			break
+		end
+	end
+
+	local playing = tonumber(entry.playing or entry.players or entry.playerCount or entry.PlayerCount or entry.active or entry.ccu or entry[2] or 0) or 0
+	local visits = tonumber(entry.visits or entry.totalVisits or entry.visitCount or entry.Visits or entry[3] or 0) or 0
+	local universeId = tostring(firstNonEmpty(entry.universeId, entry.UniverseId, entry.universe_id, entry[4]))
+
+	return {
+		Name = name,
+		PlaceId = tostring(placeId),
+		UniverseId = universeId,
+		Image = image,
+		Playing = playing,
+		Visits = visits,
+		Creator = firstNonEmpty(entry.creatorName, entry.CreatorName, entry.creator),
+		Description = firstNonEmpty(entry.description, entry.Description, "")
+	}
+end
+
+local function parseRolimonsGameList(decoded)
+	local output = {}
+
+	if type(decoded) ~= "table" or type(decoded.games) ~= "table" then
+		return output
+	end
+
+	for placeId, entry in pairs(decoded.games) do
+		local normalized = normalizeRolimonsGame(placeId, entry)
+		if normalized then
+			table.insert(output, normalized)
+		end
+	end
+
+	table.sort(output, function(a, b)
+		return (tonumber(a.Playing) or 0) > (tonumber(b.Playing) or 0)
+	end)
+
+	return output
+end
+
+local function loadRolimonsGames()
+	if state.rolimonsGamesLoaded and type(state.rolimonsGames) == "table" then
+		return true
+	end
+
+	local ok, body = requestGet(RolimonsGameListEndpoint, {
+		["Accept"] = "application/json",
+		["User-Agent"] = "Roblox/WinInet"
+	})
+
+	if not ok or type(body) ~= "string" then
+		state.gameLastError = "Rolimon game list request failed."
+		return false
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" then
+		state.gameLastError = "Rolimon game list decode failed."
+		return false
+	end
+
+	local parsed = parseRolimonsGameList(decoded)
+	if #parsed == 0 then
+		state.gameLastError = "Rolimon game list returned no games."
+		return false
+	end
+
+	state.rolimonsGames = parsed
+	state.rolimonsGamesLoaded = true
+	return true
+end
+
+local function localGameSearch(query, maxResults)
+	query = trim(query or ""):lower()
+	maxResults = tonumber(maxResults) or state.gameMax
+
+	if query == "" then
+		return {}
+	end
+
+	local terms = {}
+	for term in query:gmatch("%S+") do
+		table.insert(terms, term)
+	end
+
+	local scored = {}
+
+	for _, gameData in ipairs(state.rolimonsGames or {}) do
+		local name = getGameTitle(gameData)
+		local searchable = (name .. " " .. tostring(getGamePlaceId(gameData))):lower()
+		local matched = true
+		local score = tonumber(gameData.Playing) or 0
+
+		for _, term in ipairs(terms) do
+			local startIndex = searchable:find(term, 1, true)
+			if not startIndex then
+				matched = false
+				break
+			end
+
+			if startIndex == 1 then
+				score += 100000000
+			else
+				score += 1000000
+			end
+		end
+
+		if matched then
+			table.insert(scored, {
+				score = score,
+				game = gameData
+			})
+		end
+	end
+
+	table.sort(scored, function(a, b)
+		if a.score == b.score then
+			return getGameTitle(a.game) < getGameTitle(b.game)
+		end
+
+		return a.score > b.score
+	end)
+
+	local page = math.max(1, tonumber(state.gamePage) or 1)
+	local startIndex = ((page - 1) * maxResults) + 1
+	local results = {}
+
+	for index = startIndex, math.min(#scored, startIndex + maxResults - 1) do
+		table.insert(results, scored[index].game)
+	end
+
+	return results
+end
+
+local function tryRolimonsGameSearch()
+	if not loadRolimonsGames() then
+		return {}
+	end
+
+	local results = localGameSearch(state.gameQuery, state.gameMax)
+	if #results > 0 then
+		state.gameSearchDebug = "Rolimon local search"
+	end
+
+	return results
+end
+
 
 local function hydrateGameIcons(games)
 	local universeIds = {}
@@ -3281,6 +3457,16 @@ renderGames = function()
 		end
 	)
 
+	pcall(function()
+		ui.gamesSearchInput.InputBegan:Connect(function(input)
+			if input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
+				state.gameQuery = trim(ui.gamesSearchInput.Text)
+				state.gamePage = 1
+				searchGames()
+			end
+		end)
+	end)
+
 	createButton(top, "Search", UDim2.new(1, -224, 0, 84), UDim2.fromOffset(104, 30), function()
 		state.gamePage = 1
 		searchGames()
@@ -3407,6 +3593,9 @@ searchGames = function()
 
 		if decodedOk and type(decoded) == "table" then
 			results = parseGamesResponse(decoded)
+			if #results > 0 then
+				state.gameSearchDebug = "Roblox list search"
+			end
 		end
 	end
 
@@ -3420,8 +3609,15 @@ searchGames = function()
 
 			if fallbackDecodedOk and type(fallbackDecoded) == "table" then
 				results = parseGamesResponse(fallbackDecoded)
+				if #results > 0 then
+					state.gameSearchDebug = "Roblox omni search"
+				end
 			end
 		end
+	end
+
+	if #results == 0 then
+		results = tryRolimonsGameSearch()
 	end
 
 	if not results or #results == 0 then
@@ -3429,7 +3625,7 @@ searchGames = function()
 		state.gameResults = {}
 		renderGames()
 		safeSelectTab(GamesTab)
-		setStatus("No games found.")
+		setStatus(state.gameLastError ~= "" and state.gameLastError or "No games found.")
 		return
 	end
 
