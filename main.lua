@@ -168,13 +168,13 @@ end
 
 pcall(function()
 	if Google.SetTheme then
-		Google.SetTheme("Red")
+		Google.SetTheme("DarkGoogle")
+	elseif Google.Themes and Google.Themes.DarkGoogle then
+		Google.ActiveTheme = "DarkGoogle"
+		Google.Theme = Google.Themes.DarkGoogle
 	elseif Google.Themes and Google.Themes.DarkRed then
-		Google.ActiveTheme = "Red"
-		Google.Theme = Google.Themes.Red
-	elseif Google.Themes and Google.Themes.Red then
-		Google.ActiveTheme = "Red"
-		Google.Theme = Google.Themes.Red
+		Google.ActiveTheme = "DarkRed"
+		Google.Theme = Google.Themes.DarkRed
 	end
 end)
 
@@ -272,17 +272,17 @@ local function theme()
 end
 
 local PaletteOverrides = {
-	Card = Color3.fromRGB(28, 16, 16),
-	CardAlt = Color3.fromRGB(36, 21, 21),
-	Input = Color3.fromRGB(22, 11, 11),
-	Hover = Color3.fromRGB(48, 27, 27),
-	Border = Color3.fromRGB(76, 43, 43),
-	BorderStrong = Color3.fromRGB(102, 59, 59),
-	Primary = Color3.fromRGB(248, 67, 55),
-	PrimaryHover = Color3.fromRGB(255, 84, 72),
-	PrimarySoft = Color3.fromRGB(136, 43, 39),
-	Text = Color3.fromRGB(255, 244, 244),
-	Muted = Color3.fromRGB(206, 166, 164)
+	Card = Color3.fromRGB(17, 24, 39),
+	CardAlt = Color3.fromRGB(30, 41, 59),
+	Input = Color3.fromRGB(15, 23, 42),
+	Hover = Color3.fromRGB(37, 49, 75),
+	Border = Color3.fromRGB(51, 65, 85),
+	BorderStrong = Color3.fromRGB(71, 85, 105),
+	Primary = Color3.fromRGB(67, 135, 244),
+	PrimaryHover = Color3.fromRGB(95, 158, 255),
+	PrimarySoft = Color3.fromRGB(30, 58, 105),
+	Text = Color3.fromRGB(241, 245, 249),
+	Muted = Color3.fromRGB(148, 163, 184)
 }
 
 local function color(name, fallback)
@@ -309,13 +309,13 @@ local function setStatus(text)
 
 		local lowered = string.lower(text)
 		if lowered:find("ready", 1, true) then
-			ui.status.TextColor3 = color("Muted", Color3.fromRGB(206, 166, 164))
+			ui.status.TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184))
 		elseif lowered:find("failed", 1, true) or lowered:find("error", 1, true) then
-			ui.status.TextColor3 = color("Primary", Color3.fromRGB(243, 78, 64))
+			ui.status.TextColor3 = color("Primary", Color3.fromRGB(67, 135, 244))
 		elseif lowered:find("added", 1, true) or lowered:find("loaded", 1, true) or lowered:find("found", 1, true) then
 			ui.status.TextColor3 = color("Text", Color3.fromRGB(248, 238, 237))
 		else
-			ui.status.TextColor3 = color("Primary", Color3.fromRGB(243, 78, 64))
+			ui.status.TextColor3 = color("Primary", Color3.fromRGB(67, 135, 244))
 		end
 	else
 		print("[Script Finder] " .. text)
@@ -340,16 +340,16 @@ local function safeSelectTab(tab)
 			end
 			if otherTab.Button then
 				otherTab.Button.BackgroundTransparency = active and 0 or 1
-				otherTab.Button.BackgroundColor3 = active and color("PrimarySoft", Color3.fromRGB(122, 57, 53)) or color("Sidebar", Color3.fromRGB(14, 14, 18))
+				otherTab.Button.BackgroundColor3 = active and color("PrimarySoft", Color3.fromRGB(30, 58, 105)) or color("Sidebar", Color3.fromRGB(14, 14, 18))
 			end
 			if otherTab.Accent then
 				otherTab.Accent.Visible = active
 			end
 			if otherTab.TextLabel then
-				otherTab.TextLabel.TextColor3 = active and color("Primary", Color3.fromRGB(243, 78, 64)) or color("Muted", Color3.fromRGB(148, 163, 184))
+				otherTab.TextLabel.TextColor3 = active and color("Primary", Color3.fromRGB(67, 135, 244)) or color("Muted", Color3.fromRGB(148, 163, 184))
 			end
 			if otherTab.IconLabel and Google.SetIconColor then
-				Google.SetIconColor(otherTab.IconLabel, active and color("Primary", Color3.fromRGB(243, 78, 64)) or color("Muted", Color3.fromRGB(148, 163, 184)))
+				Google.SetIconColor(otherTab.IconLabel, active and color("Primary", Color3.fromRGB(67, 135, 244)) or color("Muted", Color3.fromRGB(148, 163, 184)))
 			end
 			otherTab.Active = active
 		end
@@ -573,10 +573,10 @@ end
 
 local function addCorner(parent, radius)
 	local corner = Instance.new("UICorner")
-	local value = radius or 8
+	local value = radius or 6
 
 	if value < 20 then
-		value = math.min(value, 8)
+		value = math.min(value, 7)
 	end
 
 	corner.CornerRadius = UDim.new(0, value)
@@ -587,7 +587,7 @@ end
 local function addStroke(parent, strokeColor, transparency, thickness)
 	local stroke = Instance.new("UIStroke")
 	stroke.Color = strokeColor
-	stroke.Transparency = math.max(transparency or 0.35, 0.28)
+	stroke.Transparency = math.max(transparency or 0.45, 0.32)
 	stroke.Thickness = thickness or 1
 	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	stroke.Parent = parent
@@ -618,7 +618,7 @@ end
 local function createText(parent, data)
 	local label = Instance.new("TextLabel")
 	label.BackgroundTransparency = data.BackgroundTransparency or 1
-	label.BackgroundColor3 = data.BackgroundColor3 or color("Card", Color3.fromRGB(28, 16, 16))
+	label.BackgroundColor3 = data.BackgroundColor3 or color("Card", Color3.fromRGB(17, 24, 39))
 	label.BorderSizePixel = 0
 	label.Font = data.Font or Enum.Font.GothamMedium
 	label.Text = data.Text or ""
@@ -638,7 +638,7 @@ end
 
 local function createPanel(parent, height, layoutOrder, backgroundColor)
 	local panel = Instance.new("Frame")
-	panel.BackgroundColor3 = backgroundColor or color("Card", Color3.fromRGB(28, 16, 16))
+	panel.BackgroundColor3 = backgroundColor or color("Card", Color3.fromRGB(17, 24, 39))
 	panel.BorderSizePixel = 0
 	panel.Size = UDim2.new(1, -10, 0, height)
 	panel.LayoutOrder = layoutOrder or 0
@@ -646,7 +646,7 @@ local function createPanel(parent, height, layoutOrder, backgroundColor)
 	panel.Parent = parent
 
 	addCorner(panel, 8)
-	addStroke(panel, color("Border", Color3.fromRGB(76, 43, 43)), 0.36, 1)
+	addStroke(panel, color("Border", Color3.fromRGB(51, 65, 85)), 0.36, 1)
 
 	return panel
 end
@@ -657,8 +657,8 @@ local function createButton(parent, text, position, size, callback, soft)
 	button.Text = text
 	button.Font = Enum.Font.GothamBold
 	button.TextSize = 13
-	button.TextColor3 = Color3.fromRGB(255, 245, 245)
-	button.BackgroundColor3 = soft and color("PrimarySoft", Color3.fromRGB(136, 43, 39)) or color("Primary", Color3.fromRGB(248, 67, 55))
+	button.TextColor3 = Color3.fromRGB(241, 245, 249)
+	button.BackgroundColor3 = soft and color("PrimarySoft", Color3.fromRGB(30, 58, 105)) or color("Primary", Color3.fromRGB(67, 135, 244))
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
 	button.Position = position
@@ -666,10 +666,10 @@ local function createButton(parent, text, position, size, callback, soft)
 	button.Parent = parent
 
 	addCorner(button, 8)
-	addStroke(button, color("Border", Color3.fromRGB(76, 43, 43)), soft and 0.42 or 0.35, 1)
+	addStroke(button, color("Border", Color3.fromRGB(51, 65, 85)), soft and 0.42 or 0.35, 1)
 
 	local normal = button.BackgroundColor3
-	local hover = soft and Color3.fromRGB(156, 51, 46) or color("PrimaryHover", Color3.fromRGB(255, 84, 72))
+	local hover = soft and Color3.fromRGB(37, 49, 75) or color("PrimaryHover", Color3.fromRGB(95, 158, 255))
 
 	button.MouseEnter:Connect(function()
 		button.BackgroundColor3 = hover
@@ -688,7 +688,7 @@ end
 
 local function forceInputTextStyle(box)
 	local inputTextColor = Color3.fromRGB(255, 255, 255)
-	local placeholderColor = Color3.fromRGB(190, 140, 138)
+	local placeholderColor = Color3.fromRGB(148, 163, 184)
 
 	local function apply()
 		if not box or not box.Parent then
@@ -731,13 +731,13 @@ local function createInput(parent, title, placeholder, defaultValue, position, s
 
 	local box = Instance.new("TextBox")
 	box.Name = safeName(title) .. "Input"
-	box.BackgroundColor3 = color("Input", Color3.fromRGB(22, 11, 11))
+	box.BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))
 	box.BorderSizePixel = 0
 	box.ClearTextOnFocus = false
 	box.ClipsDescendants = true
 	box.Font = Enum.Font.GothamSemibold
 	box.PlaceholderText = placeholder or ""
-	box.PlaceholderColor3 = Color3.fromRGB(190, 140, 138)
+	box.PlaceholderColor3 = Color3.fromRGB(148, 163, 184)
 	box.Text = defaultValue or ""
 	box.TextColor3 = Color3.fromRGB(255, 255, 255)
 	box.TextTransparency = 0
@@ -757,7 +757,7 @@ local function createInput(parent, title, placeholder, defaultValue, position, s
 	end)
 
 	addCorner(box, 12)
-	addStroke(box, color("Border", Color3.fromRGB(76, 43, 43)), 0.16, 1)
+	addStroke(box, color("Border", Color3.fromRGB(51, 65, 85)), 0.16, 1)
 	addPadding(box, 14, 0, 14, 0)
 	forceInputTextStyle(box)
 
@@ -770,7 +770,7 @@ end
 
 local function createCheck(parent, title, position, size, defaultValue, callback)
 	local button = Instance.new("TextButton")
-	button.BackgroundColor3 = color("Input", Color3.fromRGB(22, 11, 11))
+	button.BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
 	button.Text = ""
@@ -779,10 +779,10 @@ local function createCheck(parent, title, position, size, defaultValue, callback
 	button.Parent = parent
 
 	addCorner(button, 8)
-	addStroke(button, color("Border", Color3.fromRGB(76, 43, 43)), 0.36, 1)
+	addStroke(button, color("Border", Color3.fromRGB(51, 65, 85)), 0.36, 1)
 
 	local box = Instance.new("Frame")
-	box.BackgroundColor3 = defaultValue and color("Primary", Color3.fromRGB(248, 67, 55)) or color("CardAlt", Color3.fromRGB(36, 21, 21))
+	box.BackgroundColor3 = defaultValue and color("Primary", Color3.fromRGB(67, 135, 244)) or color("CardAlt", Color3.fromRGB(30, 41, 59))
 	box.BorderSizePixel = 0
 	box.Position = UDim2.fromOffset(12, 8)
 	box.Size = UDim2.fromOffset(20, 20)
@@ -810,7 +810,7 @@ local function createCheck(parent, title, position, size, defaultValue, callback
 	local value = defaultValue == true
 
 	local function refresh()
-		box.BackgroundColor3 = value and color("Primary", Color3.fromRGB(248, 67, 55)) or color("CardAlt", Color3.fromRGB(36, 21, 21))
+		box.BackgroundColor3 = value and color("Primary", Color3.fromRGB(67, 135, 244)) or color("CardAlt", Color3.fromRGB(30, 41, 59))
 		mark.Text = value and "✓" or ""
 	end
 
@@ -855,7 +855,7 @@ local function preparePage(tab)
 	page.BackgroundTransparency = 1
 	page.BorderSizePixel = 0
 	page.ScrollBarThickness = 4
-	page.ScrollBarImageColor3 = color("BorderStrong", Color3.fromRGB(102, 59, 59))
+	page.ScrollBarImageColor3 = color("BorderStrong", Color3.fromRGB(71, 85, 105))
 	page.CanvasSize = UDim2.fromOffset(0, 0)
 	page.ClipsDescendants = true
 
@@ -2347,7 +2347,7 @@ local function createEmptyScripts(text)
 	clearScriptsPage()
 
 	local page = ScriptsTab.Page
-	local panel = createPanel(page, 96, 1, color("Card", Color3.fromRGB(28, 16, 16)))
+	local panel = createPanel(page, 96, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 	panel.Name = "EmptyScripts"
 
 	createText(panel, {
@@ -2373,21 +2373,21 @@ local function createScriptCard(parent, scriptData, index)
 	card.Name = "ScriptCard_" .. tostring(index)
 	card.AutoButtonColor = false
 	card.Text = ""
-	card.BackgroundColor3 = color("Card", Color3.fromRGB(28, 16, 16))
+	card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
 	card.BorderSizePixel = 0
 	card.ClipsDescendants = true
 	card.LayoutOrder = index
 	card.Parent = parent
 
 	addCorner(card, 12)
-	addStroke(card, color("Border", Color3.fromRGB(76, 43, 43)), 0.14, 1)
+	addStroke(card, color("Border", Color3.fromRGB(51, 65, 85)), 0.14, 1)
 
 	local title = getScriptTitle(scriptData)
 	local imageAsset = resolveImage(getScriptImage(scriptData), getScriptIdentifier(scriptData) or title)
 
 	local thumbnail = Instance.new("ImageLabel")
 	thumbnail.Name = "Thumbnail"
-	thumbnail.BackgroundColor3 = color("CardAlt", Color3.fromRGB(36, 21, 21))
+	thumbnail.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
 	thumbnail.BorderSizePixel = 0
 	thumbnail.Position = UDim2.fromOffset(10, 10)
 	thumbnail.Size = UDim2.new(1, -20, 1, -46)
@@ -2396,7 +2396,7 @@ local function createScriptCard(parent, scriptData, index)
 	thumbnail.Parent = card
 
 	addCorner(thumbnail, 10)
-	addStroke(thumbnail, color("Border", Color3.fromRGB(76, 43, 43)), 0.2, 1)
+	addStroke(thumbnail, color("Border", Color3.fromRGB(51, 65, 85)), 0.2, 1)
 
 	if imageAsset == "" then
 		createText(thumbnail, {
@@ -2420,11 +2420,11 @@ local function createScriptCard(parent, scriptData, index)
 	})
 
 	card.MouseEnter:Connect(function()
-		card.BackgroundColor3 = color("Hover", Color3.fromRGB(36, 21, 21))
+		card.BackgroundColor3 = color("Hover", Color3.fromRGB(30, 41, 59))
 	end)
 
 	card.MouseLeave:Connect(function()
-		card.BackgroundColor3 = color("Card", Color3.fromRGB(28, 16, 16))
+		card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
 	end)
 
 	card.MouseButton1Click:Connect(function()
@@ -2473,21 +2473,21 @@ local function createFavoriteCard(parent, item, index)
 	card.Name = "FavoriteCard_" .. tostring(index)
 	card.AutoButtonColor = false
 	card.Text = ""
-	card.BackgroundColor3 = color("Card", Color3.fromRGB(28, 16, 16))
+	card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
 	card.BorderSizePixel = 0
 	card.ClipsDescendants = true
 	card.LayoutOrder = index
 	card.Parent = parent
 
 	addCorner(card, 12)
-	addStroke(card, color("Border", Color3.fromRGB(76, 43, 43)), 0.14, 1)
+	addStroke(card, color("Border", Color3.fromRGB(51, 65, 85)), 0.14, 1)
 
 	local title = firstNonEmpty(item.Title, getScriptTitle(data))
 	local imageAsset = resolveImage(firstNonEmpty(item.Image, getScriptImage(data)), item.Id or getScriptIdentifier(data) or title)
 
 	local thumbnail = Instance.new("ImageLabel")
 	thumbnail.Name = "Thumbnail"
-	thumbnail.BackgroundColor3 = color("CardAlt", Color3.fromRGB(36, 21, 21))
+	thumbnail.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
 	thumbnail.BorderSizePixel = 0
 	thumbnail.Position = UDim2.fromOffset(10, 10)
 	thumbnail.Size = UDim2.new(1, -20, 0, 82)
@@ -2495,7 +2495,7 @@ local function createFavoriteCard(parent, item, index)
 	thumbnail.Image = imageAsset
 	thumbnail.Parent = card
 	addCorner(thumbnail, 10)
-	addStroke(thumbnail, color("Border", Color3.fromRGB(76, 43, 43)), 0.2, 1)
+	addStroke(thumbnail, color("Border", Color3.fromRGB(51, 65, 85)), 0.2, 1)
 
 	if imageAsset == "" then
 		createText(thumbnail, {
@@ -2535,11 +2535,11 @@ local function createFavoriteCard(parent, item, index)
 	remove.TextSize = 11
 
 	card.MouseEnter:Connect(function()
-		card.BackgroundColor3 = color("Hover", Color3.fromRGB(36, 21, 21))
+		card.BackgroundColor3 = color("Hover", Color3.fromRGB(30, 41, 59))
 	end)
 
 	card.MouseLeave:Connect(function()
-		card.BackgroundColor3 = color("Card", Color3.fromRGB(28, 16, 16))
+		card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
 	end)
 
 	card.MouseButton1Click:Connect(function()
@@ -2559,14 +2559,14 @@ renderFavorites = function()
 	local page = FavoritesTab.Page
 	local visible = getVisibleFavorites()
 
-	local top = createPanel(page, 116, 1, color("Card", Color3.fromRGB(28, 16, 16)))
+	local top = createPanel(page, 116, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 	top.Name = "FavoritesTop"
 
 	createText(top, {
 		Text = "Favorite scripts",
 		Font = Enum.Font.GothamBold,
 		TextSize = 15,
-		TextColor3 = color("Primary", Color3.fromRGB(243, 78, 64)),
+		TextColor3 = color("Primary", Color3.fromRGB(67, 135, 244)),
 		Position = UDim2.fromOffset(14, 10),
 		Size = UDim2.new(1, -28, 0, 22)
 	})
@@ -2575,7 +2575,7 @@ renderFavorites = function()
 		Text = state.favoriteMode .. "  •  " .. tostring(#visible) .. " saved",
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
-		TextColor3 = color("Primary", Color3.fromRGB(243, 78, 64)),
+		TextColor3 = color("Primary", Color3.fromRGB(67, 135, 244)),
 		Position = UDim2.fromOffset(14, 36),
 		Size = UDim2.new(1, -28, 0, 18)
 	})
@@ -2596,7 +2596,7 @@ renderFavorites = function()
 		Text = "Current PlaceId: " .. currentPlaceId(),
 		Font = Enum.Font.Gotham,
 		TextSize = 11,
-		TextColor3 = color("Muted", Color3.fromRGB(206, 166, 164)),
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
 		TextXAlignment = Enum.TextXAlignment.Right,
 		Position = UDim2.new(1, -292, 0, 72),
 		Size = UDim2.fromOffset(278, 18),
@@ -2604,7 +2604,7 @@ renderFavorites = function()
 	})
 
 	if #visible == 0 then
-		local empty = createPanel(page, 96, 2, color("Card", Color3.fromRGB(28, 16, 16)))
+		local empty = createPanel(page, 96, 2, color("Card", Color3.fromRGB(17, 24, 39)))
 
 		createText(empty, {
 			Text = state.favoriteMode == "Universal" and "No universal favorites yet" or "No favorites for this game yet",
@@ -2660,24 +2660,27 @@ local function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
 	local button = Instance.new("TextButton")
 	button.Name = source .. "SourceButton"
 	button.Text = ""
-	button.BackgroundColor3 = active and color("Primary", Color3.fromRGB(248, 67, 55)) or color("CardAlt", Color3.fromRGB(36, 21, 21))
+	button.BackgroundColor3 = active and color("PrimarySoft", Color3.fromRGB(30, 58, 105)) or color("CardAlt", Color3.fromRGB(30, 41, 59))
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
-	button.Position = UDim2.new(1, xOffset, 0, 10)
-	button.Size = UDim2.fromOffset(42, 42)
+	button.Position = UDim2.new(1, xOffset, 0, 8)
+	button.Size = UDim2.fromOffset(46, 46)
 	button.Parent = parent
-	addCorner(button, 21)
+	addCorner(button, 8)
+	addStroke(button, active and color("Primary", Color3.fromRGB(67, 135, 244)) or color("Border", Color3.fromRGB(51, 65, 85)), active and 0.08 or 0.28, 1)
 
 	local img = Instance.new("ImageLabel")
 	img.Name = "Logo"
-	img.BackgroundTransparency = 1
+	img.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	img.BackgroundTransparency = 0
 	img.BorderSizePixel = 0
-	img.Position = UDim2.fromOffset(6, 6)
-	img.Size = UDim2.fromOffset(30, 30)
+	img.Position = UDim2.fromOffset(5, 5)
+	img.Size = UDim2.fromOffset(36, 36)
 	img.Image = logoUrl
 	img.ImageTransparency = 0
 	img.ScaleType = Enum.ScaleType.Fit
 	img.Parent = button
+	addCorner(img, 7)
 
 	if source == "scriptblox" then
 		ui.sourceScriptBloxButton = button
@@ -2704,14 +2707,14 @@ local function renderScripts()
 
 	local page = ScriptsTab.Page
 
-	local top = createPanel(page, 96, 1, color("Card", Color3.fromRGB(28, 16, 16)))
+	local top = createPanel(page, 96, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 	top.Name = "ScriptsTop"
 
 	createText(top, {
 		Text = getScriptsTitle(),
 		Font = Enum.Font.GothamBold,
 		TextSize = 15,
-		TextColor3 = color("Primary", Color3.fromRGB(243, 78, 64)),
+		TextColor3 = color("Primary", Color3.fromRGB(67, 135, 244)),
 		Position = UDim2.fromOffset(14, 10),
 		Size = UDim2.new(1, -28, 0, 22)
 	})
@@ -2720,13 +2723,13 @@ local function renderScripts()
 		Text = "Page " .. tostring(state.page) .. " / " .. tostring(state.totalPages > 0 and state.totalPages or "?") .. "  •  " .. tostring(#state.results) .. " results",
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
-		TextColor3 = color("Muted", Color3.fromRGB(206, 166, 164)),
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
 		Position = UDim2.fromOffset(14, 38),
 		Size = UDim2.new(1, -300, 0, 18)
 	})
 
-	createSourceCircle(top, "scriptblox", -104, "SB", ScriptBloxLogoURL)
-	createSourceCircle(top, "rscripts", -58, "R", RscriptsLogoURL)
+	createSourceCircle(top, "scriptblox", -114, "SB", ScriptBloxLogoURL)
+	createSourceCircle(top, "rscripts", -60, "R", RscriptsLogoURL)
 
 	createButton(top, "Previous", UDim2.new(1, -214, 0, 56), UDim2.fromOffset(96, 28), function()
 		if state.page <= 1 then
@@ -2766,7 +2769,7 @@ local function renderScripts()
 	end
 
 	if #state.results == 0 then
-		local empty = createPanel(page, 92, 3, color("Card", Color3.fromRGB(28, 16, 16)))
+		local empty = createPanel(page, 92, 3, color("Card", Color3.fromRGB(17, 24, 39)))
 		empty.Name = "NoResults"
 
 		createText(empty, {
@@ -2974,7 +2977,7 @@ preparePage(ScriptsTab)
 local selectedPage = preparePage(SelectedTab)
 preparePage(FavoritesTab)
 
-local searchPanel = createPanel(searchPage, 290, 1, color("Card", Color3.fromRGB(28, 16, 16)))
+local searchPanel = createPanel(searchPage, 290, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 
 ui.searchInput = createInput(
 	searchPanel,
@@ -3095,7 +3098,7 @@ createButton(searchPanel, "Clear", UDim2.fromOffset(120, 226), UDim2.fromOffset(
 end, true)
 
 local statusWrap = Instance.new("Frame")
-statusWrap.BackgroundColor3 = color("CardAlt", Color3.fromRGB(36, 21, 21))
+statusWrap.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
 statusWrap.BorderSizePixel = 0
 statusWrap.ClipsDescendants = true
 statusWrap.Position = UDim2.fromOffset(214, 232)
@@ -3103,18 +3106,18 @@ statusWrap.Size = UDim2.new(1, -228, 0, 22)
 statusWrap.Parent = searchPanel
 
 addCorner(statusWrap, 10)
-addStroke(statusWrap, color("Border", Color3.fromRGB(76, 43, 43)), 0.18, 1)
+addStroke(statusWrap, color("Border", Color3.fromRGB(51, 65, 85)), 0.18, 1)
 
 ui.status = createText(statusWrap, {
 	Text = "Ready.",
 	Font = Enum.Font.GothamMedium,
 	TextSize = 12,
-	TextColor3 = color("Primary", Color3.fromRGB(243, 78, 64)),
+	TextColor3 = color("Primary", Color3.fromRGB(67, 135, 244)),
 	Position = UDim2.fromOffset(10, 0),
 	Size = UDim2.new(1, -20, 1, 0)
 })
 
-local filtersPanel = createPanel(searchPage, 162, 2, color("Card", Color3.fromRGB(28, 16, 16)))
+local filtersPanel = createPanel(searchPage, 162, 2, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(filtersPanel, {
 	Text = "Filters",
@@ -3157,7 +3160,7 @@ sortBox.Position = UDim2.fromOffset(14, 122)
 sortBox.Size = UDim2.new(0.5, -20, 0, 30)
 sortBox.Parent = filtersPanel
 addCorner(sortBox, 10)
-addStroke(sortBox, color("Border", Color3.fromRGB(76, 43, 43)), 0.08, 1)
+addStroke(sortBox, color("Border", Color3.fromRGB(51, 65, 85)), 0.08, 1)
 
 local sortModes = {
 	{"Newest", "updatedAt"},
@@ -3197,7 +3200,7 @@ orderBox.Position = UDim2.new(0.5, 6, 0, 122)
 orderBox.Size = UDim2.new(0.5, -20, 0, 30)
 orderBox.Parent = filtersPanel
 addCorner(orderBox, 10)
-addStroke(orderBox, color("Border", Color3.fromRGB(76, 43, 43)), 0.08, 1)
+addStroke(orderBox, color("Border", Color3.fromRGB(51, 65, 85)), 0.08, 1)
 
 orderBox.MouseButton1Click:Connect(function()
 	if state.order == "desc" then
@@ -3220,7 +3223,7 @@ ui.filterSummary.Visible = false
 ui.filterSummary.Size = UDim2.fromOffset(0, 0)
 ui.filterSummary.Parent = searchPage
 
-local startupPanel = createPanel(searchPage, 74, 3, color("Card", Color3.fromRGB(28, 16, 16)))
+local startupPanel = createPanel(searchPage, 74, 3, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(startupPanel, {
 	Text = "Startup",
@@ -3234,10 +3237,10 @@ createCheck(startupPanel, "Auto Reopen", UDim2.fromOffset(14, 36), UDim2.new(1, 
 	setAutoRerun(value)
 end)
 
-local selectedTop = createPanel(selectedPage, 248, 1, color("Card", Color3.fromRGB(28, 16, 16)))
+local selectedTop = createPanel(selectedPage, 248, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 
 ui.selectedImage = Instance.new("ImageLabel")
-ui.selectedImage.BackgroundColor3 = color("CardAlt", Color3.fromRGB(36, 21, 21))
+ui.selectedImage.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
 ui.selectedImage.BorderSizePixel = 0
 ui.selectedImage.Position = UDim2.fromOffset(14, 14)
 ui.selectedImage.Size = UDim2.fromOffset(142, 142)
@@ -3246,16 +3249,16 @@ ui.selectedImage.Image = ""
 ui.selectedImage.Parent = selectedTop
 
 addCorner(ui.selectedImage, 12)
-addStroke(ui.selectedImage, color("Border", Color3.fromRGB(76, 43, 43)), 0.18, 1)
+addStroke(ui.selectedImage, color("Border", Color3.fromRGB(51, 65, 85)), 0.18, 1)
 
 local authorWrap = Instance.new("Frame")
-authorWrap.BackgroundColor3 = color("Input", Color3.fromRGB(22, 11, 11))
+authorWrap.BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))
 authorWrap.BorderSizePixel = 0
 authorWrap.Position = UDim2.fromOffset(104, 104)
 authorWrap.Size = UDim2.fromOffset(46, 46)
 authorWrap.Parent = selectedTop
 addCorner(authorWrap, 23)
-addStroke(authorWrap, color("Border", Color3.fromRGB(76, 43, 43)), 0.16, 1)
+addStroke(authorWrap, color("Border", Color3.fromRGB(51, 65, 85)), 0.16, 1)
 
 ui.selectedAuthorImage = Instance.new("ImageLabel")
 ui.selectedAuthorImage.BackgroundTransparency = 1
@@ -3279,7 +3282,7 @@ ui.selectedGame = createText(selectedTop, {
 	Text = "Select a script from the Scripts tab.",
 	Font = Enum.Font.GothamMedium,
 	TextSize = 12,
-	TextColor3 = color("Primary", Color3.fromRGB(243, 78, 64)),
+	TextColor3 = color("Primary", Color3.fromRGB(67, 135, 244)),
 	Position = UDim2.fromOffset(174, 40),
 	Size = UDim2.new(1, -188, 0, 18)
 })
@@ -3328,7 +3331,7 @@ ui.favoriteButton = createButton(selectedTop, "Favorite Script", UDim2.fromOffse
 	favoriteSelected()
 end, true)
 
-local featurePanel = createPanel(selectedPage, 132, 2, color("Card", Color3.fromRGB(28, 16, 16)))
+local featurePanel = createPanel(selectedPage, 132, 2, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(featurePanel, {
 	Text = "Features",
@@ -3349,7 +3352,7 @@ ui.selectedFeatures = createText(featurePanel, {
 	Size = UDim2.new(1, -28, 0, 82)
 })
 
-local tagsPanel = createPanel(selectedPage, 72, 3, color("Card", Color3.fromRGB(28, 16, 16)))
+local tagsPanel = createPanel(selectedPage, 72, 3, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(tagsPanel, {
 	Text = "Tags",
@@ -3370,7 +3373,7 @@ ui.selectedTags = createText(tagsPanel, {
 	Size = UDim2.new(1, -28, 0, 28)
 })
 
-local previewPanel = createPanel(selectedPage, 340, 4, color("Card", Color3.fromRGB(28, 16, 16)))
+local previewPanel = createPanel(selectedPage, 340, 4, color("Card", Color3.fromRGB(17, 24, 39)))
 previewPanel.Name = "ScriptPreview"
 
 createText(previewPanel, {
@@ -3386,14 +3389,14 @@ createButton(previewPanel, "Copy", UDim2.new(1, -96, 0, 8), UDim2.fromOffset(82,
 end, true)
 
 local codeFrame = Instance.new("Frame")
-codeFrame.BackgroundColor3 = color("Input", Color3.fromRGB(22, 11, 11))
+codeFrame.BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))
 codeFrame.BorderSizePixel = 0
 codeFrame.ClipsDescendants = true
 codeFrame.Position = UDim2.fromOffset(14, 44)
 codeFrame.Size = UDim2.new(1, -28, 1, -58)
 codeFrame.Parent = previewPanel
 addCorner(codeFrame, 10)
-addStroke(codeFrame, color("Border", Color3.fromRGB(76, 43, 43)), 0.08, 1)
+addStroke(codeFrame, color("Border", Color3.fromRGB(51, 65, 85)), 0.08, 1)
 
 ui.previewScroll = Instance.new("ScrollingFrame")
 ui.previewScroll.BackgroundTransparency = 1
@@ -3403,7 +3406,7 @@ ui.previewScroll.Size = UDim2.fromScale(1, 1)
 ui.previewScroll.CanvasSize = UDim2.fromOffset(0, 0)
 ui.previewScroll.ScrollBarThickness = 6
 ui.previewScroll.ScrollingDirection = Enum.ScrollingDirection.XY
-ui.previewScroll.ScrollBarImageColor3 = color("BorderStrong", Color3.fromRGB(102, 59, 59))
+ui.previewScroll.ScrollBarImageColor3 = color("BorderStrong", Color3.fromRGB(71, 85, 105))
 ui.previewScroll.Parent = codeFrame
 
 ui.previewCode = createText(ui.previewScroll, {
