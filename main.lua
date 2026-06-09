@@ -206,6 +206,12 @@ local GameDetailsProxyEndpoint = "https://games.roproxy.com/v1/games"
 local GameOmniSearchEndpoint = "https://apis.roblox.com/search-api/omni-search"
 local GameOmniSearchProxyEndpoint = "https://apis.roproxy.com/search-api/omni-search"
 local RolimonsGameListEndpoint = "https://api.rolimons.com/games/v1/gamelist"
+local UserSearchEndpoint = "https://users.roblox.com/v1/users/search"
+local UserSearchProxyEndpoint = "https://users.roproxy.com/v1/users/search"
+local AvatarHeadshotEndpoint = "https://thumbnails.roblox.com/v1/users/avatar-headshot"
+local AvatarHeadshotProxyEndpoint = "https://thumbnails.roproxy.com/v1/users/avatar-headshot"
+local PresenceEndpoint = "https://presence.roblox.com/v1/presence/users"
+local PresenceProxyEndpoint = "https://presence.roproxy.com/v1/presence/users"
 local SiteURL = "https://scriptblox.com"
 local RscriptsSiteURL = "https://rscripts.net"
 local ImageFolder = "ScriptBloxFinderImages"
@@ -243,6 +249,10 @@ local state = {
 	gameLastError = "",
 	gameSearchDebug = "",
 	gameBusyToken = 0,
+	peopleQuery = "",
+	peopleResults = {},
+	peopleBusy = false,
+	peopleMax = 20,
 	liveEnabled = true,
 	liveInterval = 25,
 	liveIdleInterval = 25,
@@ -295,12 +305,15 @@ local ui = {
 local Window
 local SearchTab
 local ScriptsTab
+local PeopleTab
 local GamesTab
 local SelectedTab
 local FavoritesTab
 local searchScripts
 local searchGames
 local renderGames
+local searchPeople
+local renderPeople
 local selectScript
 local renderFavorites
 local renderScripts
@@ -461,6 +474,87 @@ local function requestGet(url, headers)
 
 	return false, tostring(result or lastError or "Request failed")
 end
+
+local function requestPostJson(url, payload, headers)
+	local body = ""
+	local encodedOk, encoded = pcall(function()
+		return HttpService:JSONEncode(payload or {})
+	end)
+
+	if encodedOk then
+		body = encoded
+	else
+		body = "{}"
+	end
+
+	headers = type(headers) == "table" and headers or {}
+	headers["Content-Type"] = headers["Content-Type"] or "application/json"
+	headers["Accept"] = headers["Accept"] or "application/json"
+
+	local requestData = {
+		Url = url,
+		Method = "POST",
+		Headers = headers,
+		Body = body
+	}
+
+	local requestMethods = {}
+
+	if type(request) == "function" then
+		table.insert(requestMethods, request)
+	end
+
+	if type(http_request) == "function" then
+		table.insert(requestMethods, http_request)
+	end
+
+	if syn and type(syn.request) == "function" then
+		table.insert(requestMethods, syn.request)
+	end
+
+	if fluxus and type(fluxus.request) == "function" then
+		table.insert(requestMethods, fluxus.request)
+	end
+
+	if http and type(http.request) == "function" then
+		table.insert(requestMethods, http.request)
+	end
+
+	local lastError = nil
+
+	for _, method in ipairs(requestMethods) do
+		local ok, response = pcall(function()
+			return method(requestData)
+		end)
+
+		if ok and response then
+			if type(response) == "table" then
+				if response.Body then
+					return true, response.Body
+				end
+
+				if response.body then
+					return true, response.body
+				end
+			elseif type(response) == "string" then
+				return true, response
+			end
+		elseif not ok then
+			lastError = response
+		end
+	end
+
+	local ok, result = pcall(function()
+		return game:HttpPost(url, body, Enum.HttpContentType.ApplicationJson)
+	end)
+
+	if ok then
+		return true, result
+	end
+
+	return false, tostring(result or lastError or "POST request failed")
+end
+
 
 local function copyText(text)
 	text = tostring(text or "")
@@ -4063,6 +4157,528 @@ searchGames = function()
 end
 
 
+
+local function getPersonId(person)
+	if type(person) ~= "table" then
+		return ""
+	end
+
+	return tostring(firstNonEmpty(person.Id, person.id, person.UserId, person.userId))
+end
+
+local function getPersonUsername(person)
+	if type(person) ~= "table" then
+		return "Unknown"
+	end
+
+	return firstNonEmpty(person.Name, person.name, person.username, person.Username, "Unknown")
+end
+
+local function getPersonDisplayName(person)
+	if type(person) ~= "table" then
+		return getPersonUsername(person)
+	end
+
+	return firstNonEmpty(person.DisplayName, person.displayName, person.name, person.Name, getPersonUsername(person))
+end
+
+local function getPresenceInfo(presenceType)
+	presenceType = tonumber(presenceType) or 0
+
+	if presenceType == 3 then
+		return "In Studio", 3, Color3.fromRGB(250, 204, 21)
+	elseif presenceType == 2 then
+		return "In Game", 4, Color3.fromRGB(52, 211, 153)
+	elseif presenceType == 1 then
+		return "Online", 2, Color3.fromRGB(67, 135, 244)
+	end
+
+	return "Offline", 1, color("Muted", Color3.fromRGB(148, 163, 184))
+end
+
+local function normalizePerson(item)
+	if type(item) ~= "table" then
+		return nil
+	end
+
+	local userId = tostring(firstNonEmpty(item.id, item.Id, item.userId, item.UserId))
+	local username = firstNonEmpty(item.name, item.Name, item.username, item.Username)
+	local displayName = firstNonEmpty(item.displayName, item.DisplayName, username)
+
+	if userId == "" or username == "" then
+		return nil
+	end
+
+	return {
+		Id = userId,
+		Name = username,
+		DisplayName = displayName,
+		Avatar = "",
+		PresenceType = 0,
+		PresenceText = "Offline",
+		PresenceRank = 1,
+		LastLocation = ""
+	}
+end
+
+local function parsePeopleResponse(decoded)
+	local output = {}
+
+	if type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+		return output
+	end
+
+	for _, item in ipairs(decoded.data) do
+		local person = normalizePerson(item)
+		if person then
+			table.insert(output, person)
+		end
+
+		if #output >= state.peopleMax then
+			break
+		end
+	end
+
+	return output
+end
+
+local function buildPeopleSearchUrl(proxy)
+	local query = trim(state.peopleQuery or "")
+	local endpoint = proxy and UserSearchProxyEndpoint or UserSearchEndpoint
+
+	return endpoint
+		.. "?keyword=" .. encode(query)
+		.. "&limit=" .. encode(state.peopleMax)
+end
+
+local function hydratePeopleAvatars(people)
+	people = type(people) == "table" and people or {}
+
+	if #people == 0 then
+		return
+	end
+
+	local ids = {}
+	local lookup = {}
+
+	for _, person in ipairs(people) do
+		local id = getPersonId(person)
+		if id ~= "" then
+			table.insert(ids, id)
+			lookup[id] = person
+			person.Avatar = "rbxthumb://type=AvatarHeadShot&id=" .. id .. "&w=150&h=150"
+		end
+	end
+
+	if #ids == 0 then
+		return
+	end
+
+	local suffix = "?userIds=" .. encode(table.concat(ids, ","))
+		.. "&size=150x150&format=Png&isCircular=false"
+
+	local ok, body = requestGet(AvatarHeadshotEndpoint .. suffix)
+	if not ok or type(body) ~= "string" then
+		ok, body = requestGet(AvatarHeadshotProxyEndpoint .. suffix)
+	end
+
+	if not ok or type(body) ~= "string" then
+		return
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+		return
+	end
+
+	for _, item in ipairs(decoded.data) do
+		local id = tostring(firstNonEmpty(item.targetId, item.TargetId, item.userId))
+		local person = lookup[id]
+
+		if person and type(item.imageUrl) == "string" and item.imageUrl ~= "" then
+			person.Avatar = item.imageUrl
+		end
+	end
+end
+
+local function hydratePeoplePresence(people)
+	people = type(people) == "table" and people or {}
+
+	if #people == 0 then
+		return
+	end
+
+	local ids = {}
+	local lookup = {}
+
+	for _, person in ipairs(people) do
+		local id = tonumber(getPersonId(person))
+		if id then
+			table.insert(ids, id)
+			lookup[tostring(id)] = person
+		end
+	end
+
+	if #ids == 0 then
+		return
+	end
+
+	local payload = {
+		userIds = ids
+	}
+
+	local ok, body = requestPostJson(PresenceEndpoint, payload)
+	if not ok or type(body) ~= "string" then
+		ok, body = requestPostJson(PresenceProxyEndpoint, payload)
+	end
+
+	if not ok or type(body) ~= "string" then
+		return
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" or type(decoded.userPresences) ~= "table" then
+		return
+	end
+
+	for _, item in ipairs(decoded.userPresences) do
+		local id = tostring(firstNonEmpty(item.userId, item.UserId))
+		local person = lookup[id]
+
+		if person then
+			local presenceType = tonumber(item.userPresenceType or item.UserPresenceType or 0) or 0
+			local text, rank = getPresenceInfo(presenceType)
+
+			person.PresenceType = presenceType
+			person.PresenceText = text
+			person.PresenceRank = rank
+			person.LastLocation = firstNonEmpty(item.lastLocation, item.LastLocation, "")
+		end
+	end
+end
+
+local function sortPeopleByPresence(people)
+	table.sort(people, function(a, b)
+		local rankA = tonumber(a.PresenceRank) or 0
+		local rankB = tonumber(b.PresenceRank) or 0
+
+		if rankA ~= rankB then
+			return rankA > rankB
+		end
+
+		return getPersonUsername(a):lower() < getPersonUsername(b):lower()
+	end)
+end
+
+local function clearPeoplePage()
+	local page = PeopleTab and PeopleTab.Page
+	if not page then
+		return
+	end
+
+	for _, child in ipairs(page:GetChildren()) do
+		if not child:IsA("UILayout") and not child:IsA("UIPadding") then
+			child:Destroy()
+		end
+	end
+end
+
+local function createPersonCard(parent, person, index)
+	local card = Instance.new("Frame")
+	card.Name = "PersonCard_" .. tostring(index)
+	card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
+	card.BorderSizePixel = 0
+	card.ClipsDescendants = true
+	card.LayoutOrder = index
+	card.Parent = parent
+
+	addCorner(card, 8)
+	addStroke(card, color("Border", Color3.fromRGB(51, 65, 85)), 0.36, 1)
+
+	local avatar = Instance.new("ImageLabel")
+	avatar.Name = "Avatar"
+	avatar.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
+	avatar.BorderSizePixel = 0
+	avatar.Position = UDim2.fromOffset(12, 12)
+	avatar.Size = UDim2.fromOffset(58, 58)
+	avatar.ScaleType = Enum.ScaleType.Crop
+	avatar.Image = person.Avatar or ""
+	avatar.Parent = card
+	addCorner(avatar, 8)
+	addStroke(avatar, color("Border", Color3.fromRGB(51, 65, 85)), 0.5, 1)
+
+	local displayName = getPersonDisplayName(person)
+	local username = getPersonUsername(person)
+	local presenceText, _, presenceColor = getPresenceInfo(person.PresenceType)
+
+	createText(card, {
+		Text = displayName,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		Position = UDim2.fromOffset(82, 12),
+		Size = UDim2.new(1, -94, 0, 20),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	createText(card, {
+		Text = "@" .. username,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 11,
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+		Position = UDim2.fromOffset(82, 34),
+		Size = UDim2.new(1, -94, 0, 18),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	local badge = Instance.new("Frame")
+	badge.Name = "PresenceBadge"
+	badge.BackgroundColor3 = presenceColor
+	badge.BackgroundTransparency = 0.16
+	badge.BorderSizePixel = 0
+	badge.Position = UDim2.fromOffset(82, 58)
+	badge.Size = UDim2.fromOffset(86, 22)
+	badge.Parent = card
+	addCorner(badge, 7)
+
+	createText(badge, {
+		Text = presenceText,
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextYAlignment = Enum.TextYAlignment.Center,
+		Size = UDim2.fromScale(1, 1),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	local lastLocation = trim(person.LastLocation or "")
+	if lastLocation ~= "" and presenceText ~= "Offline" then
+		createText(card, {
+			Text = lastLocation,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 10,
+			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+			Position = UDim2.fromOffset(176, 60),
+			Size = UDim2.new(1, -188, 0, 18),
+			TextTruncate = Enum.TextTruncate.AtEnd
+		})
+	end
+
+	return card
+end
+
+renderPeople = function()
+	if not PeopleTab then
+		return
+	end
+
+	clearPeoplePage()
+
+	local page = PeopleTab.Page
+
+	local top = createPanel(page, 138, 1, color("Card", Color3.fromRGB(17, 24, 39)))
+	top.Name = "PeopleTop"
+
+	createText(top, {
+		Text = "People",
+		Font = Enum.Font.GothamBold,
+		TextSize = 16,
+		TextColor3 = color("Primary", Color3.fromRGB(67, 135, 244)),
+		Position = UDim2.fromOffset(14, 10),
+		Size = UDim2.new(1, -28, 0, 22)
+	})
+
+	ui.peopleInfo = createText(top, {
+		Text = state.peopleQuery ~= "" and ("Search: " .. state.peopleQuery) or "Search Roblox users",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+		Position = UDim2.fromOffset(14, 34),
+		Size = UDim2.new(1, -28, 0, 18),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	ui.peopleSearchInput = createInput(
+		top,
+		"Search People",
+		"Type a Roblox username",
+		state.peopleQuery,
+		UDim2.fromOffset(14, 58),
+		UDim2.new(1, -250, 0, 34),
+		function(value, enterPressed)
+			state.peopleQuery = trim(value)
+			if enterPressed then
+				searchPeople()
+			end
+		end
+	)
+
+	pcall(function()
+		ui.peopleSearchInput.InputBegan:Connect(function(input)
+			if input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
+				state.peopleQuery = trim(ui.peopleSearchInput.Text)
+				searchPeople()
+			end
+		end)
+	end)
+
+	createButton(top, "Search", UDim2.new(1, -224, 0, 84), UDim2.fromOffset(104, 30), function()
+		searchPeople()
+	end, false)
+
+	createButton(top, "Clear", UDim2.new(1, -108, 0, 84), UDim2.fromOffset(82, 30), function()
+		state.peopleQuery = ""
+		state.peopleResults = {}
+		if ui.peopleSearchInput then
+			ui.peopleSearchInput.Text = ""
+		end
+		renderPeople()
+	end, true)
+
+	if #state.peopleResults == 0 then
+		local empty = createPanel(page, 92, 2, color("Card", Color3.fromRGB(17, 24, 39)))
+		empty.Name = "NoPeople"
+
+		createText(empty, {
+			Text = "No people shown",
+			Font = Enum.Font.GothamBold,
+			TextSize = 15,
+			Position = UDim2.fromOffset(14, 14),
+			Size = UDim2.new(1, -28, 0, 24)
+		})
+
+		createText(empty, {
+			Text = "Search a Roblox username. Results are capped at 20 and sorted online first.",
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+			TextWrapped = true,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			Position = UDim2.fromOffset(14, 44),
+			Size = UDim2.new(1, -28, 0, 36)
+		})
+
+		return
+	end
+
+	local info = createPanel(page, 48, 2, color("Card", Color3.fromRGB(17, 24, 39)))
+	info.Name = "PeopleInfo"
+
+	local onlineCount = 0
+	for _, person in ipairs(state.peopleResults) do
+		if tonumber(person.PresenceType) and tonumber(person.PresenceType) > 0 then
+			onlineCount += 1
+		end
+	end
+
+	createText(info, {
+		Text = tostring(#state.peopleResults) .. " results  •  " .. tostring(onlineCount) .. " online",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+		Position = UDim2.fromOffset(14, 14),
+		Size = UDim2.new(1, -28, 0, 20)
+	})
+
+	local grid = Instance.new("Frame")
+	grid.Name = "PeopleGrid"
+	grid.BackgroundTransparency = 1
+	grid.BorderSizePixel = 0
+	grid.ClipsDescendants = true
+	grid.LayoutOrder = 3
+	grid.Size = UDim2.new(1, -10, 0, 0)
+	grid.Parent = page
+
+	local gridLayout = Instance.new("UIGridLayout")
+	gridLayout.CellSize = UDim2.new(0.5, -10, 0, 96)
+	gridLayout.CellPadding = UDim2.fromOffset(10, 10)
+	gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	gridLayout.Parent = grid
+
+	for index, person in ipairs(state.peopleResults) do
+		createPersonCard(grid, person, index)
+	end
+
+	local rows = math.max(0, math.ceil(#state.peopleResults / 2))
+	grid.Size = UDim2.new(1, -10, 0, rows * 106)
+end
+
+searchPeople = function()
+	if state.peopleBusy then
+		return
+	end
+
+	if ui.peopleSearchInput then
+		state.peopleQuery = trim(ui.peopleSearchInput.Text)
+	end
+
+	if state.peopleQuery == "" then
+		setStatus("Type a Roblox username first.")
+		renderPeople()
+		safeSelectTab(PeopleTab)
+		return
+	end
+
+	state.peopleBusy = true
+	setStatus("Searching people...")
+
+	local results = {}
+
+	local function tryUserSearch(url)
+		local ok, body = requestGet(url)
+		if not ok or type(body) ~= "string" then
+			return {}
+		end
+
+		local decodedOk, decoded = pcall(function()
+			return HttpService:JSONDecode(body)
+		end)
+
+		if not decodedOk or type(decoded) ~= "table" then
+			return {}
+		end
+
+		return parsePeopleResponse(decoded)
+	end
+
+	results = tryUserSearch(buildPeopleSearchUrl(false))
+
+	if #results == 0 then
+		results = tryUserSearch(buildPeopleSearchUrl(true))
+	end
+
+	if #results > state.peopleMax then
+		local trimmed = {}
+		for index = 1, state.peopleMax do
+			trimmed[index] = results[index]
+		end
+		results = trimmed
+	end
+
+	hydratePeopleAvatars(results)
+	hydratePeoplePresence(results)
+	sortPeopleByPresence(results)
+
+	state.peopleResults = results
+	state.peopleBusy = false
+
+	renderPeople()
+	safeSelectTab(PeopleTab)
+
+	if #results == 0 then
+		setStatus("No people found.")
+	else
+		setStatus("Found " .. tostring(#results) .. " people.")
+	end
+end
+
+
 local function parseProviderResponse(decoded)
 	if decoded.message or decoded.error then
 		return nil, 0, tostring(decoded.message or decoded.error)
@@ -4624,10 +5240,12 @@ ScriptsTab = Window:CreateTab({
 	Icon = "image"
 })
 
-GamesTab = Window:CreateTab({
-	Name = "Games",
-	Icon = "gamepad-2"
+PeopleTab = Window:CreateTab({
+	Name = "People",
+	Icon = "users"
 })
+
+GamesTab = PeopleTab
 
 SelectedTab = Window:CreateTab({
 	Name = "Selected",
@@ -4641,7 +5259,7 @@ FavoritesTab = Window:CreateTab({
 
 local searchPage = preparePage(SearchTab)
 preparePage(ScriptsTab)
-preparePage(GamesTab)
+preparePage(PeopleTab)
 local selectedPage = preparePage(SelectedTab)
 preparePage(FavoritesTab)
 
@@ -5097,7 +5715,7 @@ ui.selectedPreview = ui.previewCode
 registerConfigBackedState()
 loadFavorites()
 createEmptyScripts()
-renderGames()
+renderPeople()
 renderFavorites()
 updateFilterSummary()
 updateSelected()
