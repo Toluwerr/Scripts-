@@ -6,7 +6,10 @@ local LocalPlayer = Players.LocalPlayer
 local Google = "https://raw.githubusercontent.com/Toluwerr/Google-UI/refs/heads/main/main.lua"
 
 local loaded, Google = pcall(function()
-	return loadstring(game:HttpGet(Google))()
+	local Source = game:HttpGet(Google)
+	Source = Source:gsub("([,{]%s*)pad%s*=", "%1Padding =")
+	Source = Source:gsub("%.pad", ".Padding")
+	return loadstring(Source)()
 end)
 
 if not loaded or type(Google) ~= "table" then
@@ -15,10 +18,10 @@ end
 
 pcall(function()
 	if Google.SetTheme then
-		Google.SetTheme("Red")
-	elseif Google.Themes and Google.Themes.Red then
-		Google.ActiveTheme = "Red"
-		Google.Theme = Google.Themes.Red
+		Google.SetTheme("DarkRed")
+	elseif Google.Themes and Google.Themes.DarkRed then
+		Google.ActiveTheme = "DarkRed"
+		Google.Theme = Google.Themes.DarkRed
 	end
 end)
 
@@ -349,7 +352,7 @@ end
 local function createText(parent, data)
 	local label = Instance.new("TextLabel")
 	label.BackgroundTransparency = data.BackgroundTransparency or 1
-	label.BackgroundColor3 = data.BackgroundColor3 or Color3.fromRGB(255, 255, 255)
+	label.BackgroundColor3 = data.BackgroundColor3 or color("Card", Color3.fromRGB(255, 255, 255))
 	label.BorderSizePixel = 0
 	label.Font = data.Font or Enum.Font.Gotham
 	label.Text = data.Text or ""
@@ -458,7 +461,7 @@ end
 
 local function createCheck(parent, title, position, size, defaultValue, callback)
 	local button = Instance.new("TextButton")
-	button.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	button.BackgroundColor3 = color("Card", Color3.fromRGB(255, 255, 255))
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
 	button.Text = ""
