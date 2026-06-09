@@ -254,7 +254,12 @@ state = {
 	peopleBusy = false,
 	peopleMax = 20,
 	peoplePage = 1,
-	peopleMode = "Server",
+	peopleMode = "Global",
+	peopleCursors = {["1"] = ""},
+	peopleNextCursor = "",
+	peopleLastQuery = nil,
+	peopleDefaultQuery = "a",
+	peoplePresenceAvailable = true,
 	liveEnabled = true,
 	liveInterval = 25,
 	liveIdleInterval = 25,
@@ -4185,7 +4190,7 @@ function getPersonDisplayName(person)
 end
 
 function getPresenceInfo(presenceType)
-	presenceType = tonumber(presenceType) or 0
+	presenceType = tonumber(presenceType)
 
 	if presenceType == 3 then
 		return "In Studio", 3, Color3.fromRGB(250, 204, 21)
@@ -4193,9 +4198,11 @@ function getPresenceInfo(presenceType)
 		return "In Game", 4, Color3.fromRGB(52, 211, 153)
 	elseif presenceType == 1 then
 		return "Online", 2, Color3.fromRGB(67, 135, 244)
+	elseif presenceType == 0 then
+		return "Offline", 1, color("Muted", Color3.fromRGB(148, 163, 184))
 	end
 
-	return "Offline", 1, color("Muted", Color3.fromRGB(148, 163, 184))
+	return "Unknown", 0, color("Muted", Color3.fromRGB(148, 163, 184))
 end
 
 function normalizePerson(item)
@@ -4216,10 +4223,11 @@ function normalizePerson(item)
 		Name = username,
 		DisplayName = displayName,
 		Avatar = "",
-		PresenceType = 0,
-		PresenceText = "Offline",
-		PresenceRank = 1,
-		LastLocation = ""
+		PresenceType = -1,
+		PresenceText = "Unknown",
+		PresenceRank = 0,
+		LastLocation = "",
+		PresenceKnown = false
 	}
 end
 
@@ -4244,13 +4252,35 @@ function parsePeopleResponse(decoded)
 	return output
 end
 
-function buildPeopleSearchUrl(proxy)
+function getPeopleSearchKeyword()
 	local query = trim(state.peopleQuery or "")
-	local endpoint = proxy and UserSearchProxyEndpoint or UserSearchEndpoint
 
-	return endpoint
+	if query == "" then
+		return state.peopleDefaultQuery or "a"
+	end
+
+	return query
+end
+
+function resetPeoplePaging()
+	state.peoplePage = 1
+	state.peopleCursors = {["1"] = ""}
+	state.peopleNextCursor = ""
+end
+
+function buildPeopleSearchUrl(proxy, cursor)
+	local query = getPeopleSearchKeyword()
+	local endpoint = proxy and UserSearchProxyEndpoint or UserSearchEndpoint
+	local url = endpoint
 		.. "?keyword=" .. encode(query)
 		.. "&limit=" .. encode(state.peopleMax)
+
+	cursor = tostring(cursor or "")
+	if cursor ~= "" then
+		url = url .. "&cursor=" .. encode(cursor)
+	end
+
+	return url
 end
 
 function hydratePeopleAvatars(people)
@@ -4310,7 +4340,7 @@ function hydratePeoplePresence(people)
 	people = type(people) == "table" and people or {}
 
 	if #people == 0 then
-		return
+		return false
 	end
 
 	local ids = {}
@@ -4325,7 +4355,7 @@ function hydratePeoplePresence(people)
 	end
 
 	if #ids == 0 then
-		return
+		return false
 	end
 
 	local payload = {
@@ -4338,7 +4368,8 @@ function hydratePeoplePresence(people)
 	end
 
 	if not ok or type(body) ~= "string" then
-		return
+		state.peoplePresenceAvailable = false
+		return false
 	end
 
 	local decodedOk, decoded = pcall(function()
@@ -4346,23 +4377,29 @@ function hydratePeoplePresence(people)
 	end)
 
 	if not decodedOk or type(decoded) ~= "table" or type(decoded.userPresences) ~= "table" then
-		return
+		state.peoplePresenceAvailable = false
+		return false
 	end
+
+	state.peoplePresenceAvailable = true
 
 	for _, item in ipairs(decoded.userPresences) do
 		local id = tostring(firstNonEmpty(item.userId, item.UserId))
 		local person = lookup[id]
 
 		if person then
-			local presenceType = tonumber(item.userPresenceType or item.UserPresenceType or 0) or 0
+			local presenceType = tonumber(item.userPresenceType or item.UserPresenceType or 0)
 			local text, rank = getPresenceInfo(presenceType)
 
-			person.PresenceType = presenceType
+			person.PresenceType = presenceType ~= nil and presenceType or -1
 			person.PresenceText = text
 			person.PresenceRank = rank
+			person.PresenceKnown = true
 			person.LastLocation = firstNonEmpty(item.lastLocation, item.LastLocation, "")
 		end
 	end
+
+	return true
 end
 
 function sortPeopleByPresence(people)
@@ -4501,10 +4538,11 @@ function searchExactRobloxUser(query, seen)
 			Name = username,
 			DisplayName = username,
 			Avatar = "rbxthumb://type=AvatarHeadShot&id=" .. idText .. "&w=150&h=150",
-			PresenceType = 0,
-			PresenceText = "Offline",
-			PresenceRank = 1,
+			PresenceType = -1,
+			PresenceText = "Unknown",
+			PresenceRank = 0,
 			LastLocation = "",
+			PresenceKnown = false,
 			IsServerPlayer = false
 		}
 	}
@@ -4630,7 +4668,7 @@ renderPeople = function()
 	})
 
 	ui.peopleInfo = createText(top, {
-		Text = state.peopleQuery ~= "" and ("Search: " .. state.peopleQuery) or "Current server players",
+		Text = state.peopleQuery ~= "" and ("Search: " .. state.peopleQuery) or "Global Roblox user search",
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
 		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
@@ -4642,14 +4680,14 @@ renderPeople = function()
 	ui.peopleSearchInput = createInput(
 		top,
 		"Search People",
-		"Search current players or exact username",
+		"Search Roblox users",
 		state.peopleQuery,
 		UDim2.fromOffset(14, 58),
 		UDim2.new(1, -250, 0, 34),
 		function(value, enterPressed)
 			state.peopleQuery = trim(value)
 			if enterPressed then
-				state.peoplePage = 1
+				resetPeoplePaging()
 				searchPeople()
 			end
 		end
@@ -4659,24 +4697,24 @@ renderPeople = function()
 		ui.peopleSearchInput.InputBegan:Connect(function(input)
 			if input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
 				state.peopleQuery = trim(ui.peopleSearchInput.Text)
-				state.peoplePage = 1
+				resetPeoplePaging()
 				searchPeople()
 			end
 		end)
 	end)
 
 	createButton(top, "Search", UDim2.new(1, -224, 0, 84), UDim2.fromOffset(104, 30), function()
-		state.peoplePage = 1
+		resetPeoplePaging()
 		searchPeople()
 	end, false)
 
 	createButton(top, "Clear", UDim2.new(1, -108, 0, 84), UDim2.fromOffset(82, 30), function()
 		state.peopleQuery = ""
-		state.peoplePage = 1
+		resetPeoplePaging()
 		if ui.peopleSearchInput then
 			ui.peopleSearchInput.Text = ""
 		end
-		searchPeople()
+		searchPeople(true)
 	end, true)
 
 	if #state.peopleResults == 0 then
@@ -4684,7 +4722,7 @@ renderPeople = function()
 		empty.Name = "NoPeople"
 
 		createText(empty, {
-			Text = "No players shown",
+			Text = "No people shown",
 			Font = Enum.Font.GothamBold,
 			TextSize = 15,
 			Position = UDim2.fromOffset(14, 14),
@@ -4692,7 +4730,7 @@ renderPeople = function()
 		})
 
 		createText(empty, {
-			Text = "Players from the current server load automatically. Search filters this server and can also find an exact Roblox username.",
+			Text = "Search Roblox users globally. Results are capped at 20 per page and sorted by online status when presence is available.",
 			Font = Enum.Font.Gotham,
 			TextSize = 12,
 			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
@@ -4716,7 +4754,7 @@ renderPeople = function()
 	end
 
 	createText(info, {
-		Text = "Page " .. tostring(state.peoplePage) .. "  •  " .. tostring(#state.peopleResults) .. " shown  •  " .. tostring(onlineCount) .. " online",
+		Text = "Page " .. tostring(state.peoplePage) .. "  •  " .. tostring(#state.peopleResults) .. " shown  •  " .. tostring(onlineCount) .. " online" .. (state.peoplePresenceAvailable == false and "  •  presence limited" or ""),
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
 		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
@@ -4735,7 +4773,7 @@ renderPeople = function()
 	end, true)
 
 	createButton(info, "Next", UDim2.new(1, -108, 0, 9), UDim2.fromOffset(82, 30), function()
-		if #state.peopleResults < state.peopleMax then
+		if tostring(state.peopleNextCursor or "") == "" and #state.peopleResults < state.peopleMax then
 			setStatus("No more people on the next page.")
 			return
 		end
@@ -4767,7 +4805,7 @@ renderPeople = function()
 	grid.Size = UDim2.new(1, -10, 0, rows * 106)
 end
 
-searchPeople = function()
+searchPeople = function(selectTab)
 	if state.peopleBusy then
 		return
 	end
@@ -4776,68 +4814,90 @@ searchPeople = function()
 		state.peopleQuery = trim(ui.peopleSearchInput.Text)
 	end
 
+	local query = trim(state.peopleQuery or "")
+	local activeQuery = getPeopleSearchKeyword()
+
+	if state.peopleLastQuery ~= activeQuery then
+		resetPeoplePaging()
+		state.peopleLastQuery = activeQuery
+	end
+
 	state.peopleBusy = true
 
-	local query = trim(state.peopleQuery or "")
-	local allResults, seen = getServerPeople(query)
+	local cursor = ""
+	if type(state.peopleCursors) == "table" then
+		cursor = tostring(state.peopleCursors[tostring(state.peoplePage)] or "")
+	end
 
-	if query ~= "" then
-		local function tryUserSearch(url)
-			local ok, body = requestGet(url)
-			if not ok or type(body) ~= "string" then
-				return {}
-			end
+	local results = {}
+	local nextCursor = ""
 
-			local decodedOk, decoded = pcall(function()
-				return HttpService:JSONDecode(body)
-			end)
-
-			if not decodedOk or type(decoded) ~= "table" then
-				return {}
-			end
-
-			return parsePeopleResponse(decoded)
+	local function tryUserSearch(proxy)
+		local ok, body = requestGet(buildPeopleSearchUrl(proxy, cursor))
+		if not ok or type(body) ~= "string" then
+			return {}, ""
 		end
 
-		local remoteResults = tryUserSearch(buildPeopleSearchUrl(false))
-		if #remoteResults == 0 then
-			remoteResults = tryUserSearch(buildPeopleSearchUrl(true))
+		local decodedOk, decoded = pcall(function()
+			return HttpService:JSONDecode(body)
+		end)
+
+		if not decodedOk or type(decoded) ~= "table" then
+			return {}, ""
 		end
 
-		for _, person in ipairs(remoteResults) do
-			addUniquePerson(allResults, seen, person)
+		return parsePeopleResponse(decoded), tostring(decoded.nextPageCursor or "")
+	end
+
+	results, nextCursor = tryUserSearch(false)
+
+	if #results == 0 then
+		results, nextCursor = tryUserSearch(true)
+	end
+
+	if query ~= "" and #results == 0 then
+		local seen = {}
+		for _, person in ipairs(results) do
+			seen[getPersonId(person)] = true
 		end
 
 		for _, person in ipairs(searchExactRobloxUser(query, seen)) do
-			addUniquePerson(allResults, seen, person)
+			table.insert(results, person)
 		end
 	end
 
-	hydratePeopleAvatars(allResults)
-	hydratePeoplePresence(allResults)
-
-	for _, person in ipairs(allResults) do
-		if person.IsServerPlayer then
-			person.PresenceType = 2
-			person.PresenceText = "In Game"
-			person.PresenceRank = 4
-			person.LastLocation = "Current server"
+	if #results > state.peopleMax then
+		local trimmed = {}
+		for index = 1, state.peopleMax do
+			trimmed[index] = results[index]
 		end
+		results = trimmed
 	end
 
-	sortPeopleByPresence(allResults)
+	state.peopleNextCursor = nextCursor
+	state.peopleCursors = type(state.peopleCursors) == "table" and state.peopleCursors or {["1"] = ""}
 
-	local pagedResults = trimPeoplePage(allResults)
-	state.peopleResults = pagedResults
+	if nextCursor ~= "" then
+		state.peopleCursors[tostring((tonumber(state.peoplePage) or 1) + 1)] = nextCursor
+	end
+
+	hydratePeopleAvatars(results)
+	hydratePeoplePresence(results)
+	sortPeopleByPresence(results)
+
+	state.peopleResults = results
 	state.peopleBusy = false
 
 	renderPeople()
-	safeSelectTab(PeopleTab)
 
-	if #allResults == 0 then
-		setStatus(query == "" and "No players found in this server." or "No matching players found.")
+	if selectTab ~= false then
+		safeSelectTab(PeopleTab)
+	end
+
+	if #results == 0 then
+		setStatus(query == "" and "No global Roblox users found." or "No matching Roblox users found.")
 	else
-		setStatus("Showing " .. tostring(#pagedResults) .. " of " .. tostring(#allResults) .. " people.")
+		setStatus("Showing " .. tostring(#results) .. " global Roblox users.")
 	end
 end
 
@@ -5877,25 +5937,13 @@ ui.selectedPreview = ui.previewCode
 registerConfigBackedState()
 loadFavorites()
 createEmptyScripts()
-searchPeople()
+task.defer(function()
+	searchPeople(false)
+end)
 renderFavorites()
 updateFilterSummary()
 updateSelected()
 safeSelectTab(SearchTab)
-pcall(function()
-	Players.PlayerAdded:Connect(function()
-		if state.peopleQuery == "" then
-			task.defer(searchPeople)
-		end
-	end)
-
-	Players.PlayerRemoving:Connect(function()
-		if state.peopleQuery == "" then
-			task.defer(searchPeople)
-		end
-	end)
-end)
-
 startLiveWatcher()
 startBadgeViewWatcher()
 scheduleFastChecks()
