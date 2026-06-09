@@ -223,7 +223,12 @@ local state = {
 	busy = false,
 	lastUrl = "",
 	favorites = {},
-	favoriteMode = "Current Game"
+	favoriteMode = "Current Game",
+	liveEnabled = true,
+	liveInterval = 30,
+	liveBusy = false,
+	liveStarted = false,
+	liveSnapshot = {}
 }
 
 local ui = {
@@ -238,6 +243,7 @@ local ui = {
 	scriptsInfo = nil,
 	sourceScriptBloxButton = nil,
 	sourceRscriptsButton = nil,
+	liveButton = nil,
 	selectedImage = nil,
 	selectedAuthorImage = nil,
 	selectedTitle = nil,
@@ -264,6 +270,7 @@ local FavoritesTab
 local searchScripts
 local selectScript
 local renderFavorites
+local renderScripts
 local updateFavoriteButton
 local favoriteSelected
 
@@ -888,6 +895,40 @@ local function getScriptIdentifier(scriptData)
 	end
 	return scriptData.slug or scriptData._id or scriptData.id
 end
+
+local function getViewCount(scriptData)
+	if type(scriptData) ~= "table" then
+		return 0
+	end
+
+	return tonumber(scriptData.views or scriptData.viewCount or scriptData.totalViews or 0) or 0
+end
+
+local function compactNumber(value)
+	value = tonumber(value) or 0
+
+	if value >= 1000000 then
+		return string.format("%.1fM", value / 1000000):gsub("%.0M", "M")
+	elseif value >= 1000 then
+		return string.format("%.1fK", value / 1000):gsub("%.0K", "K")
+	end
+
+	return tostring(math.floor(value))
+end
+
+local function updateLiveSnapshot(results)
+	local snapshot = {}
+
+	for _, item in ipairs(results or {}) do
+		local id = getScriptIdentifier(item)
+		if id then
+			snapshot[tostring(id)] = getViewCount(item)
+		end
+	end
+
+	state.liveSnapshot = snapshot
+end
+
 
 local function getScriptTitle(scriptData)
 	if not scriptData then
@@ -2248,7 +2289,7 @@ local function updateSelected()
 
 	local meta = {
 		"Author: " .. author,
-		"Views: " .. tostring(scriptData.views or 0),
+		"Views: " .. compactNumber(getViewCount(scriptData)),
 		"Likes: " .. tostring(scriptData.likeCount or "N/A"),
 		"Dislikes: " .. tostring(scriptData.dislikeCount or "N/A"),
 		"Verified: " .. boolToText(scriptData.verified),
@@ -2409,6 +2450,28 @@ local function createScriptCard(parent, scriptData, index)
 			Size = UDim2.fromScale(1, 1)
 		})
 	end
+
+	local viewBadge = Instance.new("Frame")
+	viewBadge.Name = "ViewsBadge"
+	viewBadge.BackgroundColor3 = color("PrimarySoft", Color3.fromRGB(30, 58, 105))
+	viewBadge.BackgroundTransparency = 0.08
+	viewBadge.BorderSizePixel = 0
+	viewBadge.Position = UDim2.new(0, 16, 0, 16)
+	viewBadge.Size = UDim2.fromOffset(82, 22)
+	viewBadge.Parent = card
+	addCorner(viewBadge, 7)
+	addStroke(viewBadge, color("Border", Color3.fromRGB(51, 65, 85)), 0.55, 1)
+
+	createText(viewBadge, {
+		Text = "Views " .. compactNumber(getViewCount(scriptData)),
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+		TextColor3 = color("Text", Color3.fromRGB(241, 245, 249)),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextYAlignment = Enum.TextYAlignment.Center,
+		Size = UDim2.fromScale(1, 1),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
 
 	createText(card, {
 		Text = title,
@@ -2702,7 +2765,159 @@ local function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
 	return button
 end
 
-local function renderScripts()
+
+local function parseProviderResponse(decoded)
+	if decoded.message or decoded.error then
+		return nil, 0, tostring(decoded.message or decoded.error)
+	end
+
+	if state.source == "rscripts" then
+		if type(decoded.scripts) ~= "table" then
+			return {}, 0, nil
+		end
+
+		return normalizeRscriptsList(decoded.scripts), decoded.info and tonumber(decoded.info.maxPages) or 0, nil
+	end
+
+	if not decoded.result or type(decoded.result.scripts) ~= "table" then
+		return {}, 0, nil
+	end
+
+	local results = decoded.result.scripts
+
+	for _, item in ipairs(results) do
+		if type(item) == "table" then
+			item._source = "scriptblox"
+		end
+	end
+
+	return results, tonumber(decoded.result.totalPages) or 0, nil
+end
+
+local function findSelectedInResults(results)
+	if not state.selected then
+		return nil
+	end
+
+	local selectedId = getScriptIdentifier(state.selected)
+	if not selectedId then
+		return nil
+	end
+
+	for _, item in ipairs(results or {}) do
+		if tostring(getScriptIdentifier(item) or "") == tostring(selectedId) then
+			return item
+		end
+	end
+
+	return nil
+end
+
+local function applyLiveResults(results, totalPages)
+	local newCount = 0
+	local viewChanges = 0
+	local oldSnapshot = state.liveSnapshot or {}
+
+	for _, item in ipairs(results or {}) do
+		local id = getScriptIdentifier(item)
+		if id then
+			id = tostring(id)
+			local views = getViewCount(item)
+
+			if oldSnapshot[id] == nil then
+				newCount = newCount + 1
+			elseif oldSnapshot[id] ~= views then
+				viewChanges = viewChanges + 1
+			end
+		end
+	end
+
+	if newCount == 0 and viewChanges == 0 then
+		return false
+	end
+
+	state.results = results
+	state.totalPages = totalPages or state.totalPages
+
+	local replacementSelected = findSelectedInResults(results)
+	if replacementSelected then
+		state.selected = mergeTables(state.selected, replacementSelected)
+	end
+
+	updateLiveSnapshot(results)
+	renderScripts()
+
+	if replacementSelected then
+		updateSelected()
+	end
+
+	if newCount > 0 then
+		setStatus("Live: " .. tostring(newCount) .. " new script" .. (newCount == 1 and "" or "s") .. " found.")
+	elseif viewChanges > 0 then
+		setStatus("Live: views updated.")
+	end
+
+	return true
+end
+
+local function refreshLiveButton()
+	if ui.liveButton then
+		ui.liveButton.Text = state.liveEnabled and "Live: On" or "Live: Off"
+		ui.liveButton.BackgroundColor3 = state.liveEnabled and color("Primary", Color3.fromRGB(67, 135, 244)) or color("PrimarySoft", Color3.fromRGB(30, 58, 105))
+	end
+end
+
+local function checkLiveUpdates()
+	if not state.liveEnabled or state.busy or state.liveBusy then
+		return
+	end
+
+	if not state.results or #state.results == 0 then
+		return
+	end
+
+	state.liveBusy = true
+
+	local ok, body = requestGet(buildSearchUrl(), buildSearchHeaders())
+	if not ok or type(body) ~= "string" then
+		state.liveBusy = false
+		return
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" then
+		state.liveBusy = false
+		return
+	end
+
+	local results, totalPages, err = parseProviderResponse(decoded)
+	if err or type(results) ~= "table" then
+		state.liveBusy = false
+		return
+	end
+
+	applyLiveResults(results, totalPages)
+	state.liveBusy = false
+end
+
+local function startLiveWatcher()
+	if state.liveStarted then
+		return
+	end
+
+	state.liveStarted = true
+
+	task.spawn(function()
+		while task.wait(state.liveInterval) do
+			checkLiveUpdates()
+		end
+	end)
+end
+
+renderScripts = function()
 	clearScriptsPage()
 
 	local page = ScriptsTab.Page
@@ -2731,7 +2946,13 @@ local function renderScripts()
 	createSourceCircle(top, "scriptblox", -114, "SB", ScriptBloxLogoURL)
 	createSourceCircle(top, "rscripts", -60, "R", RscriptsLogoURL)
 
-	createButton(top, "Previous", UDim2.new(1, -214, 0, 66), UDim2.fromOffset(96, 28), function()
+	ui.liveButton = createButton(top, state.liveEnabled and "Live: On" or "Live: Off", UDim2.new(1, -318, 0, 66), UDim2.fromOffset(88, 28), function()
+		state.liveEnabled = not state.liveEnabled
+		refreshLiveButton()
+		setStatus(state.liveEnabled and "Live updates enabled." or "Live updates disabled.")
+	end, not state.liveEnabled)
+
+	createButton(top, "Previous", UDim2.new(1, -224, 0, 66), UDim2.fromOffset(104, 28), function()
 		if state.page <= 1 then
 			setStatus("Already on the first page.")
 			return
@@ -2740,7 +2961,7 @@ local function renderScripts()
 		searchScripts()
 	end, true)
 
-	createButton(top, "Next", UDim2.new(1, -108, 0, 66), UDim2.fromOffset(82, 28), function()
+	createButton(top, "Next", UDim2.new(1, -108, 0, 66), UDim2.fromOffset(92, 28), function()
 		if state.totalPages <= 0 or state.page >= state.totalPages then
 			setStatus("Already on the last page.")
 			return
@@ -2888,47 +3109,29 @@ searchScripts = function()
 		return
 	end
 
-	if decoded.message or decoded.error then
+	local results, totalPages, err = parseProviderResponse(decoded)
+	if err then
 		state.busy = false
-		createEmptyScripts(tostring(decoded.message or decoded.error))
-		setStatus(tostring(decoded.message or decoded.error))
+		createEmptyScripts(err)
+		setStatus(err)
 		safeSelectTab(ScriptsTab)
 		return
 	end
 
-	if state.source == "rscripts" then
-		if type(decoded.scripts) ~= "table" then
-			state.results = {}
-			state.totalPages = 0
-			state.busy = false
-			createEmptyScripts("No scripts found")
-			setStatus("No scripts found.")
-			safeSelectTab(ScriptsTab)
-			return
-		end
-
-		state.results = normalizeRscriptsList(decoded.scripts)
-		state.totalPages = decoded.info and tonumber(decoded.info.maxPages) or 0
-	else
-		if not decoded.result or type(decoded.result.scripts) ~= "table" then
-			state.results = {}
-			state.totalPages = 0
-			state.busy = false
-			createEmptyScripts("No scripts found")
-			setStatus("No scripts found.")
-			safeSelectTab(ScriptsTab)
-			return
-		end
-
-		state.results = decoded.result.scripts
-		for _, item in ipairs(state.results) do
-			if type(item) == "table" then
-				item._source = "scriptblox"
-			end
-		end
-		state.totalPages = tonumber(decoded.result.totalPages) or 0
+	if not results or #results == 0 then
+		state.results = {}
+		state.totalPages = 0
+		state.busy = false
+		updateLiveSnapshot(state.results)
+		createEmptyScripts("No scripts found")
+		setStatus("No scripts found.")
+		safeSelectTab(ScriptsTab)
+		return
 	end
 
+	state.results = results
+	state.totalPages = totalPages
+	updateLiveSnapshot(state.results)
 	renderScripts()
 	safeSelectTab(ScriptsTab)
 	if state.query == "" and tostring(state.placeId or "") ~= "" then
@@ -3433,4 +3636,5 @@ renderFavorites()
 updateFilterSummary()
 updateSelected()
 safeSelectTab(SearchTab)
+startLiveWatcher()
 setStatus("Ready.")
