@@ -225,7 +225,7 @@ local state = {
 	favorites = {},
 	favoriteMode = "Current Game",
 	liveEnabled = true,
-	liveInterval = 30,
+	liveInterval = 20,
 	liveBusy = false,
 	liveStarted = false,
 	liveSnapshot = {}
@@ -1730,6 +1730,7 @@ local function buildSearchUrl()
 	return url
 end
 
+local getSortLabel
 local function updateFilterSummary()
 	if not ui.filterSummary then
 		return
@@ -1790,7 +1791,7 @@ local function getOrderFromLabel(label)
 	return "desc"
 end
 
-local function getSortLabel()
+getSortLabel = function()
 	if state.sortBy == "views" then
 		return state.order == "asc" and "Least Viewed" or "Most Viewed"
 	elseif state.sortBy == "likeCount" then
@@ -2884,7 +2885,10 @@ local function applyLiveResults(results, totalPages)
 		end
 	end
 
+	updateViewBadges(results)
+
 	if newCount == 0 and viewChanges == 0 then
+		updateLiveSnapshot(results)
 		return false
 	end
 
@@ -3187,6 +3191,11 @@ searchScripts = function()
 		setStatus("Found " .. tostring(#state.results) .. " scripts.")
 	end
 	state.busy = false
+
+	task.defer(function()
+		task.wait(2)
+		checkLiveUpdates()
+	end)
 end
 
 Window = Google:CreateWindow({
@@ -3680,4 +3689,8 @@ updateFilterSummary()
 updateSelected()
 safeSelectTab(SearchTab)
 startLiveWatcher()
+task.defer(function()
+	task.wait(2)
+	checkLiveUpdates()
+end)
 setStatus("Ready.")
