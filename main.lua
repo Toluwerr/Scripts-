@@ -206,6 +206,7 @@ local state = {
 	sortBy = "updatedAt",
 	order = "desc",
 	placeId = "",
+	owner = "",
 	unpatchedOnly = true,
 	noKeyOnly = false,
 	verifiedOnly = false,
@@ -223,12 +224,14 @@ local ui = {
 	searchInput = nil,
 	maxInput = nil,
 	gameInput = nil,
+	authorInput = nil,
 	sortDropdown = nil,
 	orderDropdown = nil,
 	status = nil,
 	filterSummary = nil,
 	scriptsInfo = nil,
 	selectedImage = nil,
+	selectedAuthorImage = nil,
 	selectedTitle = nil,
 	selectedGame = nil,
 	selectedMeta = nil,
@@ -673,12 +676,16 @@ local function createInput(parent, title, placeholder, defaultValue, position, s
 	box.ClipsDescendants = true
 	box.Font = Enum.Font.GothamMedium
 	box.PlaceholderText = placeholder or ""
-	box.PlaceholderColor3 = color("Muted", Color3.fromRGB(148, 163, 184))
+	box.PlaceholderColor3 = Color3.fromRGB(128, 96, 94)
 	box.Text = defaultValue or ""
-	box.TextColor3 = color("Text", Color3.fromRGB(241, 245, 249))
+	box.TextColor3 = Color3.fromRGB(255, 255, 255)
 	box.TextSize = 13
 	box.TextWrapped = false
 	box.TextXAlignment = Enum.TextXAlignment.Left
+	pcall(function()
+		box.CursorPosition = -1
+		box.TextEditable = true
+	end)
 	box.Position = UDim2.new(position.X.Scale, position.X.Offset, position.Y.Scale, position.Y.Offset + 24)
 	box.Size = size
 	box.Parent = parent
@@ -876,6 +883,45 @@ local function getAuthorName(scriptData)
 
 	return ""
 end
+
+local function getAuthorImage(scriptData)
+	if not scriptData then
+		return ""
+	end
+
+	local possibleTables = {
+		scriptData.owner,
+		scriptData.user,
+		scriptData.uploader,
+		scriptData.author
+	}
+
+	for _, value in ipairs(possibleTables) do
+		if type(value) == "table" then
+			local image = firstNonEmpty(
+				value.profilePicture,
+				value.profilePictureUrl,
+				value.avatar,
+				value.avatarUrl,
+				value.image,
+				value.imageUrl,
+				value.picture,
+				value.pictureUrl,
+				value.photo,
+				value.photoUrl,
+				value.pfp,
+				value.pfpUrl
+			)
+
+			if image ~= "" then
+				return image
+			end
+		end
+	end
+
+	return ""
+end
+
 
 local function formatDate(value)
 	value = tostring(value or "")
@@ -1339,6 +1385,10 @@ local function buildSearchUrl()
 		url = url .. "&placeId=" .. encode(state.placeId)
 	end
 
+	if tostring(state.owner or "") ~= "" then
+		url = url .. "&owner=" .. encode(state.owner)
+	end
+
 	if hasQuery then
 		url = url .. "&strict=false"
 	end
@@ -1392,6 +1442,10 @@ local function updateFilterSummary()
 
 	if trim(state.query) == "" then
 		table.insert(filters, "Blank search: " .. getSortLabel())
+	end
+
+	if trim(state.owner or "") ~= "" then
+		table.insert(filters, "Author: " .. state.owner)
 	end
 
 	ui.filterSummary.Text = #filters > 0 and table.concat(filters, "  •  ") or "No filters"
@@ -1911,6 +1965,9 @@ local function updateSelected()
 		ui.selectedTags.Text = "Tags will appear here."
 		setPreviewCode("Script preview will appear here.")
 		ui.selectedImage.Image = ""
+		if ui.selectedAuthorImage then
+			ui.selectedAuthorImage.Image = ""
+		end
 		if updateFavoriteButton then
 			updateFavoriteButton()
 		end
@@ -1922,6 +1979,7 @@ local function updateSelected()
 	local gameName = getGameName(scriptData)
 	local author = getAuthorName(scriptData)
 	local image = resolveImage(getScriptImage(scriptData), getScriptIdentifier(scriptData) or title)
+	local authorImage = resolveImage(getAuthorImage(scriptData), (getScriptIdentifier(scriptData) or title) .. "_author")
 	local dateLine = getDateLine(scriptData)
 
 	if author == "" then
@@ -1950,6 +2008,9 @@ local function updateSelected()
 	ui.selectedFeatures.Text = getFeatures(scriptData)
 	ui.selectedTags.Text = tagsToText(scriptData.tags)
 	ui.selectedImage.Image = image
+	if ui.selectedAuthorImage then
+		ui.selectedAuthorImage.Image = authorImage
+	end
 
 	local raw = tostring(scriptData.script or "")
 	if raw ~= "" then
@@ -2435,6 +2496,10 @@ searchScripts = function()
 		end
 	end
 
+	if ui.authorInput then
+		state.owner = trim(ui.authorInput.Text)
+	end
+
 	if ui.gameInput then
 		local rawPlaceId = trim(ui.gameInput.Text)
 		if rawPlaceId ~= "" then
@@ -2531,6 +2596,8 @@ searchScripts = function()
 	safeSelectTab(ScriptsTab)
 	if state.query == "" and tostring(state.placeId or "") ~= "" then
 		setStatus("Loaded " .. tostring(#state.results) .. " " .. string.lower(getSortLabel()) .. " scripts for selected game.")
+	elseif tostring(state.owner or "") ~= "" then
+		setStatus("Loaded " .. tostring(#state.results) .. " scripts by " .. state.owner .. ".")
 	elseif state.query == "" then
 		setStatus("Loaded " .. tostring(#state.results) .. " " .. string.lower(getSortLabel()) .. " scripts.")
 	else
@@ -2573,7 +2640,7 @@ preparePage(ScriptsTab)
 local selectedPage = preparePage(SelectedTab)
 preparePage(FavoritesTab)
 
-local searchPanel = createPanel(searchPage, 218, 1, color("Card", Color3.fromRGB(24, 24, 27)))
+local searchPanel = createPanel(searchPage, 290, 1, color("Card", Color3.fromRGB(24, 24, 27)))
 
 ui.searchInput = createInput(
 	searchPanel,
@@ -2591,12 +2658,28 @@ ui.searchInput = createInput(
 	end
 )
 
+ui.authorInput = createInput(
+	searchPanel,
+	"Author",
+	"Optional username filter",
+	"",
+	UDim2.fromOffset(14, 84),
+	UDim2.new(1, -28, 0, 36),
+	function(value, enterPressed)
+		state.owner = trim(value)
+		if enterPressed then
+			state.page = 1
+			searchScripts()
+		end
+	end
+)
+
 ui.maxInput = createInput(
 	searchPanel,
 	"Max",
 	"12",
 	"12",
-	UDim2.fromOffset(14, 84),
+	UDim2.fromOffset(14, 156),
 	UDim2.fromOffset(86, 34),
 	function(value)
 		local parsed = tonumber(value)
@@ -2611,7 +2694,7 @@ ui.gameInput = createInput(
 	"Game PlaceId",
 	"Optional exact game filter",
 	"",
-	UDim2.fromOffset(116, 84),
+	UDim2.fromOffset(116, 156),
 	UDim2.new(1, -246, 0, 34),
 	function(value)
 		local rawPlaceId = trim(value)
@@ -2632,7 +2715,7 @@ ui.gameInput = createInput(
 	end
 )
 
-createButton(searchPanel, "Current Game", UDim2.new(1, -116, 0, 108), UDim2.fromOffset(102, 32), function()
+createButton(searchPanel, "Current Game", UDim2.new(1, -116, 0, 180), UDim2.fromOffset(102, 32), function()
 	state.placeId = tostring(game.PlaceId)
 
 	if ui.gameInput then
@@ -2642,12 +2725,12 @@ createButton(searchPanel, "Current Game", UDim2.new(1, -116, 0, 108), UDim2.from
 	setStatus("Game filter set to current game.")
 end, true)
 
-createButton(searchPanel, "Search", UDim2.fromOffset(14, 154), UDim2.fromOffset(96, 34), function()
+createButton(searchPanel, "Search", UDim2.fromOffset(14, 226), UDim2.fromOffset(96, 34), function()
 	state.page = 1
 	searchScripts()
 end, false)
 
-createButton(searchPanel, "Clear", UDim2.fromOffset(120, 154), UDim2.fromOffset(82, 34), function()
+createButton(searchPanel, "Clear", UDim2.fromOffset(120, 226), UDim2.fromOffset(82, 34), function()
 	state.query = ""
 	state.results = {}
 	state.totalPages = 0
@@ -2665,7 +2748,12 @@ createButton(searchPanel, "Clear", UDim2.fromOffset(120, 154), UDim2.fromOffset(
 		ui.gameInput.Text = ""
 	end
 
+	if ui.authorInput then
+		ui.authorInput.Text = ""
+	end
+
 	state.placeId = ""
+	state.owner = ""
 
 	createEmptyScripts()
 	updateSelected()
@@ -2676,7 +2764,7 @@ local statusWrap = Instance.new("Frame")
 statusWrap.BackgroundColor3 = color("CardAlt", Color3.fromRGB(36, 26, 25))
 statusWrap.BorderSizePixel = 0
 statusWrap.ClipsDescendants = true
-statusWrap.Position = UDim2.fromOffset(214, 160)
+statusWrap.Position = UDim2.fromOffset(214, 232)
 statusWrap.Size = UDim2.new(1, -228, 0, 22)
 statusWrap.Parent = searchPanel
 
@@ -2825,6 +2913,26 @@ ui.selectedImage.Image = ""
 ui.selectedImage.Parent = selectedTop
 
 addCorner(ui.selectedImage, 12)
+addStroke(ui.selectedImage, color("Border", Color3.fromRGB(92, 74, 72)), 0.18, 1)
+
+local authorWrap = Instance.new("Frame")
+authorWrap.BackgroundColor3 = color("Input", Color3.fromRGB(24, 17, 17))
+authorWrap.BorderSizePixel = 0
+authorWrap.Position = UDim2.fromOffset(104, 104)
+authorWrap.Size = UDim2.fromOffset(46, 46)
+authorWrap.Parent = selectedTop
+addCorner(authorWrap, 23)
+addStroke(authorWrap, color("Border", Color3.fromRGB(92, 74, 72)), 0.16, 1)
+
+ui.selectedAuthorImage = Instance.new("ImageLabel")
+ui.selectedAuthorImage.BackgroundTransparency = 1
+ui.selectedAuthorImage.BorderSizePixel = 0
+ui.selectedAuthorImage.Position = UDim2.fromOffset(4, 4)
+ui.selectedAuthorImage.Size = UDim2.fromOffset(38, 38)
+ui.selectedAuthorImage.ScaleType = Enum.ScaleType.Crop
+ui.selectedAuthorImage.Image = ""
+ui.selectedAuthorImage.Parent = authorWrap
+addCorner(ui.selectedAuthorImage, 19)
 
 ui.selectedTitle = createText(selectedTop, {
 	Text = "No script selected",
