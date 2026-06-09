@@ -233,7 +233,8 @@ local state = {
 	viewWatchStarted = false,
 	viewWatchBusy = false,
 	viewWatchIndex = 1,
-	viewWatchDelay = 0.55,
+	viewWatchDelay = 0.75,
+	viewWatchWorkers = 3,
 	viewWatchBurst = 0,
 	liveStarted = false,
 	liveSnapshot = {}
@@ -943,6 +944,53 @@ local function getViewCount(scriptData)
 	)
 end
 
+local function setViewCount(scriptData, value)
+	if type(scriptData) ~= "table" then
+		return scriptData
+	end
+
+	value = math.max(0, math.floor(tonumber(value) or 0))
+	scriptData.views = value
+	scriptData.viewCount = value
+	scriptData.totalViews = value
+
+	if type(scriptData.stats) == "table" then
+		scriptData.stats.views = value
+	end
+
+	if type(scriptData.statistics) == "table" then
+		scriptData.statistics.views = value
+	end
+
+	return scriptData
+end
+
+local function stableViewCount(scriptData)
+	local rawViews = getViewCount(scriptData)
+	local id = getScriptIdentifier(scriptData)
+
+	if id and state.liveSnapshot and state.liveSnapshot[tostring(id)] ~= nil then
+		return math.max(rawViews, tonumber(state.liveSnapshot[tostring(id)]) or 0)
+	end
+
+	return rawViews
+end
+
+local function storeStableView(id, value)
+	if not id then
+		return value
+	end
+
+	id = tostring(id)
+	value = math.max(0, math.floor(tonumber(value) or 0))
+
+	state.liveSnapshot = state.liveSnapshot or {}
+	state.liveSnapshot[id] = math.max(value, tonumber(state.liveSnapshot[id]) or 0)
+
+	return state.liveSnapshot[id]
+end
+
+
 local function compactNumber(value)
 	value = tonumber(value) or 0
 
@@ -957,11 +1005,14 @@ end
 
 local function updateLiveSnapshot(results)
 	local snapshot = {}
+	local previous = state.liveSnapshot or {}
 
 	for _, item in ipairs(results or {}) do
 		local id = getScriptIdentifier(item)
 		if id then
-			snapshot[tostring(id)] = getViewCount(item)
+			id = tostring(id)
+			local views = getViewCount(item)
+			snapshot[id] = math.max(views, tonumber(previous[id]) or 0)
 		end
 	end
 
@@ -2329,7 +2380,7 @@ local function updateSelected()
 
 	local meta = {
 		"Author: " .. author,
-		"Views: " .. compactNumber(getViewCount(scriptData)),
+		"Views: " .. compactNumber(stableViewCount(scriptData)),
 		"Likes: " .. tostring(scriptData.likeCount or "N/A"),
 		"Dislikes: " .. tostring(scriptData.dislikeCount or "N/A"),
 		"Verified: " .. boolToText(scriptData.verified),
@@ -2503,7 +2554,7 @@ local function createScriptCard(parent, scriptData, index)
 	addStroke(viewBadge, color("Border", Color3.fromRGB(51, 65, 85)), 0.55, 1)
 
 	local viewLabel = createText(viewBadge, {
-		Text = "Views " .. compactNumber(getViewCount(scriptData)),
+		Text = "Views " .. compactNumber(stableViewCount(scriptData)),
 		Font = Enum.Font.GothamBold,
 		TextSize = 10,
 		TextColor3 = color("Text", Color3.fromRGB(241, 245, 249)),
@@ -2866,9 +2917,12 @@ local function updateViewBadges(results)
 	for _, item in ipairs(results or {}) do
 		local id = getScriptIdentifier(item)
 		if id then
-			local label = ui.viewBadges[tostring(id)]
+			local idText = tostring(id)
+			local views = storeStableView(idText, getViewCount(item))
+			local label = ui.viewBadges[idText]
+
 			if label and label.Parent then
-				label.Text = "Views " .. compactNumber(getViewCount(item))
+				label.Text = "Views " .. compactNumber(views)
 			end
 		end
 	end
@@ -2888,7 +2942,12 @@ local function mergeVisibleResultFields(results)
 		local id = getScriptIdentifier(current)
 		local updated = id and byId[tostring(id)]
 		if updated then
-			state.results[index] = mergeTables(current, updated)
+			local oldViews = stableViewCount(current)
+			local incomingViews = getViewCount(updated)
+			local stableViews = math.max(oldViews, incomingViews)
+			local merged = mergeTables(current, updated)
+			setViewCount(merged, stableViews)
+			state.results[index] = merged
 		end
 	end
 end
@@ -2905,21 +2964,25 @@ local function updateOneVisibleScriptViews(index)
 	end
 
 	local idText = tostring(id)
-	local oldViews = getViewCount(current)
+	local oldViews = stableViewCount(current)
 	local updated = fetchDetails(current)
 
 	if type(updated) ~= "table" then
 		return false
 	end
 
-	local newViews = getViewCount(updated)
-	if newViews == oldViews then
-		state.liveSnapshot[idText] = newViews
+	local fetchedViews = getViewCount(updated)
+	local newViews = math.max(oldViews, fetchedViews)
+
+	if newViews <= oldViews then
+		storeStableView(idText, oldViews)
 		return false
 	end
 
-	state.results[index] = mergeTables(current, updated)
-	state.liveSnapshot[idText] = newViews
+	local merged = mergeTables(current, updated)
+	setViewCount(merged, newViews)
+	state.results[index] = merged
+	storeStableView(idText, newViews)
 
 	local label = ui.viewBadges and ui.viewBadges[idText]
 	if label and label.Parent then
@@ -2927,7 +2990,7 @@ local function updateOneVisibleScriptViews(index)
 	end
 
 	if state.selected and tostring(getScriptIdentifier(state.selected) or "") == idText then
-		state.selected = mergeTables(state.selected, updated)
+		state.selected = mergeTables(state.selected, merged)
 		updateSelected()
 	end
 
@@ -2935,7 +2998,7 @@ local function updateOneVisibleScriptViews(index)
 end
 
 local function checkVisibleViewOnce()
-	if not state.liveEnabled or state.busy or state.viewWatchBusy then
+	if not state.liveEnabled or state.busy then
 		return false
 	end
 
@@ -2943,17 +3006,17 @@ local function checkVisibleViewOnce()
 		return false
 	end
 
-	state.viewWatchBusy = true
-
 	local count = #state.results
 	state.viewWatchIndex = math.clamp(tonumber(state.viewWatchIndex) or 1, 1, count)
 
-	local changed = updateOneVisibleScriptViews(state.viewWatchIndex)
-
+	local index = state.viewWatchIndex
 	state.viewWatchIndex += 1
+
 	if state.viewWatchIndex > count then
 		state.viewWatchIndex = 1
 	end
+
+	local changed = updateOneVisibleScriptViews(index)
 
 	if changed then
 		state.viewWatchBurst = 8
@@ -2961,7 +3024,6 @@ local function checkVisibleViewOnce()
 		state.viewWatchBurst = math.max(0, (state.viewWatchBurst or 0) - 1)
 	end
 
-	state.viewWatchBusy = false
 	return changed
 end
 
@@ -2972,18 +3034,22 @@ local function startBadgeViewWatcher()
 
 	state.viewWatchStarted = true
 
-	task.spawn(function()
-		while true do
-			local delay = state.viewWatchDelay
+	for worker = 1, state.viewWatchWorkers do
+		task.spawn(function()
+			task.wait((worker - 1) * 0.18)
 
-			if state.viewWatchBurst and state.viewWatchBurst > 0 then
-				delay = 0.35
+			while true do
+				local delay = state.viewWatchDelay
+
+				if state.viewWatchBurst and state.viewWatchBurst > 0 then
+					delay = 0.35
+				end
+
+				task.wait(delay)
+				checkVisibleViewOnce()
 			end
-
-			task.wait(delay)
-			checkVisibleViewOnce()
-		end
-	end)
+		end)
+	end
 end
 
 local function applyLiveResults(results, totalPages)
@@ -2996,10 +3062,11 @@ local function applyLiveResults(results, totalPages)
 		if id then
 			id = tostring(id)
 			local views = getViewCount(item)
+			local previousViews = tonumber(oldSnapshot[id]) or 0
 
 			if oldSnapshot[id] == nil then
 				newCount = newCount + 1
-			elseif oldSnapshot[id] ~= views then
+			elseif views > previousViews then
 				viewChanges = viewChanges + 1
 			end
 		end
@@ -3020,6 +3087,15 @@ local function applyLiveResults(results, totalPages)
 	end
 
 	if newCount > 0 then
+		local previous = state.liveSnapshot or {}
+		for _, item in ipairs(results or {}) do
+			local id = getScriptIdentifier(item)
+			if id then
+				local stableViews = math.max(getViewCount(item), tonumber(previous[tostring(id)]) or 0)
+				setViewCount(item, stableViews)
+			end
+		end
+
 		state.results = results
 		updateLiveSnapshot(results)
 		renderScripts()
@@ -3323,7 +3399,7 @@ searchScripts = function()
 	scheduleFastChecks()
 
 	task.defer(function()
-		task.wait(0.25)
+		task.wait(0.1)
 		checkVisibleViewOnce()
 	end)
 end
@@ -3822,7 +3898,7 @@ startLiveWatcher()
 startBadgeViewWatcher()
 scheduleFastChecks()
 task.defer(function()
-	task.wait(0.25)
+	task.wait(0.1)
 	checkVisibleViewOnce()
 end)
 setStatus("Ready.")
