@@ -659,6 +659,40 @@ local function createButton(parent, text, position, size, callback, soft)
 	return button
 end
 
+local function forceInputTextStyle(box)
+	local inputTextColor = Color3.fromRGB(255, 255, 255)
+	local placeholderColor = Color3.fromRGB(175, 136, 132)
+
+	local function apply()
+		if not box or not box.Parent then
+			return
+		end
+
+		box.TextColor3 = inputTextColor
+		box.TextTransparency = 0
+		box.PlaceholderColor3 = placeholderColor
+		box.Font = Enum.Font.GothamSemibold
+		box.TextSize = 13
+	end
+
+	apply()
+
+	pcall(function()
+		box:GetPropertyChangedSignal("TextColor3"):Connect(apply)
+		box:GetPropertyChangedSignal("TextTransparency"):Connect(apply)
+		box:GetPropertyChangedSignal("PlaceholderColor3"):Connect(apply)
+		box:GetPropertyChangedSignal("Font"):Connect(apply)
+		box:GetPropertyChangedSignal("Text"):Connect(apply)
+		box.Focused:Connect(apply)
+		box.FocusLost:Connect(function()
+			task.defer(apply)
+		end)
+	end)
+
+	task.defer(apply)
+	return box
+end
+
 local function createInput(parent, title, placeholder, defaultValue, position, size, callback)
 	createText(parent, {
 		Text = title,
@@ -670,15 +704,16 @@ local function createInput(parent, title, placeholder, defaultValue, position, s
 
 	local box = Instance.new("TextBox")
 	box.Name = safeName(title) .. "Input"
-	box.BackgroundColor3 = color("Input", Color3.fromRGB(24, 17, 17))
+	box.BackgroundColor3 = Color3.fromRGB(10, 6, 6)
 	box.BorderSizePixel = 0
 	box.ClearTextOnFocus = false
 	box.ClipsDescendants = true
-	box.Font = Enum.Font.GothamMedium
+	box.Font = Enum.Font.GothamSemibold
 	box.PlaceholderText = placeholder or ""
-	box.PlaceholderColor3 = Color3.fromRGB(128, 96, 94)
+	box.PlaceholderColor3 = Color3.fromRGB(175, 136, 132)
 	box.Text = defaultValue or ""
 	box.TextColor3 = Color3.fromRGB(255, 255, 255)
+	box.TextTransparency = 0
 	box.TextSize = 13
 	box.TextWrapped = false
 	box.TextXAlignment = Enum.TextXAlignment.Left
@@ -696,8 +731,8 @@ local function createInput(parent, title, placeholder, defaultValue, position, s
 
 	addCorner(box, 12)
 	addStroke(box, color("Border", Color3.fromRGB(92, 74, 72)), 0.16, 1)
-	addGradient(box, box.BackgroundColor3:Lerp(Color3.fromRGB(255, 255, 255), 0.03), box.BackgroundColor3:Lerp(Color3.fromRGB(0, 0, 0), 0.12), 90)
 	addPadding(box, 14, 0, 14, 0)
+	forceInputTextStyle(box)
 
 	box.FocusLost:Connect(function(enterPressed)
 		callback(box.Text, enterPressed)
