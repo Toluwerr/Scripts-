@@ -198,8 +198,11 @@ local RawEndpoint = "https://scriptblox.com/api/script/raw/"
 local RscriptsEndpoint = "https://rscripts.net/api/v2/scripts"
 local RscriptsDetailsEndpoint = "https://rscripts.net/api/v2/script"
 local GameSearchEndpoint = "https://www.roblox.com/games/list-json"
+local GameSearchProxyEndpoint = "https://www.roproxy.com/games/list-json"
 local GameIconEndpoint = "https://thumbnails.roblox.com/v1/games/icons"
+local GameIconProxyEndpoint = "https://thumbnails.roproxy.com/v1/games/icons"
 local GameOmniSearchEndpoint = "https://apis.roblox.com/search-api/omni-search"
+local GameOmniSearchProxyEndpoint = "https://apis.roproxy.com/search-api/omni-search"
 local RolimonsGameListEndpoint = "https://api.rolimons.com/games/v1/gamelist"
 local SiteURL = "https://scriptblox.com"
 local RscriptsSiteURL = "https://rscripts.net"
@@ -395,47 +398,58 @@ end
 local function requestGet(url, headers)
 	headers = type(headers) == "table" and headers or nil
 
+	local requestData = {Url = url, Method = "GET"}
+	if headers then
+		requestData.Headers = headers
+	end
+
+	local requestMethods = {}
+
+	if type(request) == "function" then
+		table.insert(requestMethods, request)
+	end
+
+	if type(http_request) == "function" then
+		table.insert(requestMethods, http_request)
+	end
+
+	if syn and type(syn.request) == "function" then
+		table.insert(requestMethods, syn.request)
+	end
+
+	if fluxus and type(fluxus.request) == "function" then
+		table.insert(requestMethods, fluxus.request)
+	end
+
+	if http and type(http.request) == "function" then
+		table.insert(requestMethods, http.request)
+	end
+
+	local lastError = nil
+
+	for _, method in ipairs(requestMethods) do
+		local ok, response = pcall(function()
+			return method(requestData)
+		end)
+
+		if ok and response then
+			if type(response) == "table" then
+				if response.Body then
+					return true, response.Body
+				end
+
+				if response.body then
+					return true, response.body
+				end
+			elseif type(response) == "string" then
+				return true, response
+			end
+		elseif not ok then
+			lastError = response
+		end
+	end
+
 	local ok, result = pcall(function()
-		local requestData = {Url = url, Method = "GET"}
-		if headers then
-			requestData.Headers = headers
-		end
-
-		if type(request) == "function" then
-			local response = request(requestData)
-			if response and response.Body then
-				return response.Body
-			end
-		end
-
-		if type(http_request) == "function" then
-			local response = http_request(requestData)
-			if response and response.Body then
-				return response.Body
-			end
-		end
-
-		if syn and type(syn.request) == "function" then
-			local response = syn.request(requestData)
-			if response and response.Body then
-				return response.Body
-			end
-		end
-
-		if fluxus and type(fluxus.request) == "function" then
-			local response = fluxus.request(requestData)
-			if response and response.Body then
-				return response.Body
-			end
-		end
-
-		if http and type(http.request) == "function" then
-			local response = http.request(requestData)
-			if response and response.Body then
-				return response.Body
-			end
-		end
-
 		return game:HttpGet(url)
 	end)
 
@@ -443,7 +457,7 @@ local function requestGet(url, headers)
 		return true, result
 	end
 
-	return false, tostring(result)
+	return false, tostring(result or lastError or "Request failed")
 end
 
 local function copyText(text)
@@ -3243,11 +3257,14 @@ local function hydrateGameIcons(games)
 		return
 	end
 
-	local url = GameIconEndpoint
-		.. "?universeIds=" .. encode(table.concat(universeIds, ","))
+	local urlSuffix = "?universeIds=" .. encode(table.concat(universeIds, ","))
 		.. "&size=150x150&format=Png&isCircular=false"
 
-	local ok, body = requestGet(url)
+	local ok, body = requestGet(GameIconEndpoint .. urlSuffix)
+	if not ok or type(body) ~= "string" then
+		ok, body = requestGet(GameIconProxyEndpoint .. urlSuffix)
+	end
+
 	if not ok or type(body) ~= "string" then
 		return
 	end
@@ -3285,6 +3302,26 @@ local function buildGamesOmniSearchUrl()
 	local query = trim(state.gameQuery or "")
 
 	return GameOmniSearchEndpoint
+		.. "?searchQuery=" .. encode(query)
+		.. "&pageType=all"
+		.. "&sessionId=" .. encode(tostring(game.JobId or ""))
+end
+
+local function buildGamesSearchProxyUrl()
+	local query = trim(state.gameQuery or "")
+	local startRows = math.max(0, (tonumber(state.gamePage) or 1) - 1) * state.gameMax
+
+	return GameSearchProxyEndpoint
+		.. "?keyword=" .. encode(query)
+		.. "&startRows=" .. encode(startRows)
+		.. "&maxRows=" .. encode(state.gameMax)
+		.. "&isKeywordSuggestionEnabled=true"
+end
+
+local function buildGamesOmniSearchProxyUrl()
+	local query = trim(state.gameQuery or "")
+
+	return GameOmniSearchProxyEndpoint
 		.. "?searchQuery=" .. encode(query)
 		.. "&pageType=all"
 		.. "&sessionId=" .. encode(tostring(game.JobId or ""))
@@ -3558,6 +3595,211 @@ renderGames = function()
 	grid.Size = UDim2.new(1, -10, 0, rows * 194)
 end
 
+
+local function addUniqueGame(output, seen, gameData)
+	if type(gameData) ~= "table" then
+		return
+	end
+
+	local name = getGameTitle(gameData)
+	local placeId = getGamePlaceId(gameData)
+	local universeId = getGameUniverseId(gameData)
+
+	if name == "" or name == "Unknown Game" then
+		return
+	end
+
+	if placeId == "" and universeId == "" then
+		return
+	end
+
+	local key = firstNonEmpty(placeId, universeId, name)
+	if seen[key] then
+		return
+	end
+
+	seen[key] = true
+	table.insert(output, gameData)
+end
+
+local function gameFromScriptData(scriptData)
+	if type(scriptData) ~= "table" then
+		return nil
+	end
+
+	local gameInfo = type(scriptData.game) == "table" and scriptData.game or {}
+	local name = firstNonEmpty(
+		gameInfo.name,
+		gameInfo.title,
+		gameInfo.gameName,
+		gameInfo.Name,
+		scriptData.gameName,
+		scriptData.title
+	)
+
+	local placeId = getScriptPlaceId(scriptData)
+	local universeId = tostring(firstNonEmpty(
+		gameInfo.universeId,
+		gameInfo.UniverseId,
+		gameInfo.id,
+		scriptData.universeId
+	))
+
+	local image = firstNonEmpty(
+		gameInfo.imageUrl,
+		gameInfo.imgurl,
+		gameInfo.image,
+		gameInfo.thumbnailUrl,
+		scriptData.image
+	)
+
+	if name == "" or (placeId == "" and universeId == "") then
+		return nil
+	end
+
+	return {
+		Name = name,
+		PlaceId = placeId,
+		UniverseId = universeId,
+		Image = image,
+		Playing = tonumber(gameInfo.playing or gameInfo.playerCount or 0) or 0,
+		Visits = tonumber(gameInfo.visits or gameInfo.visitCount or 0) or 0,
+		Creator = "",
+		Description = ""
+	}
+end
+
+local function searchGamesFromScriptBlox()
+	local url = SearchEndpoint
+		.. "?q=" .. encode(state.gameQuery)
+		.. "&page=1"
+		.. "&max=30"
+		.. "&strict=false"
+
+	local ok, body = requestGet(url)
+	if not ok or type(body) ~= "string" then
+		return {}
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" or not decoded.result or type(decoded.result.scripts) ~= "table" then
+		return {}
+	end
+
+	local output = {}
+	local seen = {}
+
+	for _, scriptData in ipairs(decoded.result.scripts) do
+		addUniqueGame(output, seen, gameFromScriptData(scriptData))
+	end
+
+	if #output > 0 then
+		state.gameSearchDebug = "ScriptBlox game data"
+	end
+
+	return output
+end
+
+local function searchGamesFromRscripts()
+	local url = RscriptsEndpoint
+		.. "?page=1"
+		.. "&q=" .. encode(state.gameQuery)
+		.. "&orderBy=date"
+		.. "&sort=desc"
+		.. "&notPaid=true"
+
+	local ok, body = requestGet(url)
+	if not ok or type(body) ~= "string" then
+		return {}
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" or type(decoded.scripts) ~= "table" then
+		return {}
+	end
+
+	local output = {}
+	local seen = {}
+
+	for _, scriptData in ipairs(normalizeRscriptsList(decoded.scripts)) do
+		addUniqueGame(output, seen, gameFromScriptData(scriptData))
+	end
+
+	if #output > 0 then
+		state.gameSearchDebug = "Rscripts game data"
+	end
+
+	return output
+end
+
+local KnownGames = {
+	["adopt me"] = {
+		Name = "Adopt Me!",
+		PlaceId = "920587237",
+		UniverseId = "383310974",
+		Image = "rbxthumb://type=GameIcon&id=383310974&w=150&h=150",
+		Playing = 0,
+		Visits = 0
+	},
+	["blox fruits"] = {
+		Name = "Blox Fruits",
+		PlaceId = "2753915549",
+		UniverseId = "994732206",
+		Image = "rbxthumb://type=GameIcon&id=994732206&w=150&h=150",
+		Playing = 0,
+		Visits = 0
+	},
+	["brookhaven"] = {
+		Name = "Brookhaven 🏡RP",
+		PlaceId = "4924922222",
+		UniverseId = "1686885941",
+		Image = "rbxthumb://type=GameIcon&id=1686885941&w=150&h=150",
+		Playing = 0,
+		Visits = 0
+	},
+	["grow a garden"] = {
+		Name = "Grow a Garden",
+		PlaceId = "126884695634066",
+		UniverseId = "7436755782",
+		Image = "rbxthumb://type=GameIcon&id=7436755782&w=150&h=150",
+		Playing = 0,
+		Visits = 0
+	},
+	["murder mystery 2"] = {
+		Name = "Murder Mystery 2",
+		PlaceId = "142823291",
+		UniverseId = "66654135",
+		Image = "rbxthumb://type=GameIcon&id=66654135&w=150&h=150",
+		Playing = 0,
+		Visits = 0
+	}
+}
+
+local function searchKnownGames()
+	local query = trim(state.gameQuery or ""):lower()
+	local output = {}
+	local seen = {}
+
+	for key, gameData in pairs(KnownGames) do
+		if key:find(query, 1, true) or query:find(key, 1, true) or getGameTitle(gameData):lower():find(query, 1, true) then
+			addUniqueGame(output, seen, gameData)
+		end
+	end
+
+	if #output > 0 then
+		state.gameSearchDebug = "Known game fallback"
+	end
+
+	return output
+end
+
+
 searchGames = function()
 	if state.gameBusy then
 		return
@@ -3577,47 +3819,58 @@ searchGames = function()
 	state.gameBusy = true
 	setStatus("Searching games...")
 
-	local headers = {
-		["Accept"] = "application/json",
-		["User-Agent"] = "Roblox/WinInet"
-	}
-
-	local ok, body = requestGet(buildGamesSearchUrl(), headers)
-	local decodedOk, decoded = false, nil
 	local results = {}
 
-	if ok and type(body) == "string" then
-		decodedOk, decoded = pcall(function()
+	local function tryJsonSearch(url, label)
+		local ok, body = requestGet(url)
+		if not ok or type(body) ~= "string" then
+			return {}
+		end
+
+		local decodedOk, decoded = pcall(function()
 			return HttpService:JSONDecode(body)
 		end)
 
-		if decodedOk and type(decoded) == "table" then
-			results = parseGamesResponse(decoded)
-			if #results > 0 then
-				state.gameSearchDebug = "Roblox list search"
-			end
+		if not decodedOk or type(decoded) ~= "table" then
+			return {}
 		end
+
+		local parsed = parseGamesResponse(decoded)
+		if #parsed > 0 then
+			state.gameSearchDebug = label
+		end
+
+		return parsed
+	end
+
+	results = tryJsonSearch(buildGamesSearchUrl(), "Roblox list search")
+
+	if #results == 0 then
+		results = tryJsonSearch(buildGamesSearchProxyUrl(), "Roblox proxy list search")
 	end
 
 	if #results == 0 then
-		local fallbackOk, fallbackBody = requestGet(buildGamesOmniSearchUrl(), headers)
+		results = tryJsonSearch(buildGamesOmniSearchUrl(), "Roblox omni search")
+	end
 
-		if fallbackOk and type(fallbackBody) == "string" then
-			local fallbackDecodedOk, fallbackDecoded = pcall(function()
-				return HttpService:JSONDecode(fallbackBody)
-			end)
-
-			if fallbackDecodedOk and type(fallbackDecoded) == "table" then
-				results = parseGamesResponse(fallbackDecoded)
-				if #results > 0 then
-					state.gameSearchDebug = "Roblox omni search"
-				end
-			end
-		end
+	if #results == 0 then
+		results = tryJsonSearch(buildGamesOmniSearchProxyUrl(), "Roblox proxy omni search")
 	end
 
 	if #results == 0 then
 		results = tryRolimonsGameSearch()
+	end
+
+	if #results == 0 then
+		results = searchGamesFromScriptBlox()
+	end
+
+	if #results == 0 then
+		results = searchGamesFromRscripts()
+	end
+
+	if #results == 0 then
+		results = searchKnownGames()
 	end
 
 	if not results or #results == 0 then
@@ -3625,7 +3878,7 @@ searchGames = function()
 		state.gameResults = {}
 		renderGames()
 		safeSelectTab(GamesTab)
-		setStatus(state.gameLastError ~= "" and state.gameLastError or "No games found.")
+		setStatus("No games found from Roblox, proxy, Rolimon, ScriptBlox, or Rscripts.")
 		return
 	end
 
@@ -3640,7 +3893,7 @@ searchGames = function()
 	if #results == 0 then
 		setStatus("No games found.")
 	else
-		setStatus("Found " .. tostring(#results) .. " games.")
+		setStatus("Found " .. tostring(#results) .. " games" .. (state.gameSearchDebug ~= "" and (" using " .. state.gameSearchDebug .. ".") or "."))
 	end
 end
 
