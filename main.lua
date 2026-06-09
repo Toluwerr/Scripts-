@@ -200,8 +200,8 @@ local RscriptsDetailsEndpoint = "https://rscripts.net/api/v2/script"
 local SiteURL = "https://scriptblox.com"
 local RscriptsSiteURL = "https://rscripts.net"
 local ImageFolder = "ScriptBloxFinderImages"
-local ScriptBloxLogoURL = "https://scriptblox.com/favicon.ico"
-local RscriptsLogoURL = "https://rscripts.net/_next/image?url=%2Flogo.svg&w=128&q=75"
+local ScriptBloxLogoURL = "https://www.google.com/s2/favicons?sz=64&domain_url=scriptblox.com"
+local RscriptsLogoURL = "https://www.google.com/s2/favicons?sz=64&domain_url=rscripts.net"
 local FavoritesFile = AutoRerunFolder .. "/Favorites.json"
 
 local state = {
@@ -2647,6 +2647,7 @@ end
 
 local function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
 	local active = state.source == source
+	local asset = resolveImage(logoUrl, source .. "_source_logo")
 
 	local button = Instance.new("TextButton")
 	button.Name = source .. "SourceButton"
@@ -2655,22 +2656,10 @@ local function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
 	button.Position = UDim2.new(1, xOffset, 0, 10)
-	button.Size = UDim2.fromOffset(38, 38)
+	button.Size = UDim2.fromOffset(40, 40)
 	button.Parent = parent
-	addCorner(button, 19)
-	addStroke(button, active and color("Primary", Color3.fromRGB(248, 81, 73)) or color("Border", Color3.fromRGB(92, 74, 72)), active and 0.15 or 0.28, 1)
-
-	local asset = resolveImage(logoUrl, source .. "_source_logo")
-
-	local img = Instance.new("ImageLabel")
-	img.Name = "Logo"
-	img.BackgroundTransparency = 1
-	img.BorderSizePixel = 0
-	img.Position = UDim2.fromOffset(7, 7)
-	img.Size = UDim2.fromOffset(24, 24)
-	img.Image = asset
-	img.ScaleType = Enum.ScaleType.Fit
-	img.Parent = button
+	addCorner(button, 20)
+	addStroke(button, active and color("Primary", Color3.fromRGB(248, 81, 73)) or color("Border", Color3.fromRGB(92, 74, 72)), active and 0.08 or 0.22, 1)
 
 	local fallback = createText(button, {
 		Text = labelText,
@@ -2681,7 +2670,17 @@ local function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
 		TextYAlignment = Enum.TextYAlignment.Center,
 		Size = UDim2.fromScale(1, 1)
 	})
-	fallback.Visible = asset == ""
+
+	local img = Instance.new("ImageLabel")
+	img.Name = "Logo"
+	img.BackgroundTransparency = 1
+	img.BorderSizePixel = 0
+	img.Position = UDim2.fromOffset(8, 8)
+	img.Size = UDim2.fromOffset(24, 24)
+	img.Image = asset
+	img.ScaleType = Enum.ScaleType.Fit
+	img.ZIndex = fallback.ZIndex + 1
+	img.Parent = button
 
 	if source == "scriptblox" then
 		ui.sourceScriptBloxButton = button
