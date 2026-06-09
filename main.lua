@@ -2048,7 +2048,7 @@ renderFavorites = function()
 	local page = FavoritesTab.Page
 	local visible = getVisibleFavorites()
 
-	local top = createPanel(page, 104, 1, color("PrimarySoft", Color3.fromRGB(69, 26, 26)))
+	local top = createPanel(page, 116, 1, color("Card", Color3.fromRGB(24, 24, 27)))
 	top.Name = "FavoritesTop"
 
 	createText(top, {
@@ -2069,12 +2069,12 @@ renderFavorites = function()
 		Size = UDim2.new(1, -28, 0, 18)
 	})
 
-	ui.favoriteCurrentButton = createButton(top, "Current Game", UDim2.fromOffset(14, 66), UDim2.fromOffset(130, 28), function()
+	ui.favoriteCurrentButton = createButton(top, "Current Game", UDim2.fromOffset(14, 66), UDim2.fromOffset(130, 30), function()
 		state.favoriteMode = "Current Game"
 		renderFavorites()
 	end, state.favoriteMode ~= "Current Game")
 
-	ui.favoriteUniversalButton = createButton(top, "Universal", UDim2.fromOffset(154, 66), UDim2.fromOffset(110, 28), function()
+	ui.favoriteUniversalButton = createButton(top, "Universal", UDim2.fromOffset(154, 66), UDim2.fromOffset(110, 30), function()
 		state.favoriteMode = "Universal"
 		renderFavorites()
 	end, state.favoriteMode ~= "Universal")
@@ -2085,7 +2085,7 @@ renderFavorites = function()
 		TextSize = 11,
 		TextColor3 = color("Muted", Color3.fromRGB(187, 153, 150)),
 		TextXAlignment = Enum.TextXAlignment.Right,
-		Position = UDim2.new(1, -292, 0, 70),
+		Position = UDim2.new(1, -292, 0, 72),
 		Size = UDim2.fromOffset(278, 18),
 		TextTruncate = Enum.TextTruncate.AtEnd
 	})
@@ -2625,7 +2625,7 @@ createCheck(startupPanel, "Auto Reopen", UDim2.fromOffset(14, 36), UDim2.new(1, 
 	setAutoRerun(value)
 end)
 
-local selectedTop = createPanel(selectedPage, 210, 1, color("Card", Color3.fromRGB(24, 24, 27)))
+local selectedTop = createPanel(selectedPage, 248, 1, color("Card", Color3.fromRGB(24, 24, 27)))
 
 ui.selectedImage = Instance.new("ImageLabel")
 ui.selectedImage.BackgroundColor3 = color("CardAlt", Color3.fromRGB(39, 39, 42))
@@ -2666,14 +2666,14 @@ ui.selectedMeta = createText(selectedTop, {
 	Size = UDim2.new(1, -188, 0, 94)
 })
 
-createButton(selectedTop, "Copy Raw", UDim2.fromOffset(174, 168), UDim2.fromOffset(110, 30), function()
+createButton(selectedTop, "Copy Raw", UDim2.fromOffset(174, 168), UDim2.fromOffset(104, 30), function()
 	local raw = fetchRawSelected()
 	if raw then
 		copyText(raw)
 	end
 end, false)
 
-createButton(selectedTop, "Copy Page", UDim2.fromOffset(294, 168), UDim2.fromOffset(110, 30), function()
+createButton(selectedTop, "Copy Page", UDim2.fromOffset(286, 168), UDim2.fromOffset(104, 30), function()
 	if not state.selected then
 		setStatus("Select a script first.")
 		return
@@ -2687,11 +2687,11 @@ createButton(selectedTop, "Copy Page", UDim2.fromOffset(294, 168), UDim2.fromOff
 	end
 end, true)
 
-createButton(selectedTop, "Execute", UDim2.fromOffset(414, 168), UDim2.fromOffset(96, 30), function()
+createButton(selectedTop, "Execute", UDim2.fromOffset(398, 168), UDim2.fromOffset(104, 30), function()
 	executeSelected()
 end, false)
 
-ui.favoriteButton = createButton(selectedTop, "Favorite Script", UDim2.fromOffset(520, 168), UDim2.fromOffset(136, 30), function()
+ui.favoriteButton = createButton(selectedTop, "Favorite Script", UDim2.fromOffset(174, 204), UDim2.new(1, -188, 0, 30), function()
 	favoriteSelected()
 end, true)
 
@@ -2765,7 +2765,7 @@ addStroke(codeFrame, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
 local lineWrap = Instance.new("Frame")
 lineWrap.BackgroundColor3 = color("CardAlt", Color3.fromRGB(39, 39, 42))
 lineWrap.BorderSizePixel = 0
-lineWrap.Size = UDim2.new(0, 44, 1, 0)
+lineWrap.Size = UDim2.new(0, 36, 1, 0)
 lineWrap.Parent = codeFrame
 
 ui.previewLines = createText(lineWrap, {
@@ -2778,15 +2778,15 @@ ui.previewLines = createText(lineWrap, {
 	TextWrapped = false,
 	TextTruncate = Enum.TextTruncate.None,
 	Position = UDim2.fromOffset(0, 10),
-	Size = UDim2.new(1, -8, 0, 120),
+	Size = UDim2.new(1, -6, 0, 120),
 	ClipsDescendants = false
 })
 
 ui.previewScroll = Instance.new("ScrollingFrame")
 ui.previewScroll.BackgroundTransparency = 1
 ui.previewScroll.BorderSizePixel = 0
-ui.previewScroll.Position = UDim2.fromOffset(44, 0)
-ui.previewScroll.Size = UDim2.new(1, -44, 1, 0)
+ui.previewScroll.Position = UDim2.fromOffset(36, 0)
+ui.previewScroll.Size = UDim2.new(1, -36, 1, 0)
 ui.previewScroll.CanvasSize = UDim2.fromOffset(0, 0)
 ui.previewScroll.ScrollBarThickness = 6
 ui.previewScroll.ScrollingDirection = Enum.ScrollingDirection.XY
