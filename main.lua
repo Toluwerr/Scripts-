@@ -225,11 +225,16 @@ local state = {
 	favorites = {},
 	favoriteMode = "Current Game",
 	liveEnabled = true,
-	liveInterval = 4,
-	liveIdleInterval = 10,
+	liveInterval = 25,
+	liveIdleInterval = 25,
 	liveBurstChecks = 0,
 	liveNoChangeCount = 0,
 	liveBusy = false,
+	viewWatchStarted = false,
+	viewWatchBusy = false,
+	viewWatchIndex = 1,
+	viewWatchDelay = 0.55,
+	viewWatchBurst = 0,
 	liveStarted = false,
 	liveSnapshot = {}
 }
@@ -2888,6 +2893,99 @@ local function mergeVisibleResultFields(results)
 	end
 end
 
+local function updateOneVisibleScriptViews(index)
+	local current = state.results and state.results[index]
+	if type(current) ~= "table" then
+		return false
+	end
+
+	local id = getScriptIdentifier(current)
+	if not id then
+		return false
+	end
+
+	local idText = tostring(id)
+	local oldViews = getViewCount(current)
+	local updated = fetchDetails(current)
+
+	if type(updated) ~= "table" then
+		return false
+	end
+
+	local newViews = getViewCount(updated)
+	if newViews == oldViews then
+		state.liveSnapshot[idText] = newViews
+		return false
+	end
+
+	state.results[index] = mergeTables(current, updated)
+	state.liveSnapshot[idText] = newViews
+
+	local label = ui.viewBadges and ui.viewBadges[idText]
+	if label and label.Parent then
+		label.Text = "Views " .. compactNumber(newViews)
+	end
+
+	if state.selected and tostring(getScriptIdentifier(state.selected) or "") == idText then
+		state.selected = mergeTables(state.selected, updated)
+		updateSelected()
+	end
+
+	return true
+end
+
+local function checkVisibleViewOnce()
+	if not state.liveEnabled or state.busy or state.viewWatchBusy then
+		return false
+	end
+
+	if not state.results or #state.results == 0 then
+		return false
+	end
+
+	state.viewWatchBusy = true
+
+	local count = #state.results
+	state.viewWatchIndex = math.clamp(tonumber(state.viewWatchIndex) or 1, 1, count)
+
+	local changed = updateOneVisibleScriptViews(state.viewWatchIndex)
+
+	state.viewWatchIndex += 1
+	if state.viewWatchIndex > count then
+		state.viewWatchIndex = 1
+	end
+
+	if changed then
+		state.viewWatchBurst = 8
+	else
+		state.viewWatchBurst = math.max(0, (state.viewWatchBurst or 0) - 1)
+	end
+
+	state.viewWatchBusy = false
+	return changed
+end
+
+local function startBadgeViewWatcher()
+	if state.viewWatchStarted then
+		return
+	end
+
+	state.viewWatchStarted = true
+
+	task.spawn(function()
+		while true do
+			local delay = state.viewWatchDelay
+
+			if state.viewWatchBurst and state.viewWatchBurst > 0 then
+				delay = 0.35
+			end
+
+			task.wait(delay)
+			checkVisibleViewOnce()
+		end
+	end)
+end
+
 local function applyLiveResults(results, totalPages)
 	local newCount = 0
 	local viewChanges = 0
@@ -2980,8 +3078,8 @@ local function checkLiveUpdates()
 end
 
 local function scheduleFastChecks()
-	state.liveBurstChecks = 6
-	state.liveNoChangeCount = 0
+	state.viewWatchIndex = 1
+	state.viewWatchBurst = 10
 end
 
 local function startLiveWatcher()
@@ -2993,24 +3091,8 @@ local function startLiveWatcher()
 
 	task.spawn(function()
 		while true do
-			local delay = state.liveInterval
-
-			if state.liveBurstChecks and state.liveBurstChecks > 0 then
-				delay = 2
-				state.liveBurstChecks = math.max(0, state.liveBurstChecks - 1)
-			elseif state.liveNoChangeCount and state.liveNoChangeCount >= 4 then
-				delay = state.liveIdleInterval
-			end
-
-			task.wait(delay)
-
-			local changed = checkLiveUpdates()
-			if changed then
-				state.liveNoChangeCount = 0
-				state.liveBurstChecks = 3
-			else
-				state.liveNoChangeCount = math.min((state.liveNoChangeCount or 0) + 1, 6)
-			end
+			task.wait(state.liveInterval)
+			checkLiveUpdates()
 		end
 	end)
 end
@@ -3018,6 +3100,7 @@ end
 renderScripts = function()
 	clearScriptsPage()
 	ui.viewBadges = {}
+	state.viewWatchIndex = 1
 
 	local page = ScriptsTab.Page
 
@@ -3240,8 +3323,8 @@ searchScripts = function()
 	scheduleFastChecks()
 
 	task.defer(function()
-		task.wait(1)
-		checkLiveUpdates()
+		task.wait(0.25)
+		checkVisibleViewOnce()
 	end)
 end
 
@@ -3736,9 +3819,10 @@ updateFilterSummary()
 updateSelected()
 safeSelectTab(SearchTab)
 startLiveWatcher()
+startBadgeViewWatcher()
 scheduleFastChecks()
 task.defer(function()
-	task.wait(1)
-	checkLiveUpdates()
+	task.wait(0.25)
+	checkVisibleViewOnce()
 end)
 setStatus("Ready.")
