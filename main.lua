@@ -243,7 +243,7 @@ local ui = {
 	scriptsInfo = nil,
 	sourceScriptBloxButton = nil,
 	sourceRscriptsButton = nil,
-	liveButton = nil,
+	viewBadges = {},
 	selectedImage = nil,
 	selectedAuthorImage = nil,
 	selectedTitle = nil,
@@ -896,12 +896,43 @@ local function getScriptIdentifier(scriptData)
 	return scriptData.slug or scriptData._id or scriptData.id
 end
 
+local function parseCount(value)
+	if type(value) == "number" then
+		return math.max(0, math.floor(value))
+	end
+
+	local text = tostring(value or ""):lower()
+	text = text:gsub(",", "")
+	text = text:gsub("%s+", "")
+
+	local numberPart = text:match("^[%d%.]+")
+	local number = tonumber(numberPart or text) or 0
+
+	if text:find("m", 1, true) then
+		number = number * 1000000
+	elseif text:find("k", 1, true) then
+		number = number * 1000
+	end
+
+	return math.max(0, math.floor(number))
+end
+
 local function getViewCount(scriptData)
 	if type(scriptData) ~= "table" then
 		return 0
 	end
 
-	return tonumber(scriptData.views or scriptData.viewCount or scriptData.totalViews or 0) or 0
+	local stats = type(scriptData.stats) == "table" and scriptData.stats or {}
+	local statistics = type(scriptData.statistics) == "table" and scriptData.statistics or {}
+
+	return parseCount(
+		scriptData.views
+		or scriptData.viewCount
+		or scriptData.totalViews
+		or stats.views
+		or statistics.views
+		or 0
+	)
 end
 
 local function compactNumber(value)
@@ -2462,7 +2493,7 @@ local function createScriptCard(parent, scriptData, index)
 	addCorner(viewBadge, 7)
 	addStroke(viewBadge, color("Border", Color3.fromRGB(51, 65, 85)), 0.55, 1)
 
-	createText(viewBadge, {
+	local viewLabel = createText(viewBadge, {
 		Text = "Views " .. compactNumber(getViewCount(scriptData)),
 		Font = Enum.Font.GothamBold,
 		TextSize = 10,
@@ -2472,6 +2503,11 @@ local function createScriptCard(parent, scriptData, index)
 		Size = UDim2.fromScale(1, 1),
 		TextTruncate = Enum.TextTruncate.AtEnd
 	})
+
+	local cardId = getScriptIdentifier(scriptData)
+	if cardId then
+		ui.viewBadges[tostring(cardId)] = viewLabel
+	end
 
 	createText(card, {
 		Text = title,
@@ -2813,6 +2849,22 @@ local function findSelectedInResults(results)
 	return nil
 end
 
+local function updateViewBadges(results)
+	if not ui.viewBadges then
+		return
+	end
+
+	for _, item in ipairs(results or {}) do
+		local id = getScriptIdentifier(item)
+		if id then
+			local label = ui.viewBadges[tostring(id)]
+			if label and label.Parent then
+				label.Text = "Views " .. compactNumber(getViewCount(item))
+			end
+		end
+	end
+end
+
 local function applyLiveResults(results, totalPages)
 	local newCount = 0
 	local viewChanges = 0
@@ -2844,27 +2896,23 @@ local function applyLiveResults(results, totalPages)
 		state.selected = mergeTables(state.selected, replacementSelected)
 	end
 
-	updateLiveSnapshot(results)
-	renderScripts()
+	if newCount > 0 then
+		updateLiveSnapshot(results)
+		renderScripts()
+	else
+		updateViewBadges(results)
+		updateLiveSnapshot(results)
+	end
 
 	if replacementSelected then
 		updateSelected()
-	end
-
-	if newCount > 0 then
-		setStatus("Live: " .. tostring(newCount) .. " new script" .. (newCount == 1 and "" or "s") .. " found.")
-	elseif viewChanges > 0 then
-		setStatus("Live: views updated.")
 	end
 
 	return true
 end
 
 local function refreshLiveButton()
-	if ui.liveButton then
-		ui.liveButton.Text = state.liveEnabled and "Live: On" or "Live: Off"
-		ui.liveButton.BackgroundColor3 = state.liveEnabled and color("Primary", Color3.fromRGB(67, 135, 244)) or color("PrimarySoft", Color3.fromRGB(30, 58, 105))
-	end
+	return
 end
 
 local function checkLiveUpdates()
@@ -2919,6 +2967,7 @@ end
 
 renderScripts = function()
 	clearScriptsPage()
+	ui.viewBadges = {}
 
 	local page = ScriptsTab.Page
 
@@ -2945,12 +2994,6 @@ renderScripts = function()
 
 	createSourceCircle(top, "scriptblox", -114, "SB", ScriptBloxLogoURL)
 	createSourceCircle(top, "rscripts", -60, "R", RscriptsLogoURL)
-
-	ui.liveButton = createButton(top, state.liveEnabled and "Live: On" or "Live: Off", UDim2.new(1, -318, 0, 66), UDim2.fromOffset(88, 28), function()
-		state.liveEnabled = not state.liveEnabled
-		refreshLiveButton()
-		setStatus(state.liveEnabled and "Live updates enabled." or "Live updates disabled.")
-	end, not state.liveEnabled)
 
 	createButton(top, "Previous", UDim2.new(1, -224, 0, 66), UDim2.fromOffset(104, 28), function()
 		if state.page <= 1 then
