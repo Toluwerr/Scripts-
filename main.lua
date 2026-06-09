@@ -1,16 +1,16 @@
-local Players = game:GetService("Players")
-local HttpService = game:GetService("HttpService")
-local TeleportService = game:GetService("TeleportService")
+Players = game:GetService("Players")
+HttpService = game:GetService("HttpService")
+TeleportService = game:GetService("TeleportService")
 
-local LocalPlayer = Players.LocalPlayer
+LocalPlayer = Players.LocalPlayer
 
 
-local AutoRerunURL = "https://raw.githubusercontent.com/Toluwerr/Script-Finder/refs/heads/main/main.lua"
-local AutoRerunFolder = "ScriptFinderSettings"
-local AutoRerunConfig = AutoRerunFolder .. "/AutoRerun.txt"
-local AutoRerunAutoexec = "autoexec/ScriptFinder.lua"
+AutoRerunURL = "https://raw.githubusercontent.com/Toluwerr/Script-Finder/refs/heads/main/main.lua"
+AutoRerunFolder = "ScriptFinderSettings"
+AutoRerunConfig = AutoRerunFolder .. "/AutoRerun.txt"
+AutoRerunAutoexec = "autoexec/ScriptFinder.lua"
 
-local function ensureAutoRerunFolder()
+function ensureAutoRerunFolder()
 	if type(makefolder) == "function" and type(isfolder) == "function" then
 		pcall(function()
 			if not isfolder(AutoRerunFolder) then
@@ -20,7 +20,7 @@ local function ensureAutoRerunFolder()
 	end
 end
 
-local function getAutoRerunEnabled()
+function getAutoRerunEnabled()
 	if type(isfile) == "function" and type(readfile) == "function" then
 		local ok, result = pcall(function()
 			if isfile(AutoRerunConfig) then
@@ -36,7 +36,7 @@ local function getAutoRerunEnabled()
 	return true
 end
 
-local function writeAutoRerunEnabled(value)
+function writeAutoRerunEnabled(value)
 	if type(writefile) ~= "function" then
 		return
 	end
@@ -48,10 +48,10 @@ local function writeAutoRerunEnabled(value)
 	end)
 end
 
-local AutoRerunEnabled = getAutoRerunEnabled()
+AutoRerunEnabled = getAutoRerunEnabled()
 
-local AutoRerunLoader = [[
-local Enabled = true
+AutoRerunLoader = [[
+Enabled = true
 pcall(function()
 	if type(isfile) == "function" and type(readfile) == "function" and isfile("ScriptFinderSettings/AutoRerun.txt") then
 		Enabled = readfile("ScriptFinderSettings/AutoRerun.txt") ~= "false"
@@ -62,7 +62,7 @@ if Enabled then
 end
 ]]
 
-local function getTeleportQueue()
+function getTeleportQueue()
 	if type(queue_on_teleport) == "function" then
 		return queue_on_teleport
 	end
@@ -82,7 +82,7 @@ local function getTeleportQueue()
 	return nil
 end
 
-local function queueSelfOnTeleport()
+function queueSelfOnTeleport()
 	if not AutoRerunEnabled then
 		return
 	end
@@ -96,7 +96,7 @@ local function queueSelfOnTeleport()
 	end
 end
 
-local function saveAutoExecuteLoader()
+function saveAutoExecuteLoader()
 	if type(writefile) ~= "function" then
 		return
 	end
@@ -118,7 +118,7 @@ local function saveAutoExecuteLoader()
 	end)
 end
 
-local function saveConfigState()
+function saveConfigState()
 	if Configs then
 		pcall(function()
 			Configs:Save("script_finder")
@@ -126,7 +126,7 @@ local function saveConfigState()
 	end
 end
 
-local function setAutoRerun(value)
+function setAutoRerun(value)
 	AutoRerunEnabled = value == true
 	writeAutoRerunEnabled(AutoRerunEnabled)
 	saveAutoExecuteLoader()
@@ -149,9 +149,9 @@ pcall(function()
 	end)
 end)
 
-local Google = "https://raw.githubusercontent.com/Toluwerr/Google-UI/refs/heads/main/main.lua"
+Google = "https://raw.githubusercontent.com/Toluwerr/Google-UI/refs/heads/main/main.lua"
 
-local loaded, Google = pcall(function()
+loaded, Google = pcall(function()
 	local Source = game:HttpGet(Google .. "?cache=" .. tostring(os.time()) .. tostring(math.random(1000, 9999)))
 	Source = Source:gsub("([,{]%s*)pad%s*=", "%1Padding =")
 	Source = Source:gsub("%.pad", ".Padding")
@@ -178,7 +178,7 @@ pcall(function()
 	end
 end)
 
-local Configs = nil
+Configs = nil
 pcall(function()
 	if type(Google.CreateConfigManager) == "function" then
 		Configs = Google:CreateConfigManager({
@@ -191,35 +191,35 @@ pcall(function()
 	end
 end)
 
-local SearchEndpoint = "https://scriptblox.com/api/script/search"
-local FetchEndpoint = "https://scriptblox.com/api/script/fetch"
-local DetailsEndpoint = "https://scriptblox.com/api/script/"
-local RawEndpoint = "https://scriptblox.com/api/script/raw/"
-local RscriptsEndpoint = "https://rscripts.net/api/v2/scripts"
-local RscriptsDetailsEndpoint = "https://rscripts.net/api/v2/script"
-local GameSearchEndpoint = "https://www.roblox.com/games/list-json"
-local GameSearchProxyEndpoint = "https://www.roproxy.com/games/list-json"
-local GameIconEndpoint = "https://thumbnails.roblox.com/v1/games/icons"
-local GameIconProxyEndpoint = "https://thumbnails.roproxy.com/v1/games/icons"
-local GameDetailsEndpoint = "https://games.roblox.com/v1/games"
-local GameDetailsProxyEndpoint = "https://games.roproxy.com/v1/games"
-local GameOmniSearchEndpoint = "https://apis.roblox.com/search-api/omni-search"
-local GameOmniSearchProxyEndpoint = "https://apis.roproxy.com/search-api/omni-search"
-local RolimonsGameListEndpoint = "https://api.rolimons.com/games/v1/gamelist"
-local UserSearchEndpoint = "https://users.roblox.com/v1/users/search"
-local UserSearchProxyEndpoint = "https://users.roproxy.com/v1/users/search"
-local AvatarHeadshotEndpoint = "https://thumbnails.roblox.com/v1/users/avatar-headshot"
-local AvatarHeadshotProxyEndpoint = "https://thumbnails.roproxy.com/v1/users/avatar-headshot"
-local PresenceEndpoint = "https://presence.roblox.com/v1/presence/users"
-local PresenceProxyEndpoint = "https://presence.roproxy.com/v1/presence/users"
-local SiteURL = "https://scriptblox.com"
-local RscriptsSiteURL = "https://rscripts.net"
-local ImageFolder = "ScriptBloxFinderImages"
-local ScriptBloxLogoURL = "rbxthumb://type=Asset&id=84945399616047&w=150&h=150"
-local RscriptsLogoURL = "rbxthumb://type=Asset&id=108648055077644&w=150&h=150"
-local FavoritesFile = AutoRerunFolder .. "/Favorites.json"
+SearchEndpoint = "https://scriptblox.com/api/script/search"
+FetchEndpoint = "https://scriptblox.com/api/script/fetch"
+DetailsEndpoint = "https://scriptblox.com/api/script/"
+RawEndpoint = "https://scriptblox.com/api/script/raw/"
+RscriptsEndpoint = "https://rscripts.net/api/v2/scripts"
+RscriptsDetailsEndpoint = "https://rscripts.net/api/v2/script"
+GameSearchEndpoint = "https://www.roblox.com/games/list-json"
+GameSearchProxyEndpoint = "https://www.roproxy.com/games/list-json"
+GameIconEndpoint = "https://thumbnails.roblox.com/v1/games/icons"
+GameIconProxyEndpoint = "https://thumbnails.roproxy.com/v1/games/icons"
+GameDetailsEndpoint = "https://games.roblox.com/v1/games"
+GameDetailsProxyEndpoint = "https://games.roproxy.com/v1/games"
+GameOmniSearchEndpoint = "https://apis.roblox.com/search-api/omni-search"
+GameOmniSearchProxyEndpoint = "https://apis.roproxy.com/search-api/omni-search"
+RolimonsGameListEndpoint = "https://api.rolimons.com/games/v1/gamelist"
+UserSearchEndpoint = "https://users.roblox.com/v1/users/search"
+UserSearchProxyEndpoint = "https://users.roproxy.com/v1/users/search"
+AvatarHeadshotEndpoint = "https://thumbnails.roblox.com/v1/users/avatar-headshot"
+AvatarHeadshotProxyEndpoint = "https://thumbnails.roproxy.com/v1/users/avatar-headshot"
+PresenceEndpoint = "https://presence.roblox.com/v1/presence/users"
+PresenceProxyEndpoint = "https://presence.roproxy.com/v1/presence/users"
+SiteURL = "https://scriptblox.com"
+RscriptsSiteURL = "https://rscripts.net"
+ImageFolder = "ScriptBloxFinderImages"
+ScriptBloxLogoURL = "rbxthumb://type=Asset&id=84945399616047&w=150&h=150"
+RscriptsLogoURL = "rbxthumb://type=Asset&id=108648055077644&w=150&h=150"
+FavoritesFile = AutoRerunFolder .. "/Favorites.json"
 
-local state = {
+state = {
 	query = "",
 	source = "scriptblox",
 	page = 1,
@@ -269,7 +269,7 @@ local state = {
 	liveSnapshot = {}
 }
 
-local ui = {
+ui = {
 	searchInput = nil,
 	maxInput = nil,
 	gameInput = nil,
@@ -302,29 +302,29 @@ local ui = {
 	favoriteUniversalButton = nil
 }
 
-local Window
-local SearchTab
-local ScriptsTab
-local PeopleTab
-local GamesTab
-local SelectedTab
-local FavoritesTab
-local searchScripts
-local searchGames
-local renderGames
-local searchPeople
-local renderPeople
-local selectScript
-local renderFavorites
-local renderScripts
-local updateFavoriteButton
-local favoriteSelected
+Window = nil
+SearchTab = nil
+ScriptsTab = nil
+PeopleTab = nil
+GamesTab = nil
+SelectedTab = nil
+FavoritesTab = nil
+searchScripts = nil
+searchGames = nil
+renderGames = nil
+searchPeople = nil
+renderPeople = nil
+selectScript = nil
+renderFavorites = nil
+renderScripts = nil
+updateFavoriteButton = nil
+favoriteSelected = nil
 
-local function theme()
+function theme()
 	return Google.Theme or {}
 end
 
-local PaletteOverrides = {
+PaletteOverrides = {
 	Card = Color3.fromRGB(17, 24, 39),
 	CardAlt = Color3.fromRGB(30, 41, 59),
 	Input = Color3.fromRGB(15, 23, 42),
@@ -338,7 +338,7 @@ local PaletteOverrides = {
 	Muted = Color3.fromRGB(148, 163, 184)
 }
 
-local function color(name, fallback)
+function color(name, fallback)
 	if PaletteOverrides[name] then
 		return PaletteOverrides[name]
 	end
@@ -347,15 +347,15 @@ local function color(name, fallback)
 	return t[name] or fallback
 end
 
-local function trim(value)
+function trim(value)
 	return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
-local function encode(value)
+function encode(value)
 	return HttpService:UrlEncode(tostring(value or ""))
 end
 
-local function setStatus(text)
+function setStatus(text)
 	text = tostring(text or "")
 	if ui.status then
 		ui.status.Text = text
@@ -375,7 +375,7 @@ local function setStatus(text)
 	end
 end
 
-local function safeSelectTab(tab)
+function safeSelectTab(tab)
 	if Window and Window.SelectTab then
 		local ok = pcall(function()
 			Window:SelectTab(tab)
@@ -410,7 +410,7 @@ local function safeSelectTab(tab)
 	end
 end
 
-local function requestGet(url, headers)
+function requestGet(url, headers)
 	headers = type(headers) == "table" and headers or nil
 
 	local requestData = {Url = url, Method = "GET"}
@@ -475,7 +475,7 @@ local function requestGet(url, headers)
 	return false, tostring(result or lastError or "Request failed")
 end
 
-local function requestPostJson(url, payload, headers)
+function requestPostJson(url, payload, headers)
 	local body = ""
 	local encodedOk, encoded = pcall(function()
 		return HttpService:JSONEncode(payload or {})
@@ -556,7 +556,7 @@ local function requestPostJson(url, payload, headers)
 end
 
 
-local function copyText(text)
+function copyText(text)
 	text = tostring(text or "")
 	if text == "" then
 		setStatus("Nothing to copy.")
@@ -591,11 +591,11 @@ local function copyText(text)
 	return copied
 end
 
-local function writeSupported()
+function writeSupported()
 	return type(writefile) == "function" and (type(getcustomasset) == "function" or type(getsynasset) == "function")
 end
 
-local function customAsset(path)
+function customAsset(path)
 	if type(getcustomasset) == "function" then
 		local ok, result = pcall(function()
 			return getcustomasset(path)
@@ -617,7 +617,7 @@ local function customAsset(path)
 	return ""
 end
 
-local function ensureImageFolder()
+function ensureImageFolder()
 	if type(makefolder) == "function" and type(isfolder) == "function" then
 		pcall(function()
 			if not isfolder(ImageFolder) then
@@ -627,7 +627,7 @@ local function ensureImageFolder()
 	end
 end
 
-local function safeName(value)
+function safeName(value)
 	value = tostring(value or "image")
 	value = value:gsub("[^%w_%-]", "_")
 	value = value:gsub("_+", "_")
@@ -640,7 +640,7 @@ local function safeName(value)
 	return value
 end
 
-local function normalizeImageURL(value)
+function normalizeImageURL(value)
 	value = tostring(value or "")
 
 	if value == "" then
@@ -666,9 +666,9 @@ local function normalizeImageURL(value)
 	return SiteURL .. "/" .. value
 end
 
-local imageCache = {}
+imageCache = {}
 
-local function resolveImage(value, identifier)
+function resolveImage(value, identifier)
 	local url = normalizeImageURL(value)
 
 	if url == "" then
@@ -716,7 +716,7 @@ local function resolveImage(value, identifier)
 	return asset
 end
 
-local function addCorner(parent, radius)
+function addCorner(parent, radius)
 	local corner = Instance.new("UICorner")
 	local value = radius or 6
 
@@ -729,7 +729,7 @@ local function addCorner(parent, radius)
 	return corner
 end
 
-local function addStroke(parent, strokeColor, transparency, thickness)
+function addStroke(parent, strokeColor, transparency, thickness)
 	local stroke = Instance.new("UIStroke")
 	stroke.Color = strokeColor
 	stroke.Transparency = math.max(transparency or 0.45, 0.32)
@@ -739,7 +739,7 @@ local function addStroke(parent, strokeColor, transparency, thickness)
 	return stroke
 end
 
-local function addGradient(parent, topColor, bottomColor, rotation)
+function addGradient(parent, topColor, bottomColor, rotation)
 	local gradient = Instance.new("UIGradient")
 	gradient.Color = ColorSequence.new({
 		ColorSequenceKeypoint.new(0, topColor),
@@ -750,7 +750,7 @@ local function addGradient(parent, topColor, bottomColor, rotation)
 	return gradient
 end
 
-local function addPadding(parent, left, top, right, bottom)
+function addPadding(parent, left, top, right, bottom)
 	local padding = Instance.new("UIPadding")
 	padding.PaddingLeft = UDim.new(0, left or 0)
 	padding.PaddingTop = UDim.new(0, top or 0)
@@ -760,7 +760,7 @@ local function addPadding(parent, left, top, right, bottom)
 	return padding
 end
 
-local function createText(parent, data)
+function createText(parent, data)
 	local label = Instance.new("TextLabel")
 	label.BackgroundTransparency = data.BackgroundTransparency or 1
 	label.BackgroundColor3 = data.BackgroundColor3 or color("Card", Color3.fromRGB(17, 24, 39))
@@ -781,7 +781,7 @@ local function createText(parent, data)
 	return label
 end
 
-local function createPanel(parent, height, layoutOrder, backgroundColor)
+function createPanel(parent, height, layoutOrder, backgroundColor)
 	local panel = Instance.new("Frame")
 	panel.BackgroundColor3 = backgroundColor or color("Card", Color3.fromRGB(17, 24, 39))
 	panel.BorderSizePixel = 0
@@ -796,7 +796,7 @@ local function createPanel(parent, height, layoutOrder, backgroundColor)
 	return panel
 end
 
-local function createButton(parent, text, position, size, callback, soft)
+function createButton(parent, text, position, size, callback, soft)
 	local button = Instance.new("TextButton")
 	button.Name = safeName(text)
 	button.Text = text
@@ -831,7 +831,7 @@ local function createButton(parent, text, position, size, callback, soft)
 	return button
 end
 
-local function forceInputTextStyle(box)
+function forceInputTextStyle(box)
 	local inputTextColor = Color3.fromRGB(255, 255, 255)
 	local placeholderColor = Color3.fromRGB(148, 163, 184)
 
@@ -865,7 +865,7 @@ local function forceInputTextStyle(box)
 	return box
 end
 
-local function createInput(parent, title, placeholder, defaultValue, position, size, callback)
+function createInput(parent, title, placeholder, defaultValue, position, size, callback)
 	createText(parent, {
 		Text = title,
 		Font = Enum.Font.GothamSemibold,
@@ -913,7 +913,7 @@ local function createInput(parent, title, placeholder, defaultValue, position, s
 	return box
 end
 
-local function createCheck(parent, title, position, size, defaultValue, callback)
+function createCheck(parent, title, position, size, defaultValue, callback)
 	local button = Instance.new("TextButton")
 	button.BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))
 	button.BorderSizePixel = 0
@@ -968,7 +968,7 @@ local function createCheck(parent, title, position, size, defaultValue, callback
 	return button
 end
 
-local function preparePage(tab)
+function preparePage(tab)
 	local page = tab and tab.Page
 	if not page then
 		return nil
@@ -1013,7 +1013,7 @@ local function preparePage(tab)
 	return page
 end
 
-local function firstNonEmpty(...)
+function firstNonEmpty(...)
 	local values = {...}
 	for _, value in ipairs(values) do
 		if type(value) == "string" and trim(value) ~= "" then
@@ -1023,18 +1023,18 @@ local function firstNonEmpty(...)
 	return ""
 end
 
-local function boolToText(value)
+function boolToText(value)
 	return value and "Yes" or "No"
 end
 
-local function getScriptIdentifier(scriptData)
+function getScriptIdentifier(scriptData)
 	if not scriptData then
 		return nil
 	end
 	return scriptData.slug or scriptData._id or scriptData.id
 end
 
-local function parseCount(value)
+function parseCount(value)
 	if type(value) == "number" then
 		return math.max(0, math.floor(value))
 	end
@@ -1055,7 +1055,7 @@ local function parseCount(value)
 	return math.max(0, math.floor(number))
 end
 
-local function getViewCount(scriptData)
+function getViewCount(scriptData)
 	if type(scriptData) ~= "table" then
 		return 0
 	end
@@ -1073,7 +1073,7 @@ local function getViewCount(scriptData)
 	)
 end
 
-local function setViewCount(scriptData, value)
+function setViewCount(scriptData, value)
 	if type(scriptData) ~= "table" then
 		return scriptData
 	end
@@ -1094,7 +1094,7 @@ local function setViewCount(scriptData, value)
 	return scriptData
 end
 
-local function stableViewCount(scriptData)
+function stableViewCount(scriptData)
 	local rawViews = getViewCount(scriptData)
 	local id = getScriptIdentifier(scriptData)
 
@@ -1105,7 +1105,7 @@ local function stableViewCount(scriptData)
 	return rawViews
 end
 
-local function storeStableView(id, value)
+function storeStableView(id, value)
 	if not id then
 		return value
 	end
@@ -1120,7 +1120,7 @@ local function storeStableView(id, value)
 end
 
 
-local function compactNumber(value)
+function compactNumber(value)
 	value = tonumber(value) or 0
 
 	if value >= 1000000 then
@@ -1132,7 +1132,7 @@ local function compactNumber(value)
 	return tostring(math.floor(value))
 end
 
-local function updateLiveSnapshot(results)
+function updateLiveSnapshot(results)
 	local snapshot = {}
 	local previous = state.liveSnapshot or {}
 
@@ -1149,14 +1149,14 @@ local function updateLiveSnapshot(results)
 end
 
 
-local function getScriptTitle(scriptData)
+function getScriptTitle(scriptData)
 	if not scriptData then
 		return "Unknown"
 	end
 	return firstNonEmpty(scriptData.title, scriptData.name, scriptData.slug, scriptData._id, "Unknown")
 end
 
-local function getGameName(scriptData)
+function getGameName(scriptData)
 	if scriptData and type(scriptData.game) == "table" then
 		local name = firstNonEmpty(scriptData.game.name, scriptData.game.title, scriptData.game.gameName)
 		if name ~= "" then
@@ -1171,14 +1171,14 @@ local function getGameName(scriptData)
 	return "Unknown Game"
 end
 
-local function getScriptImage(scriptData)
+function getScriptImage(scriptData)
 	if not scriptData then
 		return ""
 	end
 	return firstNonEmpty(scriptData.image, type(scriptData.game) == "table" and firstNonEmpty(scriptData.game.imageUrl, scriptData.game.imgurl) or "")
 end
 
-local function getAuthorName(scriptData)
+function getAuthorName(scriptData)
 	if not scriptData then
 		return ""
 	end
@@ -1210,7 +1210,7 @@ local function getAuthorName(scriptData)
 	return ""
 end
 
-local function getAuthorImage(scriptData)
+function getAuthorImage(scriptData)
 	if not scriptData then
 		return ""
 	end
@@ -1249,7 +1249,7 @@ local function getAuthorImage(scriptData)
 end
 
 
-local function formatDate(value)
+function formatDate(value)
 	value = tostring(value or "")
 	if value:match("^%d%d%d%d%-%d%d%-%d%d") then
 		return value:sub(1, 10)
@@ -1257,7 +1257,7 @@ local function formatDate(value)
 	return ""
 end
 
-local function getDateLine(scriptData)
+function getDateLine(scriptData)
 	if not scriptData then
 		return ""
 	end
@@ -1276,7 +1276,7 @@ local function getDateLine(scriptData)
 	return ""
 end
 
-local function getFeatures(scriptData)
+function getFeatures(scriptData)
 	if not scriptData then
 		return "No script selected."
 	end
@@ -1289,7 +1289,7 @@ local function getFeatures(scriptData)
 	return "No feature text provided."
 end
 
-local function tagsToText(tags)
+function tagsToText(tags)
 	if type(tags) ~= "table" or #tags == 0 then
 		return "None"
 	end
@@ -1311,15 +1311,15 @@ local function tagsToText(tags)
 end
 
 
-local function truthy(value)
+function truthy(value)
 	return value == true or value == 1 or value == "1" or tostring(value):lower() == "true" or tostring(value):lower() == "yes"
 end
 
-local function currentPlaceId()
+function currentPlaceId()
 	return tostring(game.PlaceId or "")
 end
 
-local function getScriptPlaceId(scriptData)
+function getScriptPlaceId(scriptData)
 	if not scriptData then
 		return ""
 	end
@@ -1348,7 +1348,7 @@ local function getScriptPlaceId(scriptData)
 	return ""
 end
 
-local function isUniversalScript(scriptData)
+function isUniversalScript(scriptData)
 	if not scriptData then
 		return false
 	end
@@ -1356,7 +1356,7 @@ local function isUniversalScript(scriptData)
 	return truthy(scriptData.isUniversal) or truthy(scriptData.universal) or tostring(getGameName(scriptData)):lower() == "universal"
 end
 
-local function favoriteItems()
+function favoriteItems()
 	local items = {}
 
 	for _, item in pairs(state.favorites) do
@@ -1372,7 +1372,7 @@ local function favoriteItems()
 	return items
 end
 
-local function loadFavorites()
+function loadFavorites()
 	state.favorites = {}
 
 	if Configs and Google.Options and Google.Options.ScriptFinderFavorites then
@@ -1430,7 +1430,7 @@ local function loadFavorites()
 	end
 end
 
-local function saveFavorites()
+function saveFavorites()
 	if Configs and Google.Options and Google.Options.ScriptFinderFavorites then
 		local ok, saved = pcall(function()
 			return Configs:Save("script_finder")
@@ -1467,7 +1467,7 @@ local function saveFavorites()
 	return writeOk == true
 end
 
-local function makeFavoriteEntry(scriptData)
+function makeFavoriteEntry(scriptData)
 	local id = getScriptIdentifier(scriptData)
 	if not id then
 		return nil
@@ -1498,7 +1498,7 @@ local function makeFavoriteEntry(scriptData)
 	}
 end
 
-local function isFavorite(scriptData)
+function isFavorite(scriptData)
 	local id = getScriptIdentifier(scriptData)
 	return id ~= nil and state.favorites[tostring(id)] ~= nil
 end
@@ -1516,7 +1516,7 @@ updateFavoriteButton = function()
 	ui.favoriteButton.Text = isFavorite(state.selected) and "Favorited" or "Favorite Script"
 end
 
-local function removeFavorite(id)
+function removeFavorite(id)
 	id = tostring(id or "")
 	if id == "" then
 		return
@@ -1572,7 +1572,7 @@ favoriteSelected = function()
 	end
 end
 
-local function setFavoritesFromSaved(value)
+function setFavoritesFromSaved(value)
 	state.favorites = {}
 
 	local source = value
@@ -1603,7 +1603,7 @@ local function setFavoritesFromSaved(value)
 	end
 end
 
-local function registerConfigBackedState()
+function registerConfigBackedState()
 	if not Google.Options then
 		return
 	end
@@ -1646,7 +1646,7 @@ end
 
 
 
-local function getSourceName(source)
+function getSourceName(source)
 	source = tostring(source or state.source or "scriptblox")
 	if source == "rscripts" then
 		return "Rscripts"
@@ -1654,11 +1654,11 @@ local function getSourceName(source)
 	return "ScriptBlox"
 end
 
-local function isRscripts()
+function isRscripts()
 	return state.source == "rscripts"
 end
 
-local function mapSortForRscripts(value)
+function mapSortForRscripts(value)
 	value = tostring(value or "")
 	if value == "views" then
 		return "views"
@@ -1670,7 +1670,7 @@ local function mapSortForRscripts(value)
 	return "date"
 end
 
-local function normalizeRscriptsScript(item)
+function normalizeRscriptsScript(item)
 	if type(item) ~= "table" then
 		return nil
 	end
@@ -1720,7 +1720,7 @@ local function normalizeRscriptsScript(item)
 	}
 end
 
-local function normalizeRscriptsList(list)
+function normalizeRscriptsList(list)
 	local output = {}
 	if type(list) ~= "table" then
 		return output
@@ -1736,7 +1736,7 @@ local function normalizeRscriptsList(list)
 	return output
 end
 
-local function buildSearchHeaders()
+function buildSearchHeaders()
 	if state.source == "rscripts" and trim(state.owner or "") ~= "" then
 		return {
 			Username = trim(state.owner)
@@ -1746,7 +1746,7 @@ local function buildSearchHeaders()
 	return nil
 end
 
-local function buildRscriptsSearchTerm()
+function buildRscriptsSearchTerm()
 	local parts = {}
 
 	if trim(state.query) ~= "" then
@@ -1765,7 +1765,7 @@ local function buildRscriptsSearchTerm()
 end
 
 
-local function mergeTables(base, extra)
+function mergeTables(base, extra)
 	local merged = {}
 
 	if type(base) == "table" then
@@ -1783,7 +1783,7 @@ local function mergeTables(base, extra)
 	return merged
 end
 
-local function fetchDetails(scriptData)
+function fetchDetails(scriptData)
 	local identifier = getScriptIdentifier(scriptData)
 
 	if not identifier then
@@ -1840,7 +1840,7 @@ local function fetchDetails(scriptData)
 	return scriptData
 end
 
-local function buildSearchUrl()
+function buildSearchUrl()
 	if state.source == "rscripts" then
 		local url = RscriptsEndpoint .. "?page=" .. encode(state.page)
 		url = url .. "&orderBy=" .. encode(mapSortForRscripts(state.sortBy))
@@ -1918,8 +1918,8 @@ local function buildSearchUrl()
 	return url
 end
 
-local getSortLabel
-local function updateFilterSummary()
+getSortLabel = nil
+function updateFilterSummary()
 	if not ui.filterSummary then
 		return
 	end
@@ -1957,7 +1957,7 @@ local function updateFilterSummary()
 	ui.filterSummary.Text = #filters > 0 and table.concat(filters, "  •  ") or "No filters"
 end
 
-local function getSortByFromLabel(label)
+function getSortByFromLabel(label)
 	label = tostring(label or "")
 	if label == "Newest" then
 		return "updatedAt"
@@ -1971,7 +1971,7 @@ local function getSortByFromLabel(label)
 	return "updatedAt"
 end
 
-local function getOrderFromLabel(label)
+function getOrderFromLabel(label)
 	label = tostring(label or "")
 	if label == "Ascending" then
 		return "asc"
@@ -1991,7 +1991,7 @@ getSortLabel = function()
 	return state.order == "asc" and "Oldest Updated" or "Latest"
 end
 
-local function getScriptsTitle()
+function getScriptsTitle()
 	local sourceName = getSourceName(state.source)
 
 	if state.query ~= "" then
@@ -2005,7 +2005,7 @@ local function getScriptsTitle()
 	return sourceName .. " " .. getSortLabel() .. " Scripts"
 end
 
-local function getLoadingText()
+function getLoadingText()
 	local sourceName = getSourceName(state.source)
 
 	if state.query ~= "" then
@@ -2019,9 +2019,9 @@ local function getLoadingText()
 	return "Loading " .. sourceName .. " " .. string.lower(getSortLabel()) .. " scripts..."
 end
 
-local setPreviewCode
+setPreviewCode = nil
 
-local function normalizeCodeText(text)
+function normalizeCodeText(text)
 	text = tostring(text or "")
 	text = text:gsub("\r\n", "\n")
 	text = text:gsub("\r", "\n")
@@ -2030,7 +2030,7 @@ local function normalizeCodeText(text)
 end
 
 
-local function extractScriptText(value)
+function extractScriptText(value)
 	local text = tostring(value or "")
 	local stripped = trim(text)
 
@@ -2081,7 +2081,7 @@ local function extractScriptText(value)
 	return normalizeCodeText(text)
 end
 
-local function resolveExecutableText(value)
+function resolveExecutableText(value)
 	local text = extractScriptText(value)
 	local stripped = trim(text)
 
@@ -2101,7 +2101,7 @@ local function resolveExecutableText(value)
 	return text
 end
 
-local function runExecutableText(text)
+function runExecutableText(text)
 	text = resolveExecutableText(text)
 
 	if not text or trim(text) == "" then
@@ -2145,7 +2145,7 @@ local function runExecutableText(text)
 end
 
 
-local function fetchRawSelected()
+function fetchRawSelected()
 	if not state.selected then
 		setStatus("Select a script first.")
 		return nil
@@ -2198,7 +2198,7 @@ end
 
 
 
-local function escapeRichText(value)
+function escapeRichText(value)
 	value = tostring(value or "")
 	value = value:gsub("&", "&amp;")
 	value = value:gsub("<", "&lt;")
@@ -2207,7 +2207,7 @@ local function escapeRichText(value)
 	return value
 end
 
-local syntaxColors = {
+syntaxColors = {
 	Text = "224,214,212",
 	Comment = "106,153,85",
 	String = "214,157,133",
@@ -2222,7 +2222,7 @@ local syntaxColors = {
 	Punctuation = "145,130,128"
 }
 
-local keywordSet = {
+keywordSet = {
 	["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true, ["elseif"] = true,
 	["end"] = true, ["for"] = true, ["function"] = true, ["if"] = true, ["in"] = true,
 	["local"] = true, ["not"] = true, ["or"] = true, ["repeat"] = true, ["return"] = true,
@@ -2230,11 +2230,11 @@ local keywordSet = {
 	["type"] = true
 }
 
-local constantSet = {
+constantSet = {
 	["true"] = true, ["false"] = true, ["nil"] = true, ["self"] = true
 }
 
-local globalSet = {
+globalSet = {
 	game = true, workspace = true, script = true,
 	Instance = true, Enum = true, Color3 = true, Vector2 = true, Vector3 = true,
 	UDim = true, UDim2 = true, CFrame = true, TweenInfo = true,
@@ -2242,7 +2242,7 @@ local globalSet = {
 	ColorSequence = true, BrickColor = true, Region3 = true
 }
 
-local serviceSet = {
+serviceSet = {
 	Players = true, RunService = true, UserInputService = true, TweenService = true,
 	HttpService = true, CoreGui = true, Workspace = true, ReplicatedStorage = true,
 	Lighting = true, StarterGui = true, StarterPack = true, StarterPlayer = true,
@@ -2250,7 +2250,7 @@ local serviceSet = {
 	TeleportService = true, MarketplaceService = true, Debris = true, PathfindingService = true
 }
 
-local builtinSet = {
+builtinSet = {
 	print = true, warn = true, error = true, pcall = true, xpcall = true,
 	pairs = true, ipairs = true, next = true, type = true, typeof = true,
 	tostring = true, tonumber = true, require = true, loadstring = true,
@@ -2260,19 +2260,19 @@ local builtinSet = {
 	os = true, debug = true, utf8 = true, wait = true, spawn = true, delay = true
 }
 
-local function paint(value, colorName)
+function paint(value, colorName)
 	return '<font color="rgb(' .. syntaxColors[colorName] .. ')">' .. escapeRichText(value) .. '</font>'
 end
 
-local function isAlpha(value)
+function isAlpha(value)
 	return value:match("[%a_]") ~= nil
 end
 
-local function isAlnum(value)
+function isAlnum(value)
 	return value:match("[%w_]") ~= nil
 end
 
-local function previousNonSpace(text, index)
+function previousNonSpace(text, index)
 	for i = index, 1, -1 do
 		local char = text:sub(i, i)
 		if char ~= " " and char ~= "\t" and char ~= "\n" then
@@ -2282,7 +2282,7 @@ local function previousNonSpace(text, index)
 	return ""
 end
 
-local function highlightLuau(source)
+function highlightLuau(source)
 	source = normalizeCodeText(source)
 	local result = {}
 	local i = 1
@@ -2373,7 +2373,7 @@ local function highlightLuau(source)
 	return table.concat(result)
 end
 
-local function highlightLuauWithLineNumbers(source)
+function highlightLuauWithLineNumbers(source)
 	source = normalizeCodeText(source)
 	local output = {}
 	local lineNumber = 1
@@ -2408,7 +2408,7 @@ local function highlightLuauWithLineNumbers(source)
 	return table.concat(output)
 end
 
-local function buildLineNumbers(text)
+function buildLineNumbers(text)
 	text = normalizeCodeText(text)
 	local lineCount = 1
 	for _ in text:gmatch("\n") do
@@ -2423,7 +2423,7 @@ local function buildLineNumbers(text)
 	return table.concat(lines, "\n")
 end
 
-local function updateCustomCodeBlock(text)
+function updateCustomCodeBlock(text)
 	text = normalizeCodeText(text)
 	ui.previewRaw = text
 
@@ -2473,7 +2473,7 @@ setPreviewCode = function(text)
 	end
 end
 
-local function updateSelected()
+function updateSelected()
 	if not ui.selectedTitle then
 		return
 	end
@@ -2548,7 +2548,7 @@ local function updateSelected()
 end
 
 
-local function executeSelected()
+function executeSelected()
 	local raw = fetchRawSelected()
 
 	if not raw or trim(raw) == "" then
@@ -2587,7 +2587,7 @@ selectScript = function(scriptData)
 	setStatus("Selected: " .. getScriptTitle(state.selected))
 end
 
-local function clearScriptsPage()
+function clearScriptsPage()
 	local page = ScriptsTab and ScriptsTab.Page
 	if not page then
 		return
@@ -2604,7 +2604,7 @@ local function clearScriptsPage()
 	end
 end
 
-local function createEmptyScripts(text)
+function createEmptyScripts(text)
 	clearScriptsPage()
 
 	local page = ScriptsTab.Page
@@ -2629,7 +2629,7 @@ local function createEmptyScripts(text)
 	})
 end
 
-local function createScriptCard(parent, scriptData, index)
+function createScriptCard(parent, scriptData, index)
 	local card = Instance.new("TextButton")
 	card.Name = "ScriptCard_" .. tostring(index)
 	card.AutoButtonColor = false
@@ -2723,7 +2723,7 @@ local function createScriptCard(parent, scriptData, index)
 end
 
 
-local function clearFavoritesPage()
+function clearFavoritesPage()
 	local page = FavoritesTab and FavoritesTab.Page
 	if not page then
 		return
@@ -2736,7 +2736,7 @@ local function clearFavoritesPage()
 	end
 end
 
-local function getVisibleFavorites()
+function getVisibleFavorites()
 	local visible = {}
 	local placeId = currentPlaceId()
 
@@ -2755,7 +2755,7 @@ local function getVisibleFavorites()
 	return visible
 end
 
-local function createFavoriteCard(parent, item, index)
+function createFavoriteCard(parent, item, index)
 	local data = item.Data or item
 	local card = Instance.new("TextButton")
 	card.Name = "FavoriteCard_" .. tostring(index)
@@ -2942,7 +2942,7 @@ end
 
 
 
-local function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
+function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
 	local active = state.source == source
 
 	local button = Instance.new("TextButton")
@@ -2992,7 +2992,7 @@ end
 
 
 
-local function getGameTitle(gameData)
+function getGameTitle(gameData)
 	if type(gameData) ~= "table" then
 		return "Unknown Game"
 	end
@@ -3000,7 +3000,7 @@ local function getGameTitle(gameData)
 	return firstNonEmpty(gameData.Name, gameData.name, gameData.title, gameData.gameName, "Unknown Game")
 end
 
-local function getGameUniverseId(gameData)
+function getGameUniverseId(gameData)
 	if type(gameData) ~= "table" then
 		return ""
 	end
@@ -3014,7 +3014,7 @@ local function getGameUniverseId(gameData)
 	))
 end
 
-local function getGamePlaceId(gameData)
+function getGamePlaceId(gameData)
 	if type(gameData) ~= "table" then
 		return ""
 	end
@@ -3033,7 +3033,7 @@ local function getGamePlaceId(gameData)
 	))
 end
 
-local function getGameImage(gameData)
+function getGameImage(gameData)
 	if type(gameData) ~= "table" then
 		return ""
 	end
@@ -3048,7 +3048,7 @@ local function getGameImage(gameData)
 	)
 end
 
-local function normalizeRobloxGame(item)
+function normalizeRobloxGame(item)
 	if type(item) ~= "table" then
 		return nil
 	end
@@ -3111,7 +3111,7 @@ local function normalizeRobloxGame(item)
 	}
 end
 
-local function collectGameCandidates(value, output, seen, depth)
+function collectGameCandidates(value, output, seen, depth)
 	if type(value) ~= "table" or depth > 5 then
 		return
 	end
@@ -3133,7 +3133,7 @@ local function collectGameCandidates(value, output, seen, depth)
 	end
 end
 
-local function parseGamesResponse(decoded)
+function parseGamesResponse(decoded)
 	if type(decoded) ~= "table" then
 		return {}
 	end
@@ -3170,7 +3170,7 @@ local function parseGamesResponse(decoded)
 	return output
 end
 
-local function firstNumber(...)
+function firstNumber(...)
 	local values = {...}
 
 	for _, value in ipairs(values) do
@@ -3183,7 +3183,7 @@ local function firstNumber(...)
 	return 0
 end
 
-local function normalizeRolimonsGame(placeId, entry)
+function normalizeRolimonsGame(placeId, entry)
 	if type(entry) ~= "table" then
 		return nil
 	end
@@ -3252,7 +3252,7 @@ local function normalizeRolimonsGame(placeId, entry)
 	}
 end
 
-local function parseRolimonsGameList(decoded)
+function parseRolimonsGameList(decoded)
 	local output = {}
 
 	if type(decoded) ~= "table" or type(decoded.games) ~= "table" then
@@ -3273,7 +3273,7 @@ local function parseRolimonsGameList(decoded)
 	return output
 end
 
-local function loadRolimonsGames()
+function loadRolimonsGames()
 	if state.rolimonsGamesLoaded and type(state.rolimonsGames) == "table" then
 		return true
 	end
@@ -3308,7 +3308,7 @@ local function loadRolimonsGames()
 	return true
 end
 
-local function localGameSearch(query, maxResults)
+function localGameSearch(query, maxResults)
 	query = trim(query or ""):lower()
 	maxResults = tonumber(maxResults) or state.gameMax
 
@@ -3370,7 +3370,7 @@ local function localGameSearch(query, maxResults)
 	return results
 end
 
-local function tryRolimonsGameSearch()
+function tryRolimonsGameSearch()
 	if not loadRolimonsGames() then
 		return {}
 	end
@@ -3383,7 +3383,7 @@ local function tryRolimonsGameSearch()
 	return results
 end
 
-local function hydrateGameStats(games)
+function hydrateGameStats(games)
 	games = type(games) == "table" and games or {}
 
 	if #games == 0 then
@@ -3498,7 +3498,7 @@ end
 
 
 
-local function hydrateGameIcons(games)
+function hydrateGameIcons(games)
 	local universeIds = {}
 	local lookup = {}
 
@@ -3545,7 +3545,7 @@ local function hydrateGameIcons(games)
 	end
 end
 
-local function buildGamesSearchUrl()
+function buildGamesSearchUrl()
 	local query = trim(state.gameQuery or "")
 	local startRows = math.max(0, (tonumber(state.gamePage) or 1) - 1) * state.gameMax
 
@@ -3556,7 +3556,7 @@ local function buildGamesSearchUrl()
 		.. "&isKeywordSuggestionEnabled=true"
 end
 
-local function buildGamesOmniSearchUrl()
+function buildGamesOmniSearchUrl()
 	local query = trim(state.gameQuery or "")
 
 	return GameOmniSearchEndpoint
@@ -3565,7 +3565,7 @@ local function buildGamesOmniSearchUrl()
 		.. "&sessionId=" .. encode(tostring(game.JobId or ""))
 end
 
-local function buildGamesSearchProxyUrl()
+function buildGamesSearchProxyUrl()
 	local query = trim(state.gameQuery or "")
 	local startRows = math.max(0, (tonumber(state.gamePage) or 1) - 1) * state.gameMax
 
@@ -3576,7 +3576,7 @@ local function buildGamesSearchProxyUrl()
 		.. "&isKeywordSuggestionEnabled=true"
 end
 
-local function buildGamesOmniSearchProxyUrl()
+function buildGamesOmniSearchProxyUrl()
 	local query = trim(state.gameQuery or "")
 
 	return GameOmniSearchProxyEndpoint
@@ -3585,7 +3585,7 @@ local function buildGamesOmniSearchProxyUrl()
 		.. "&sessionId=" .. encode(tostring(game.JobId or ""))
 end
 
-local function teleportToGame(gameData)
+function teleportToGame(gameData)
 	local placeId = tonumber(getGamePlaceId(gameData))
 
 	if not placeId then
@@ -3605,7 +3605,7 @@ local function teleportToGame(gameData)
 	end
 end
 
-local function clearGamesPage()
+function clearGamesPage()
 	local page = GamesTab and GamesTab.Page
 	if not page then
 		return
@@ -3618,7 +3618,7 @@ local function clearGamesPage()
 	end
 end
 
-local function createGameCard(parent, gameData, index)
+function createGameCard(parent, gameData, index)
 	local card = Instance.new("TextButton")
 	card.Name = "GameCard_" .. tostring(index)
 	card.AutoButtonColor = false
@@ -3854,7 +3854,7 @@ renderGames = function()
 end
 
 
-local function addUniqueGame(output, seen, gameData)
+function addUniqueGame(output, seen, gameData)
 	if type(gameData) ~= "table" then
 		return
 	end
@@ -3880,7 +3880,7 @@ local function addUniqueGame(output, seen, gameData)
 	table.insert(output, gameData)
 end
 
-local function gameFromScriptData(scriptData)
+function gameFromScriptData(scriptData)
 	if type(scriptData) ~= "table" then
 		return nil
 	end
@@ -3927,7 +3927,7 @@ local function gameFromScriptData(scriptData)
 	}
 end
 
-local function searchGamesFromScriptBlox()
+function searchGamesFromScriptBlox()
 	local url = SearchEndpoint
 		.. "?q=" .. encode(state.gameQuery)
 		.. "&page=1"
@@ -3961,7 +3961,7 @@ local function searchGamesFromScriptBlox()
 	return output
 end
 
-local function searchGamesFromRscripts()
+function searchGamesFromRscripts()
 	local url = RscriptsEndpoint
 		.. "?page=1"
 		.. "&q=" .. encode(state.gameQuery)
@@ -3996,7 +3996,7 @@ local function searchGamesFromRscripts()
 	return output
 end
 
-local KnownGames = {
+KnownGames = {
 	["adopt me"] = {
 		Name = "Adopt Me!",
 		PlaceId = "920587237",
@@ -4039,7 +4039,7 @@ local KnownGames = {
 	}
 }
 
-local function searchKnownGames()
+function searchKnownGames()
 	local query = trim(state.gameQuery or ""):lower()
 	local output = {}
 	local seen = {}
@@ -4158,7 +4158,7 @@ end
 
 
 
-local function getPersonId(person)
+function getPersonId(person)
 	if type(person) ~= "table" then
 		return ""
 	end
@@ -4166,7 +4166,7 @@ local function getPersonId(person)
 	return tostring(firstNonEmpty(person.Id, person.id, person.UserId, person.userId))
 end
 
-local function getPersonUsername(person)
+function getPersonUsername(person)
 	if type(person) ~= "table" then
 		return "Unknown"
 	end
@@ -4174,7 +4174,7 @@ local function getPersonUsername(person)
 	return firstNonEmpty(person.Name, person.name, person.username, person.Username, "Unknown")
 end
 
-local function getPersonDisplayName(person)
+function getPersonDisplayName(person)
 	if type(person) ~= "table" then
 		return getPersonUsername(person)
 	end
@@ -4182,7 +4182,7 @@ local function getPersonDisplayName(person)
 	return firstNonEmpty(person.DisplayName, person.displayName, person.name, person.Name, getPersonUsername(person))
 end
 
-local function getPresenceInfo(presenceType)
+function getPresenceInfo(presenceType)
 	presenceType = tonumber(presenceType) or 0
 
 	if presenceType == 3 then
@@ -4196,7 +4196,7 @@ local function getPresenceInfo(presenceType)
 	return "Offline", 1, color("Muted", Color3.fromRGB(148, 163, 184))
 end
 
-local function normalizePerson(item)
+function normalizePerson(item)
 	if type(item) ~= "table" then
 		return nil
 	end
@@ -4221,7 +4221,7 @@ local function normalizePerson(item)
 	}
 end
 
-local function parsePeopleResponse(decoded)
+function parsePeopleResponse(decoded)
 	local output = {}
 
 	if type(decoded) ~= "table" or type(decoded.data) ~= "table" then
@@ -4242,7 +4242,7 @@ local function parsePeopleResponse(decoded)
 	return output
 end
 
-local function buildPeopleSearchUrl(proxy)
+function buildPeopleSearchUrl(proxy)
 	local query = trim(state.peopleQuery or "")
 	local endpoint = proxy and UserSearchProxyEndpoint or UserSearchEndpoint
 
@@ -4251,7 +4251,7 @@ local function buildPeopleSearchUrl(proxy)
 		.. "&limit=" .. encode(state.peopleMax)
 end
 
-local function hydratePeopleAvatars(people)
+function hydratePeopleAvatars(people)
 	people = type(people) == "table" and people or {}
 
 	if #people == 0 then
@@ -4304,7 +4304,7 @@ local function hydratePeopleAvatars(people)
 	end
 end
 
-local function hydratePeoplePresence(people)
+function hydratePeoplePresence(people)
 	people = type(people) == "table" and people or {}
 
 	if #people == 0 then
@@ -4363,7 +4363,7 @@ local function hydratePeoplePresence(people)
 	end
 end
 
-local function sortPeopleByPresence(people)
+function sortPeopleByPresence(people)
 	table.sort(people, function(a, b)
 		local rankA = tonumber(a.PresenceRank) or 0
 		local rankB = tonumber(b.PresenceRank) or 0
@@ -4376,7 +4376,7 @@ local function sortPeopleByPresence(people)
 	end)
 end
 
-local function clearPeoplePage()
+function clearPeoplePage()
 	local page = PeopleTab and PeopleTab.Page
 	if not page then
 		return
@@ -4389,7 +4389,7 @@ local function clearPeoplePage()
 	end
 end
 
-local function createPersonCard(parent, person, index)
+function createPersonCard(parent, person, index)
 	local card = Instance.new("Frame")
 	card.Name = "PersonCard_" .. tostring(index)
 	card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
@@ -4679,7 +4679,7 @@ searchPeople = function()
 end
 
 
-local function parseProviderResponse(decoded)
+function parseProviderResponse(decoded)
 	if decoded.message or decoded.error then
 		return nil, 0, tostring(decoded.message or decoded.error)
 	end
@@ -4707,7 +4707,7 @@ local function parseProviderResponse(decoded)
 	return results, tonumber(decoded.result.totalPages) or 0, nil
 end
 
-local function findSelectedInResults(results)
+function findSelectedInResults(results)
 	if not state.selected then
 		return nil
 	end
@@ -4726,7 +4726,7 @@ local function findSelectedInResults(results)
 	return nil
 end
 
-local function updateViewBadges(results)
+function updateViewBadges(results)
 	if not ui.viewBadges then
 		return
 	end
@@ -4745,7 +4745,7 @@ local function updateViewBadges(results)
 	end
 end
 
-local function mergeVisibleResultFields(results)
+function mergeVisibleResultFields(results)
 	local byId = {}
 
 	for _, item in ipairs(results or {}) do
@@ -4769,7 +4769,7 @@ local function mergeVisibleResultFields(results)
 	end
 end
 
-local function updateOneVisibleScriptViews(index)
+function updateOneVisibleScriptViews(index)
 	local current = state.results and state.results[index]
 	if type(current) ~= "table" then
 		return false
@@ -4814,7 +4814,7 @@ local function updateOneVisibleScriptViews(index)
 	return true
 end
 
-local function checkVisibleViewOnce()
+function checkVisibleViewOnce()
 	if not state.liveEnabled or state.busy then
 		return false
 	end
@@ -4844,7 +4844,7 @@ local function checkVisibleViewOnce()
 	return changed
 end
 
-local function startBadgeViewWatcher()
+function startBadgeViewWatcher()
 	if state.viewWatchStarted then
 		return
 	end
@@ -4869,7 +4869,7 @@ local function startBadgeViewWatcher()
 	end
 end
 
-local function applyLiveResults(results, totalPages)
+function applyLiveResults(results, totalPages)
 	local newCount = 0
 	local viewChanges = 0
 	local oldSnapshot = state.liveSnapshot or {}
@@ -4929,11 +4929,11 @@ local function applyLiveResults(results, totalPages)
 	return true
 end
 
-local function refreshLiveButton()
+function refreshLiveButton()
 	return
 end
 
-local function checkLiveUpdates()
+function checkLiveUpdates()
 	if not state.liveEnabled or state.busy or state.liveBusy then
 		return false
 	end
@@ -4970,12 +4970,12 @@ local function checkLiveUpdates()
 	return changed == true
 end
 
-local function scheduleFastChecks()
+function scheduleFastChecks()
 	state.viewWatchIndex = 1
 	state.viewWatchBurst = 10
 end
 
-local function startLiveWatcher()
+function startLiveWatcher()
 	if state.liveStarted then
 		return
 	end
@@ -5432,7 +5432,7 @@ createCheck(filtersPanel, "Universal", UDim2.new(0.5, 6, 0, 82), UDim2.new(0.5, 
 	updateFilterSummary()
 end)
 
-orderBox
+orderBox = nil
 sortBox = Instance.new("TextButton")
 sortBox.Text = "Sort: Newest"
 sortBox.Font = Enum.Font.GothamMedium
