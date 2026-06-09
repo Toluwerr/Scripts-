@@ -6,14 +6,14 @@ local LocalPlayer = Players.LocalPlayer
 local Google = "https://raw.githubusercontent.com/Toluwerr/Google-UI/refs/heads/main/main.lua"
 
 local loaded, Google = pcall(function()
-	local Source = game:HttpGet(Google)
+	local Source = game:HttpGet(Google .. "?cache=" .. tostring(os.time()) .. tostring(math.random(1000, 9999)))
 	Source = Source:gsub("([,{]%s*)pad%s*=", "%1Padding =")
 	Source = Source:gsub("%.pad", ".Padding")
 	return loadstring(Source)()
 end)
 
 if not loaded or type(Google) ~= "table" then
-	error("Failed to load Google UI")
+	error("Failed to load Google UI: " .. tostring(Google))
 end
 
 pcall(function()
@@ -22,6 +22,9 @@ pcall(function()
 	elseif Google.Themes and Google.Themes.DarkRed then
 		Google.ActiveTheme = "DarkRed"
 		Google.Theme = Google.Themes.DarkRed
+	elseif Google.Themes and Google.Themes.Red then
+		Google.ActiveTheme = "Red"
+		Google.Theme = Google.Themes.Red
 	end
 end)
 
@@ -34,7 +37,7 @@ local ImageFolder = "ScriptBloxFinderImages"
 local state = {
 	query = "",
 	page = 1,
-	max = 10,
+	max = 12,
 	sortBy = "updatedAt",
 	order = "desc",
 	unpatchedOnly = true,
@@ -44,16 +47,17 @@ local state = {
 	results = {},
 	selected = nil,
 	totalPages = 0,
-	busy = false
+	busy = false,
+	lastUrl = ""
 }
 
 local ui = {
 	searchInput = nil,
 	maxInput = nil,
+	sortDropdown = nil,
+	orderDropdown = nil,
 	status = nil,
 	filterSummary = nil,
-	scriptsPage = nil,
-	scriptsGrid = nil,
 	scriptsInfo = nil,
 	selectedImage = nil,
 	selectedTitle = nil,
@@ -64,10 +68,10 @@ local ui = {
 	selectedPreview = nil
 }
 
+local Window
 local SearchTab
 local ScriptsTab
 local SelectedTab
-local Window
 local searchScripts
 
 local function theme()
@@ -89,66 +93,80 @@ end
 
 local function setStatus(text)
 	text = tostring(text or "")
-
 	if ui.status then
 		ui.status.Text = text
 	else
-		print("[ScriptBlox Finder] " .. text)
+		print("[Script Finder] " .. text)
+	end
+end
+
+local function safeSelectTab(tab)
+	if Window and Window.SelectTab then
+		local ok = pcall(function()
+			Window:SelectTab(tab)
+		end)
+		if ok then
+			return
+		end
+	end
+
+	if Window and Window.Tabs then
+		for _, otherTab in ipairs(Window.Tabs) do
+			local active = otherTab == tab
+			if otherTab.Page then
+				otherTab.Page.Visible = active
+			end
+			if otherTab.Button then
+				otherTab.Button.BackgroundTransparency = active and 0 or 1
+				otherTab.Button.BackgroundColor3 = active and color("PrimarySoft", Color3.fromRGB(69, 26, 26)) or color("Sidebar", Color3.fromRGB(14, 14, 18))
+			end
+			if otherTab.Accent then
+				otherTab.Accent.Visible = active
+			end
+			if otherTab.TextLabel then
+				otherTab.TextLabel.TextColor3 = active and color("Primary", Color3.fromRGB(248, 81, 73)) or color("Muted", Color3.fromRGB(148, 163, 184))
+			end
+			if otherTab.IconLabel and Google.SetIconColor then
+				Google.SetIconColor(otherTab.IconLabel, active and color("Primary", Color3.fromRGB(248, 81, 73)) or color("Muted", Color3.fromRGB(148, 163, 184)))
+			end
+			otherTab.Active = active
+		end
+		Window.ActiveTab = tab
 	end
 end
 
 local function requestGet(url)
 	local ok, result = pcall(function()
 		if type(request) == "function" then
-			local response = request({
-				Url = url,
-				Method = "GET"
-			})
-
+			local response = request({Url = url, Method = "GET"})
 			if response and response.Body then
 				return response.Body
 			end
 		end
 
 		if type(http_request) == "function" then
-			local response = http_request({
-				Url = url,
-				Method = "GET"
-			})
-
+			local response = http_request({Url = url, Method = "GET"})
 			if response and response.Body then
 				return response.Body
 			end
 		end
 
 		if syn and type(syn.request) == "function" then
-			local response = syn.request({
-				Url = url,
-				Method = "GET"
-			})
-
+			local response = syn.request({Url = url, Method = "GET"})
 			if response and response.Body then
 				return response.Body
 			end
 		end
 
 		if fluxus and type(fluxus.request) == "function" then
-			local response = fluxus.request({
-				Url = url,
-				Method = "GET"
-			})
-
+			local response = fluxus.request({Url = url, Method = "GET"})
 			if response and response.Body then
 				return response.Body
 			end
 		end
 
 		if http and type(http.request) == "function" then
-			local response = http.request({
-				Url = url,
-				Method = "GET"
-			})
-
+			local response = http.request({Url = url, Method = "GET"})
 			if response and response.Body then
 				return response.Body
 			end
@@ -166,7 +184,6 @@ end
 
 local function copyText(text)
 	text = tostring(text or "")
-
 	if text == "" then
 		setStatus("Nothing to copy.")
 		return false
@@ -209,7 +226,6 @@ local function customAsset(path)
 		local ok, result = pcall(function()
 			return getcustomasset(path)
 		end)
-
 		if ok and result then
 			return result
 		end
@@ -219,7 +235,6 @@ local function customAsset(path)
 		local ok, result = pcall(function()
 			return getsynasset(path)
 		end)
-
 		if ok and result then
 			return result
 		end
@@ -242,15 +257,12 @@ local function safeName(value)
 	value = tostring(value or "image")
 	value = value:gsub("[^%w_%-]", "_")
 	value = value:gsub("_+", "_")
-
 	if #value > 60 then
 		value = value:sub(1, 60)
 	end
-
 	if value == "" then
 		value = "image"
 	end
-
 	return value
 end
 
@@ -280,6 +292,8 @@ local function normalizeImageURL(value)
 	return SiteURL .. "/" .. value
 end
 
+local imageCache = {}
+
 local function resolveImage(value, identifier)
 	local url = normalizeImageURL(value)
 
@@ -289,6 +303,10 @@ local function resolveImage(value, identifier)
 
 	if url:match("^rbxassetid://") or url:match("^rbxthumb://") or url:match("^rbxasset://") then
 		return url
+	end
+
+	if imageCache[url] then
+		return imageCache[url]
 	end
 
 	if not writeSupported() then
@@ -308,7 +326,6 @@ local function resolveImage(value, identifier)
 
 	if type(isfile) ~= "function" or not isfile(filename) then
 		local ok, body = requestGet(url)
-
 		if ok and type(body) == "string" and body ~= "" then
 			pcall(function()
 				writefile(filename, body)
@@ -320,7 +337,9 @@ local function resolveImage(value, identifier)
 		return ""
 	end
 
-	return customAsset(filename)
+	local asset = customAsset(filename)
+	imageCache[url] = asset
+	return asset
 end
 
 local function addCorner(parent, radius)
@@ -335,6 +354,7 @@ local function addStroke(parent, strokeColor, transparency, thickness)
 	stroke.Color = strokeColor
 	stroke.Transparency = transparency or 0
 	stroke.Thickness = thickness or 1
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	stroke.Parent = parent
 	return stroke
 end
@@ -352,12 +372,12 @@ end
 local function createText(parent, data)
 	local label = Instance.new("TextLabel")
 	label.BackgroundTransparency = data.BackgroundTransparency or 1
-	label.BackgroundColor3 = data.BackgroundColor3 or color("Card", Color3.fromRGB(255, 255, 255))
+	label.BackgroundColor3 = data.BackgroundColor3 or color("Card", Color3.fromRGB(24, 24, 27))
 	label.BorderSizePixel = 0
 	label.Font = data.Font or Enum.Font.Gotham
 	label.Text = data.Text or ""
 	label.TextSize = data.TextSize or 12
-	label.TextColor3 = data.TextColor3 or color("Text", Color3.fromRGB(31, 41, 55))
+	label.TextColor3 = data.TextColor3 or color("Text", Color3.fromRGB(241, 245, 249))
 	label.TextXAlignment = data.TextXAlignment or Enum.TextXAlignment.Left
 	label.TextYAlignment = data.TextYAlignment or Enum.TextYAlignment.Center
 	label.TextWrapped = data.TextWrapped == true
@@ -372,7 +392,7 @@ end
 
 local function createPanel(parent, height, layoutOrder, backgroundColor)
 	local panel = Instance.new("Frame")
-	panel.BackgroundColor3 = backgroundColor or color("Card", Color3.fromRGB(255, 255, 255))
+	panel.BackgroundColor3 = backgroundColor or color("Card", Color3.fromRGB(24, 24, 27))
 	panel.BorderSizePixel = 0
 	panel.Size = UDim2.new(1, -10, 0, height)
 	panel.LayoutOrder = layoutOrder or 0
@@ -380,7 +400,7 @@ local function createPanel(parent, height, layoutOrder, backgroundColor)
 	panel.Parent = parent
 
 	addCorner(panel, 12)
-	addStroke(panel, color("Border", Color3.fromRGB(226, 232, 240)), 0, 1)
+	addStroke(panel, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
 
 	return panel
 end
@@ -391,8 +411,8 @@ local function createButton(parent, text, position, size, callback, soft)
 	button.Text = text
 	button.Font = Enum.Font.GothamMedium
 	button.TextSize = 12
-	button.TextColor3 = soft and color("Primary", Color3.fromRGB(234, 67, 53)) or Color3.fromRGB(255, 255, 255)
-	button.BackgroundColor3 = soft and color("PrimarySoft", Color3.fromRGB(252, 232, 230)) or color("Primary", Color3.fromRGB(234, 67, 53))
+	button.TextColor3 = soft and color("Primary", Color3.fromRGB(248, 81, 73)) or Color3.fromRGB(255, 255, 255)
+	button.BackgroundColor3 = soft and color("PrimarySoft", Color3.fromRGB(69, 26, 26)) or color("Primary", Color3.fromRGB(248, 81, 73))
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
 	button.Position = position
@@ -402,7 +422,7 @@ local function createButton(parent, text, position, size, callback, soft)
 	addCorner(button, 8)
 
 	local normal = button.BackgroundColor3
-	local hover = soft and Color3.fromRGB(249, 222, 220) or color("PrimaryHover", Color3.fromRGB(197, 48, 39))
+	local hover = soft and color("Hover", Color3.fromRGB(39, 39, 42)) or color("PrimaryHover", Color3.fromRGB(220, 38, 38))
 
 	button.MouseEnter:Connect(function()
 		button.BackgroundColor3 = hover
@@ -412,7 +432,9 @@ local function createButton(parent, text, position, size, callback, soft)
 		button.BackgroundColor3 = normal
 	end)
 
-	button.MouseButton1Click:Connect(callback)
+	button.MouseButton1Click:Connect(function()
+		callback()
+	end)
 
 	return button
 end
@@ -428,15 +450,15 @@ local function createInput(parent, title, placeholder, defaultValue, position, s
 
 	local box = Instance.new("TextBox")
 	box.Name = safeName(title) .. "Input"
-	box.BackgroundColor3 = color("CardAlt", Color3.fromRGB(248, 250, 252))
+	box.BackgroundColor3 = color("Input", Color3.fromRGB(31, 31, 35))
 	box.BorderSizePixel = 0
 	box.ClearTextOnFocus = false
 	box.ClipsDescendants = true
 	box.Font = Enum.Font.Gotham
 	box.PlaceholderText = placeholder or ""
-	box.PlaceholderColor3 = color("Muted", Color3.fromRGB(100, 116, 139))
+	box.PlaceholderColor3 = color("Muted", Color3.fromRGB(148, 163, 184))
 	box.Text = defaultValue or ""
-	box.TextColor3 = color("Text", Color3.fromRGB(31, 41, 55))
+	box.TextColor3 = color("Text", Color3.fromRGB(241, 245, 249))
 	box.TextSize = 13
 	box.TextWrapped = false
 	box.TextXAlignment = Enum.TextXAlignment.Left
@@ -449,11 +471,11 @@ local function createInput(parent, title, placeholder, defaultValue, position, s
 	end)
 
 	addCorner(box, 10)
-	addStroke(box, color("Border", Color3.fromRGB(226, 232, 240)), 0, 1)
+	addStroke(box, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
 	addPadding(box, 12, 0, 12, 0)
 
-	box.FocusLost:Connect(function()
-		callback(box.Text)
+	box.FocusLost:Connect(function(enterPressed)
+		callback(box.Text, enterPressed)
 	end)
 
 	return box
@@ -461,7 +483,7 @@ end
 
 local function createCheck(parent, title, position, size, defaultValue, callback)
 	local button = Instance.new("TextButton")
-	button.BackgroundColor3 = color("Card", Color3.fromRGB(255, 255, 255))
+	button.BackgroundColor3 = color("Input", Color3.fromRGB(31, 31, 35))
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
 	button.Text = ""
@@ -470,10 +492,10 @@ local function createCheck(parent, title, position, size, defaultValue, callback
 	button.Parent = parent
 
 	addCorner(button, 10)
-	addStroke(button, color("Border", Color3.fromRGB(226, 232, 240)), 0, 1)
+	addStroke(button, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
 
 	local box = Instance.new("Frame")
-	box.BackgroundColor3 = defaultValue and color("Primary", Color3.fromRGB(234, 67, 53)) or Color3.fromRGB(243, 244, 246)
+	box.BackgroundColor3 = defaultValue and color("Primary", Color3.fromRGB(248, 81, 73)) or color("CardAlt", Color3.fromRGB(39, 39, 42))
 	box.BorderSizePixel = 0
 	box.Position = UDim2.fromOffset(12, 10)
 	box.Size = UDim2.fromOffset(18, 18)
@@ -501,7 +523,7 @@ local function createCheck(parent, title, position, size, defaultValue, callback
 	local value = defaultValue == true
 
 	local function refresh()
-		box.BackgroundColor3 = value and color("Primary", Color3.fromRGB(234, 67, 53)) or Color3.fromRGB(243, 244, 246)
+		box.BackgroundColor3 = value and color("Primary", Color3.fromRGB(248, 81, 73)) or color("CardAlt", Color3.fromRGB(39, 39, 42))
 		mark.Text = value and "✓" or ""
 	end
 
@@ -514,15 +536,58 @@ local function createCheck(parent, title, position, size, defaultValue, callback
 	return button
 end
 
+local function preparePage(tab)
+	local page = tab and tab.Page
+	if not page then
+		return nil
+	end
+
+	if tab.Sections then
+		table.clear(tab.Sections)
+	end
+
+	for _, child in ipairs(page:GetChildren()) do
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+			child:Destroy()
+		end
+	end
+
+	local layout = tab.Layout or page:FindFirstChildOfClass("UIListLayout")
+	if not layout then
+		layout = Instance.new("UIListLayout")
+		layout.Parent = page
+		tab.Layout = layout
+	end
+
+	layout.FillDirection = Enum.FillDirection.Vertical
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+	layout.VerticalAlignment = Enum.VerticalAlignment.Top
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 10)
+
+	page.BackgroundTransparency = 1
+	page.BorderSizePixel = 0
+	page.ScrollBarThickness = 4
+	page.ScrollBarImageColor3 = color("BorderStrong", Color3.fromRGB(107, 114, 128))
+	page.CanvasSize = UDim2.fromOffset(0, 0)
+	page.ClipsDescendants = true
+
+	layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		if page and page.Parent then
+			page.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 28)
+		end
+	end)
+
+	return page
+end
+
 local function firstNonEmpty(...)
 	local values = {...}
-
 	for _, value in ipairs(values) do
 		if type(value) == "string" and trim(value) ~= "" then
 			return value
 		end
 	end
-
 	return ""
 end
 
@@ -534,7 +599,6 @@ local function getScriptIdentifier(scriptData)
 	if not scriptData then
 		return nil
 	end
-
 	return scriptData.slug or scriptData._id
 end
 
@@ -542,7 +606,6 @@ local function getScriptTitle(scriptData)
 	if not scriptData then
 		return "Unknown"
 	end
-
 	return firstNonEmpty(scriptData.title, scriptData.name, scriptData.slug, scriptData._id, "Unknown")
 end
 
@@ -550,11 +613,9 @@ local function getGameName(scriptData)
 	if scriptData and type(scriptData.game) == "table" and scriptData.game.name then
 		return scriptData.game.name
 	end
-
 	if scriptData and scriptData.isUniversal then
 		return "Universal"
 	end
-
 	return "Unknown Game"
 end
 
@@ -562,7 +623,6 @@ local function getScriptImage(scriptData)
 	if not scriptData then
 		return ""
 	end
-
 	return firstNonEmpty(scriptData.image, type(scriptData.game) == "table" and scriptData.game.imageUrl or "")
 end
 
@@ -600,11 +660,9 @@ end
 
 local function formatDate(value)
 	value = tostring(value or "")
-
 	if value:match("^%d%d%d%d%-%d%d%-%d%d") then
 		return value:sub(1, 10)
 	end
-
 	return ""
 end
 
@@ -633,7 +691,6 @@ local function getFeatures(scriptData)
 	end
 
 	local features = firstNonEmpty(scriptData.features, scriptData.description, scriptData.summary)
-
 	if features ~= "" then
 		return features
 	end
@@ -688,7 +745,6 @@ local function fetchDetails(scriptData)
 	end
 
 	local ok, body = requestGet(DetailsEndpoint .. encode(identifier))
-
 	if not ok then
 		return scriptData
 	end
@@ -734,6 +790,7 @@ local function buildSearchUrl()
 		url = url .. "&universal=1"
 	end
 
+	state.lastUrl = url
 	return url
 end
 
@@ -763,93 +820,72 @@ local function updateFilterSummary()
 	ui.filterSummary.Text = #filters > 0 and table.concat(filters, "  •  ") or "No filters"
 end
 
-local function getPage(tab, name)
-	if tab and typeof(tab.Page) == "Instance" then
-		return tab.Page
+local function getSortByFromLabel(label)
+	label = tostring(label or "")
+	if label == "Newest" then
+		return "updatedAt"
+	elseif label == "Most Viewed" then
+		return "views"
+	elseif label == "Most Liked" then
+		return "likeCount"
+	elseif label == "Created" then
+		return "createdAt"
 	end
-
-	if Window and Window.PageWrap then
-		local found = Window.PageWrap:FindFirstChild("Page_" .. name)
-		if found then
-			return found
-		end
-
-		for _, child in ipairs(Window.PageWrap:GetChildren()) do
-			if child:IsA("ScrollingFrame") and child.Name:lower():find(name:lower()) then
-				return child
-			end
-		end
-	end
-
-	local fallback = Instance.new("ScrollingFrame")
-	fallback.Name = "Page_" .. name
-	fallback.BackgroundTransparency = 1
-	fallback.BorderSizePixel = 0
-	fallback.ScrollBarThickness = 5
-	fallback.Size = UDim2.fromScale(1, 1)
-	fallback.Parent = Window and Window.PageWrap or nil
-	return fallback
+	return "updatedAt"
 end
 
-local function preparePage(tab, name)
-	local page = getPage(tab, name)
-	page:ClearAllChildren()
-	page.BackgroundTransparency = 1
-	page.BorderSizePixel = 0
-	page.ScrollBarThickness = 5
-	page.CanvasSize = UDim2.fromOffset(0, 0)
-	page.ClipsDescendants = true
-
-	local layout = Instance.new("UIListLayout")
-	layout.FillDirection = Enum.FillDirection.Vertical
-	layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
-	layout.VerticalAlignment = Enum.VerticalAlignment.Top
-	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Padding = UDim.new(0, 10)
-	layout.Parent = page
-
-	addPadding(page, 14, 14, 14, 14)
-
-	layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-		page.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 28)
-	end)
-
-	return page
+local function getOrderFromLabel(label)
+	label = tostring(label or "")
+	if label == "Ascending" then
+		return "asc"
+	end
+	return "desc"
 end
 
-local function switchTab(targetTab)
-	if not Window or not Window.Tabs then
+local function fetchRawSelected()
+	if not state.selected then
+		setStatus("Select a script first.")
+		return nil
+	end
+
+	if type(state.selected.script) == "string" and state.selected.script ~= "" then
+		return state.selected.script
+	end
+
+	local identifier = getScriptIdentifier(state.selected)
+	if not identifier then
+		setStatus("Missing script identifier.")
+		return nil
+	end
+
+	setStatus("Fetching raw script...")
+
+	local ok, body = requestGet(RawEndpoint .. encode(identifier))
+	if not ok then
+		setStatus("Failed to fetch raw script.")
+		return nil
+	end
+
+	return body
+end
+
+
+local function setPreviewCode(text)
+	text = tostring(text or "")
+
+	if not ui.selectedPreview then
 		return
 	end
 
-	for _, tab in ipairs(Window.Tabs) do
-		local active = tab == targetTab
-
-		if tab.Page then
-			tab.Page.Visible = active
-		end
-
-		if tab.Button then
-			tab.Button.BackgroundTransparency = active and 0 or 1
-			tab.Button.BackgroundColor3 = active and color("PrimarySoft", Color3.fromRGB(252, 232, 230)) or color("Sidebar", Color3.fromRGB(255, 255, 255))
-		end
-
-		if tab.Accent then
-			tab.Accent.Visible = active
-		end
-
-		if tab.TextLabel then
-			tab.TextLabel.TextColor3 = active and color("Primary", Color3.fromRGB(234, 67, 53)) or color("Muted", Color3.fromRGB(100, 116, 139))
-		end
-
-		if tab.IconLabel and Google.SetIconColor then
-			Google.SetIconColor(tab.IconLabel, active and color("Primary", Color3.fromRGB(234, 67, 53)) or color("Muted", Color3.fromRGB(100, 116, 139)))
-		end
-
-		tab.Active = active
+	if ui.selectedPreview.SetCode then
+		ui.selectedPreview:SetCode(text)
+	elseif ui.selectedPreview.SetText then
+		ui.selectedPreview:SetText(text)
+	elseif ui.selectedPreview.Label then
+		ui.selectedPreview.Label.Text = text
+	elseif ui.selectedPreview.Text ~= nil then
+		ui.selectedPreview.Text = text
 	end
-
-	Window.ActiveTab = targetTab
 end
 
 local function updateSelected()
@@ -863,7 +899,7 @@ local function updateSelected()
 		ui.selectedMeta.Text = "Author and stats will appear here."
 		ui.selectedFeatures.Text = "Features will appear here."
 		ui.selectedTags.Text = "Tags will appear here."
-		ui.selectedPreview.Text = "Script preview will appear here."
+		setPreviewCode("Script preview will appear here.")
 		ui.selectedImage.Image = ""
 		return
 	end
@@ -903,92 +939,62 @@ local function updateSelected()
 	ui.selectedImage.Image = image
 
 	local raw = tostring(scriptData.script or "")
-
 	if raw ~= "" then
 		raw = raw:gsub("\r", "")
-
-		if #raw > 950 then
-			raw = raw:sub(1, 950) .. "\n..."
+		if #raw > 1100 then
+			raw = raw:sub(1, 1100) .. "\n..."
 		end
-
-		ui.selectedPreview.Text = raw
+		setPreviewCode(raw)
 	else
-		ui.selectedPreview.Text = "Use Copy Raw to fetch the raw script."
+		setPreviewCode("Use Copy Raw to fetch the raw script.")
 	end
-end
-
-local function fetchRawSelected()
-	if not state.selected then
-		setStatus("Select a script first.")
-		return nil
-	end
-
-	if type(state.selected.script) == "string" and state.selected.script ~= "" then
-		return state.selected.script
-	end
-
-	local identifier = getScriptIdentifier(state.selected)
-
-	if not identifier then
-		setStatus("Missing script identifier.")
-		return nil
-	end
-
-	setStatus("Fetching raw script...")
-
-	local ok, body = requestGet(RawEndpoint .. encode(identifier))
-
-	if not ok then
-		setStatus("Failed to fetch raw script.")
-		return nil
-	end
-
-	return body
 end
 
 local function selectScript(scriptData)
 	state.selected = fetchDetails(scriptData)
 	updateSelected()
-	switchTab(SelectedTab)
+	safeSelectTab(SelectedTab)
 	setStatus("Selected: " .. getScriptTitle(state.selected))
 end
 
-local function clearScripts()
-	if not ui.scriptsPage then
+local function clearScriptsPage()
+	local page = ScriptsTab and ScriptsTab.Page
+	if not page then
 		return
 	end
 
-	for _, child in ipairs(ui.scriptsPage:GetChildren()) do
-		if child.Name == "ScriptsTop" or child.Name == "ScriptGrid" or child.Name == "EmptyScripts" then
+	for _, child in ipairs(page:GetChildren()) do
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
 			child:Destroy()
 		end
 	end
+
+	if ScriptsTab.Sections then
+		table.clear(ScriptsTab.Sections)
+	end
 end
 
-local function createEmptyScripts()
-	if not ui.scriptsPage then
-		return
-	end
+local function createEmptyScripts(text)
+	clearScriptsPage()
 
-	clearScripts()
-
-	local panel = createPanel(ui.scriptsPage, 82, 1, color("Card", Color3.fromRGB(255, 255, 255)))
+	local page = ScriptsTab.Page
+	local panel = createPanel(page, 96, 1, color("Card", Color3.fromRGB(24, 24, 27)))
 	panel.Name = "EmptyScripts"
 
 	createText(panel, {
-		Text = "No scripts loaded",
+		Text = text or "No scripts loaded",
 		Font = Enum.Font.GothamBold,
 		TextSize = 15,
-		Position = UDim2.fromOffset(14, 12),
+		Position = UDim2.fromOffset(14, 16),
 		Size = UDim2.new(1, -28, 0, 24)
 	})
 
 	createText(panel, {
-		Text = "Search from the Search tab.",
+		Text = "Use the Search tab to load results.",
 		Font = Enum.Font.Gotham,
 		TextSize = 12,
-		TextColor3 = color("Muted", Color3.fromRGB(100, 116, 139)),
-		Position = UDim2.fromOffset(14, 42),
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+		Position = UDim2.fromOffset(14, 46),
 		Size = UDim2.new(1, -28, 0, 22)
 	})
 end
@@ -998,21 +1004,21 @@ local function createScriptCard(parent, scriptData, index)
 	card.Name = "ScriptCard_" .. tostring(index)
 	card.AutoButtonColor = false
 	card.Text = ""
-	card.BackgroundColor3 = color("Card", Color3.fromRGB(255, 255, 255))
+	card.BackgroundColor3 = color("Card", Color3.fromRGB(24, 24, 27))
 	card.BorderSizePixel = 0
 	card.ClipsDescendants = true
 	card.LayoutOrder = index
 	card.Parent = parent
 
 	addCorner(card, 12)
-	addStroke(card, color("Border", Color3.fromRGB(226, 232, 240)), 0, 1)
+	addStroke(card, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
 
 	local title = getScriptTitle(scriptData)
 	local imageAsset = resolveImage(getScriptImage(scriptData), getScriptIdentifier(scriptData) or title)
 
 	local thumbnail = Instance.new("ImageLabel")
 	thumbnail.Name = "Thumbnail"
-	thumbnail.BackgroundColor3 = color("CardAlt", Color3.fromRGB(248, 250, 252))
+	thumbnail.BackgroundColor3 = color("CardAlt", Color3.fromRGB(39, 39, 42))
 	thumbnail.BorderSizePixel = 0
 	thumbnail.Position = UDim2.fromOffset(10, 10)
 	thumbnail.Size = UDim2.new(1, -20, 1, -46)
@@ -1027,7 +1033,7 @@ local function createScriptCard(parent, scriptData, index)
 			Text = "No Image",
 			Font = Enum.Font.GothamMedium,
 			TextSize = 12,
-			TextColor3 = color("Muted", Color3.fromRGB(100, 116, 139)),
+			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
 			TextXAlignment = Enum.TextXAlignment.Center,
 			TextYAlignment = Enum.TextYAlignment.Center,
 			Size = UDim2.fromScale(1, 1)
@@ -1044,11 +1050,11 @@ local function createScriptCard(parent, scriptData, index)
 	})
 
 	card.MouseEnter:Connect(function()
-		card.BackgroundColor3 = color("PrimarySoft", Color3.fromRGB(252, 232, 230))
+		card.BackgroundColor3 = color("Hover", Color3.fromRGB(39, 39, 42))
 	end)
 
 	card.MouseLeave:Connect(function()
-		card.BackgroundColor3 = color("Card", Color3.fromRGB(255, 255, 255))
+		card.BackgroundColor3 = color("Card", Color3.fromRGB(24, 24, 27))
 	end)
 
 	card.MouseButton1Click:Connect(function()
@@ -1059,41 +1065,45 @@ local function createScriptCard(parent, scriptData, index)
 end
 
 local function renderScripts()
-	if not ui.scriptsPage then
-		return
-	end
+	clearScriptsPage()
 
-	clearScripts()
+	local page = ScriptsTab.Page
 
-	local top = createPanel(ui.scriptsPage, 76, 1, color("PrimarySoft", Color3.fromRGB(252, 232, 230)))
+	local top = createPanel(page, 76, 1, color("PrimarySoft", Color3.fromRGB(69, 26, 26)))
 	top.Name = "ScriptsTop"
 
 	createText(top, {
 		Text = "Scripts",
 		Font = Enum.Font.GothamBold,
 		TextSize = 15,
-		TextColor3 = color("Primary", Color3.fromRGB(234, 67, 53)),
+		TextColor3 = color("Primary", Color3.fromRGB(248, 81, 73)),
 		Position = UDim2.fromOffset(14, 10),
 		Size = UDim2.new(1, -28, 0, 22)
 	})
 
 	ui.scriptsInfo = createText(top, {
-		Text = "Page " .. tostring(state.page)
-			.. " / " .. tostring(state.totalPages > 0 and state.totalPages or "?")
-			.. "  •  " .. tostring(#state.results) .. " results",
+		Text = "Page " .. tostring(state.page) .. " / " .. tostring(state.totalPages > 0 and state.totalPages or "?") .. "  •  " .. tostring(#state.results) .. " results",
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
-		TextColor3 = color("Primary", Color3.fromRGB(234, 67, 53)),
+		TextColor3 = color("Primary", Color3.fromRGB(248, 81, 73)),
 		Position = UDim2.fromOffset(14, 38),
 		Size = UDim2.new(1, -260, 0, 18)
 	})
 
 	createButton(top, "Previous", UDim2.new(1, -214, 0, 36), UDim2.fromOffset(96, 28), function()
+		if state.page <= 1 then
+			setStatus("Already on the first page.")
+			return
+		end
 		state.page = math.max(1, state.page - 1)
 		searchScripts()
 	end, true)
 
 	createButton(top, "Next", UDim2.new(1, -108, 0, 36), UDim2.fromOffset(82, 28), function()
+		if state.totalPages > 0 and state.page >= state.totalPages then
+			setStatus("Already on the last page.")
+			return
+		end
 		state.page = state.page + 1
 		searchScripts()
 	end, false)
@@ -1105,7 +1115,7 @@ local function renderScripts()
 	grid.ClipsDescendants = true
 	grid.LayoutOrder = 2
 	grid.Size = UDim2.new(1, -10, 0, 0)
-	grid.Parent = ui.scriptsPage
+	grid.Parent = page
 
 	local gridLayout = Instance.new("UIGridLayout")
 	gridLayout.CellSize = UDim2.new(0.333333, -10, 0, 148)
@@ -1134,6 +1144,31 @@ searchScripts = function()
 		local parsed = tonumber(ui.maxInput.Text)
 		if parsed then
 			state.max = math.clamp(math.floor(parsed), 1, 30)
+			ui.maxInput.Text = tostring(state.max)
+		end
+	end
+
+	if ui.sortDropdown then
+		local ok, value = pcall(function()
+			if ui.sortDropdown.Get then
+				return ui.sortDropdown:Get()
+			end
+			return ui.sortDropdown.Value
+		end)
+		if ok and value then
+			state.sortBy = getSortByFromLabel(value)
+		end
+	end
+
+	if ui.orderDropdown then
+		local ok, value = pcall(function()
+			if ui.orderDropdown.Get then
+				return ui.orderDropdown:Get()
+			end
+			return ui.orderDropdown.Value
+		end)
+		if ok and value then
+			state.order = getOrderFromLabel(value)
 		end
 	end
 
@@ -1144,13 +1179,15 @@ searchScripts = function()
 
 	state.busy = true
 	setStatus("Searching...")
+	createEmptyScripts("Searching...")
 
 	local ok, body = requestGet(buildSearchUrl())
-
 	if not ok then
 		state.busy = false
+		createEmptyScripts("Request failed")
 		setStatus("Request failed.")
 		warn(body)
+		safeSelectTab(ScriptsTab)
 		return
 	end
 
@@ -1160,32 +1197,36 @@ searchScripts = function()
 
 	if not decodedOk then
 		state.busy = false
+		createEmptyScripts("Failed to decode response")
 		setStatus("Failed to decode response.")
 		warn(body)
+		safeSelectTab(ScriptsTab)
 		return
 	end
 
 	if decoded.message then
 		state.busy = false
+		createEmptyScripts(tostring(decoded.message))
 		setStatus(tostring(decoded.message))
+		safeSelectTab(ScriptsTab)
 		return
 	end
 
 	if not decoded.result or type(decoded.result.scripts) ~= "table" then
 		state.results = {}
 		state.totalPages = 0
-		createEmptyScripts()
-		switchTab(ScriptsTab)
-		setStatus("No scripts found.")
 		state.busy = false
+		createEmptyScripts("No scripts found")
+		setStatus("No scripts found.")
+		safeSelectTab(ScriptsTab)
 		return
 	end
 
 	state.results = decoded.result.scripts
-	state.totalPages = decoded.result.totalPages or 0
+	state.totalPages = tonumber(decoded.result.totalPages) or 0
 
 	renderScripts()
-	switchTab(ScriptsTab)
+	safeSelectTab(ScriptsTab)
 	setStatus("Found " .. tostring(#state.results) .. " scripts.")
 	state.busy = false
 end
@@ -1194,7 +1235,8 @@ Window = Google:CreateWindow({
 	Title = "Script Finder",
 	Subtitle = "Powered by ScriptBlox.com",
 	Icon = "search",
-	Size = UDim2.fromOffset(700, 510),
+	Size = UDim2.fromOffset(740, 530),
+	MobileSize = UDim2.fromOffset(430, 610),
 	AllowMultiple = false
 })
 
@@ -1213,31 +1255,35 @@ SelectedTab = Window:CreateTab({
 	Icon = "info"
 })
 
-local searchPage = preparePage(SearchTab, "Search")
-ui.scriptsPage = preparePage(ScriptsTab, "Scripts")
-local selectedPage = preparePage(SelectedTab, "Selected")
+local searchPage = preparePage(SearchTab)
+preparePage(ScriptsTab)
+local selectedPage = preparePage(SelectedTab)
 
-local searchPanel = createPanel(searchPage, 170, 1, color("Card", Color3.fromRGB(255, 255, 255)))
+local searchPanel = createPanel(searchPage, 178, 1, color("Card", Color3.fromRGB(24, 24, 27)))
 
 ui.searchInput = createInput(
 	searchPanel,
-	"Query",
+	"Search",
 	"Search scripts or games",
 	"",
 	UDim2.fromOffset(14, 12),
 	UDim2.new(1, -28, 0, 36),
-	function(value)
+	function(value, enterPressed)
 		state.query = trim(value)
+		if enterPressed then
+			state.page = 1
+			searchScripts()
+		end
 	end
 )
 
 ui.maxInput = createInput(
 	searchPanel,
-	"Max Results",
-	"10",
-	"10",
+	"Max",
+	"12",
+	"12",
 	UDim2.fromOffset(14, 84),
-	UDim2.fromOffset(118, 34),
+	UDim2.fromOffset(86, 34),
 	function(value)
 		local parsed = tonumber(value)
 		if parsed then
@@ -1246,12 +1292,12 @@ ui.maxInput = createInput(
 	end
 )
 
-createButton(searchPanel, "Search", UDim2.fromOffset(148, 106), UDim2.fromOffset(96, 34), function()
+createButton(searchPanel, "Search", UDim2.fromOffset(116, 106), UDim2.fromOffset(96, 34), function()
 	state.page = 1
 	searchScripts()
 end, false)
 
-createButton(searchPanel, "Clear", UDim2.fromOffset(254, 106), UDim2.fromOffset(82, 34), function()
+createButton(searchPanel, "Clear", UDim2.fromOffset(222, 106), UDim2.fromOffset(82, 34), function()
 	state.query = ""
 	state.results = {}
 	state.totalPages = 0
@@ -1271,7 +1317,7 @@ createButton(searchPanel, "Clear", UDim2.fromOffset(254, 106), UDim2.fromOffset(
 end, true)
 
 local statusWrap = Instance.new("Frame")
-statusWrap.BackgroundColor3 = color("PrimarySoft", Color3.fromRGB(252, 232, 230))
+statusWrap.BackgroundColor3 = color("PrimarySoft", Color3.fromRGB(69, 26, 26))
 statusWrap.BorderSizePixel = 0
 statusWrap.ClipsDescendants = true
 statusWrap.Position = UDim2.fromOffset(14, 148)
@@ -1284,12 +1330,12 @@ ui.status = createText(statusWrap, {
 	Text = "Ready.",
 	Font = Enum.Font.GothamMedium,
 	TextSize = 12,
-	TextColor3 = color("Primary", Color3.fromRGB(234, 67, 53)),
+	TextColor3 = color("Primary", Color3.fromRGB(248, 81, 73)),
 	Position = UDim2.fromOffset(10, 0),
 	Size = UDim2.new(1, -20, 1, 0)
 })
 
-local filtersPanel = createPanel(searchPage, 122, 2, color("Card", Color3.fromRGB(255, 255, 255)))
+local filtersPanel = createPanel(searchPage, 162, 2, color("Card", Color3.fromRGB(24, 24, 27)))
 
 createText(filtersPanel, {
 	Text = "Filters",
@@ -1319,20 +1365,75 @@ createCheck(filtersPanel, "Universal", UDim2.new(0.5, 6, 0, 82), UDim2.new(0.5, 
 	updateFilterSummary()
 end)
 
-local filterWrap = createPanel(searchPage, 38, 3, color("PrimarySoft", Color3.fromRGB(252, 232, 230)))
+local sortBox = Instance.new("TextButton")
+sortBox.Text = "Sort: Newest"
+sortBox.Font = Enum.Font.GothamMedium
+sortBox.TextSize = 12
+sortBox.TextColor3 = color("Text", Color3.fromRGB(241, 245, 249))
+sortBox.BackgroundColor3 = color("Input", Color3.fromRGB(31, 31, 35))
+sortBox.BorderSizePixel = 0
+sortBox.AutoButtonColor = false
+sortBox.Position = UDim2.fromOffset(14, 122)
+sortBox.Size = UDim2.new(0.5, -20, 0, 30)
+sortBox.Parent = filtersPanel
+addCorner(sortBox, 10)
+addStroke(sortBox, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
+
+local sortModes = {
+	{"Newest", "updatedAt"},
+	{"Most Viewed", "views"},
+	{"Most Liked", "likeCount"},
+	{"Created", "createdAt"}
+}
+local sortIndex = 1
+
+sortBox.MouseButton1Click:Connect(function()
+	sortIndex = sortIndex + 1
+	if sortIndex > #sortModes then
+		sortIndex = 1
+	end
+	sortBox.Text = "Sort: " .. sortModes[sortIndex][1]
+	state.sortBy = sortModes[sortIndex][2]
+end)
+
+local orderBox = Instance.new("TextButton")
+orderBox.Text = "Order: Desc"
+orderBox.Font = Enum.Font.GothamMedium
+orderBox.TextSize = 12
+orderBox.TextColor3 = color("Text", Color3.fromRGB(241, 245, 249))
+orderBox.BackgroundColor3 = color("Input", Color3.fromRGB(31, 31, 35))
+orderBox.BorderSizePixel = 0
+orderBox.AutoButtonColor = false
+orderBox.Position = UDim2.new(0.5, 6, 0, 122)
+orderBox.Size = UDim2.new(0.5, -20, 0, 30)
+orderBox.Parent = filtersPanel
+addCorner(orderBox, 10)
+addStroke(orderBox, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
+
+orderBox.MouseButton1Click:Connect(function()
+	if state.order == "desc" then
+		state.order = "asc"
+		orderBox.Text = "Order: Asc"
+	else
+		state.order = "desc"
+		orderBox.Text = "Order: Desc"
+	end
+end)
+
+local filterWrap = createPanel(searchPage, 38, 3, color("PrimarySoft", Color3.fromRGB(69, 26, 26)))
 ui.filterSummary = createText(filterWrap, {
 	Text = "",
 	Font = Enum.Font.GothamMedium,
 	TextSize = 12,
-	TextColor3 = color("Primary", Color3.fromRGB(234, 67, 53)),
+	TextColor3 = color("Primary", Color3.fromRGB(248, 81, 73)),
 	Position = UDim2.fromOffset(12, 0),
 	Size = UDim2.new(1, -24, 1, 0)
 })
 
-local selectedTop = createPanel(selectedPage, 206, 1, color("Card", Color3.fromRGB(255, 255, 255)))
+local selectedTop = createPanel(selectedPage, 210, 1, color("Card", Color3.fromRGB(24, 24, 27)))
 
 ui.selectedImage = Instance.new("ImageLabel")
-ui.selectedImage.BackgroundColor3 = color("CardAlt", Color3.fromRGB(248, 250, 252))
+ui.selectedImage.BackgroundColor3 = color("CardAlt", Color3.fromRGB(39, 39, 42))
 ui.selectedImage.BorderSizePixel = 0
 ui.selectedImage.Position = UDim2.fromOffset(14, 14)
 ui.selectedImage.Size = UDim2.fromOffset(142, 142)
@@ -1354,7 +1455,7 @@ ui.selectedGame = createText(selectedTop, {
 	Text = "Select a script from the Scripts tab.",
 	Font = Enum.Font.GothamMedium,
 	TextSize = 12,
-	TextColor3 = color("Primary", Color3.fromRGB(234, 67, 53)),
+	TextColor3 = color("Primary", Color3.fromRGB(248, 81, 73)),
 	Position = UDim2.fromOffset(174, 40),
 	Size = UDim2.new(1, -188, 0, 18)
 })
@@ -1363,28 +1464,27 @@ ui.selectedMeta = createText(selectedTop, {
 	Text = "Author and stats will appear here.",
 	Font = Enum.Font.Gotham,
 	TextSize = 12,
-	TextColor3 = color("Muted", Color3.fromRGB(100, 116, 139)),
+	TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
 	TextWrapped = true,
 	TextYAlignment = Enum.TextYAlignment.Top,
 	Position = UDim2.fromOffset(174, 66),
-	Size = UDim2.new(1, -188, 0, 90)
+	Size = UDim2.new(1, -188, 0, 94)
 })
 
-createButton(selectedTop, "Copy Raw", UDim2.fromOffset(174, 164), UDim2.fromOffset(110, 30), function()
+createButton(selectedTop, "Copy Raw", UDim2.fromOffset(174, 168), UDim2.fromOffset(110, 30), function()
 	local raw = fetchRawSelected()
 	if raw then
 		copyText(raw)
 	end
 end, false)
 
-createButton(selectedTop, "Copy Page", UDim2.fromOffset(294, 164), UDim2.fromOffset(110, 30), function()
+createButton(selectedTop, "Copy Page", UDim2.fromOffset(294, 168), UDim2.fromOffset(110, 30), function()
 	if not state.selected then
 		setStatus("Select a script first.")
 		return
 	end
 
 	local identifier = getScriptIdentifier(state.selected)
-
 	if identifier then
 		copyText(SiteURL .. "/script/" .. identifier)
 	else
@@ -1392,7 +1492,7 @@ createButton(selectedTop, "Copy Page", UDim2.fromOffset(294, 164), UDim2.fromOff
 	end
 end, true)
 
-local featurePanel = createPanel(selectedPage, 132, 2, color("Card", Color3.fromRGB(255, 255, 255)))
+local featurePanel = createPanel(selectedPage, 132, 2, color("Card", Color3.fromRGB(24, 24, 27)))
 
 createText(featurePanel, {
 	Text = "Features",
@@ -1406,14 +1506,14 @@ ui.selectedFeatures = createText(featurePanel, {
 	Text = "Features will appear here.",
 	Font = Enum.Font.Gotham,
 	TextSize = 12,
-	TextColor3 = color("Muted", Color3.fromRGB(100, 116, 139)),
+	TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
 	TextWrapped = true,
 	TextYAlignment = Enum.TextYAlignment.Top,
 	Position = UDim2.fromOffset(14, 36),
 	Size = UDim2.new(1, -28, 0, 82)
 })
 
-local tagsPanel = createPanel(selectedPage, 72, 3, color("Card", Color3.fromRGB(255, 255, 255)))
+local tagsPanel = createPanel(selectedPage, 72, 3, color("Card", Color3.fromRGB(24, 24, 27)))
 
 createText(tagsPanel, {
 	Text = "Tags",
@@ -1427,36 +1527,56 @@ ui.selectedTags = createText(tagsPanel, {
 	Text = "Tags will appear here.",
 	Font = Enum.Font.Gotham,
 	TextSize = 12,
-	TextColor3 = color("Muted", Color3.fromRGB(100, 116, 139)),
+	TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
 	TextWrapped = true,
 	TextYAlignment = Enum.TextYAlignment.Top,
 	Position = UDim2.fromOffset(14, 34),
 	Size = UDim2.new(1, -28, 0, 28)
 })
 
-local previewPanel = createPanel(selectedPage, 166, 4, color("Card", Color3.fromRGB(255, 255, 255)))
-
-createText(previewPanel, {
-	Text = "Script Preview",
-	Font = Enum.Font.GothamBold,
-	TextSize = 14,
-	Position = UDim2.fromOffset(14, 10),
-	Size = UDim2.new(1, -28, 0, 20)
+local previewSection = SelectedTab:CreateSection({
+	Name = "Script Preview",
+	Icon = "file",
+	Collapsed = false
 })
 
-ui.selectedPreview = createText(previewPanel, {
-	Text = "Script preview will appear here.",
-	Font = Enum.Font.Code,
-	TextSize = 11,
-	TextColor3 = color("Muted", Color3.fromRGB(100, 116, 139)),
-	TextWrapped = true,
-	TextYAlignment = Enum.TextYAlignment.Top,
-	Position = UDim2.fromOffset(14, 38),
-	Size = UDim2.new(1, -28, 0, 114)
-})
+if previewSection and previewSection.Instance then
+	previewSection.Instance.LayoutOrder = 4
+end
+
+if previewSection and previewSection.CreateCodeBlock then
+	ui.selectedPreview = previewSection:CreateCodeBlock({
+		Code = "Script preview will appear here.",
+		Language = "lua",
+		CopyButton = true,
+		MaxHeight = 190,
+		Wrap = true
+	})
+else
+	local previewPanel = createPanel(selectedPage, 180, 4, color("Card", Color3.fromRGB(24, 24, 27)))
+
+	createText(previewPanel, {
+		Text = "Script Preview",
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		Position = UDim2.fromOffset(14, 10),
+		Size = UDim2.new(1, -28, 0, 20)
+	})
+
+	ui.selectedPreview = createText(previewPanel, {
+		Text = "Script preview will appear here.",
+		Font = Enum.Font.Code,
+		TextSize = 11,
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+		TextWrapped = true,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Position = UDim2.fromOffset(14, 38),
+		Size = UDim2.new(1, -28, 0, 128)
+	})
+end
 
 createEmptyScripts()
 updateFilterSummary()
 updateSelected()
-switchTab(SearchTab)
+safeSelectTab(SearchTab)
 setStatus("Ready.")
