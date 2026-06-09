@@ -118,10 +118,19 @@ local function saveAutoExecuteLoader()
 	end)
 end
 
+local function saveConfigState()
+	if Configs then
+		pcall(function()
+			Configs:Save("script_finder")
+		end)
+	end
+end
+
 local function setAutoRerun(value)
 	AutoRerunEnabled = value == true
 	writeAutoRerunEnabled(AutoRerunEnabled)
 	saveAutoExecuteLoader()
+	saveConfigState()
 
 	if AutoRerunEnabled then
 		queueSelfOnTeleport()
@@ -153,6 +162,10 @@ if not loaded or type(Google) ~= "table" then
 	error("Failed to load Google UI: " .. tostring(Google))
 end
 
+if Google.Build ~= "components-config-system" then
+	warn("Google UI config-system build was expected, got: " .. tostring(Google.Build))
+end
+
 pcall(function()
 	if Google.SetTheme then
 		Google.SetTheme("DarkRed")
@@ -162,6 +175,19 @@ pcall(function()
 	elseif Google.Themes and Google.Themes.Red then
 		Google.ActiveTheme = "Red"
 		Google.Theme = Google.Themes.Red
+	end
+end)
+
+local Configs = nil
+pcall(function()
+	if type(Google.CreateConfigManager) == "function" then
+		Configs = Google:CreateConfigManager({
+			Folder = "ScriptFinderSettings",
+			Extension = ".json",
+			Default = "script_finder",
+			AutoSave = false
+		})
+		Configs:SetAutoload("script_finder")
 	end
 end)
 
@@ -939,6 +965,16 @@ end
 local function loadFavorites()
 	state.favorites = {}
 
+	if Configs and Google.Options and Google.Options.ScriptFinderFavorites then
+		local ok, loaded = pcall(function()
+			return Configs:Load("script_finder")
+		end)
+
+		if ok and loaded then
+			return
+		end
+	end
+
 	if type(isfile) ~= "function" or type(readfile) ~= "function" then
 		return
 	end
@@ -985,6 +1021,16 @@ local function loadFavorites()
 end
 
 local function saveFavorites()
+	if Configs and Google.Options and Google.Options.ScriptFinderFavorites then
+		local ok, saved = pcall(function()
+			return Configs:Save("script_finder")
+		end)
+
+		if ok and saved then
+			return true
+		end
+	end
+
 	if type(writefile) ~= "function" then
 		return false
 	end
@@ -1113,6 +1159,78 @@ favoriteSelected = function()
 	else
 		setStatus("Added to favorites for this session. File save unavailable.")
 	end
+end
+
+local function setFavoritesFromSaved(value)
+	state.favorites = {}
+
+	local source = value
+	if type(value) == "table" and type(value.Items) == "table" then
+		source = value.Items
+	end
+
+	if type(source) ~= "table" then
+		return
+	end
+
+	for key, item in pairs(source) do
+		if type(item) == "table" then
+			local id = tostring(item.Id or item.ID or item.id or key or "")
+			if id ~= "" then
+				item.Id = id
+				state.favorites[id] = item
+			end
+		end
+	end
+
+	if renderFavorites then
+		renderFavorites()
+	end
+
+	if updateFavoriteButton then
+		updateFavoriteButton()
+	end
+end
+
+local function registerConfigBackedState()
+	if not Google.Options then
+		return
+	end
+
+	Google.Options.ScriptFinderFavorites = {
+		Get = function()
+			return favoriteItems()
+		end,
+		Set = function(_, value)
+			setFavoritesFromSaved(value)
+		end
+	}
+
+	Google.Options.ScriptFinderFavoriteMode = {
+		Get = function()
+			return state.favoriteMode
+		end,
+		Set = function(_, value)
+			value = tostring(value or "")
+			if value == "Universal" or value == "Current Game" then
+				state.favoriteMode = value
+				if renderFavorites then
+					renderFavorites()
+				end
+			end
+		end
+	}
+
+	Google.Options.ScriptFinderAutoReopen = {
+		Get = function()
+			return AutoRerunEnabled
+		end,
+		Set = function(_, value)
+			AutoRerunEnabled = value == true
+			writeAutoRerunEnabled(AutoRerunEnabled)
+			saveAutoExecuteLoader()
+		end
+	}
 end
 
 
@@ -2071,11 +2189,13 @@ renderFavorites = function()
 
 	ui.favoriteCurrentButton = createButton(top, "Current Game", UDim2.fromOffset(14, 66), UDim2.fromOffset(130, 30), function()
 		state.favoriteMode = "Current Game"
+		saveConfigState()
 		renderFavorites()
 	end, state.favoriteMode ~= "Current Game")
 
 	ui.favoriteUniversalButton = createButton(top, "Universal", UDim2.fromOffset(154, 66), UDim2.fromOffset(110, 30), function()
 		state.favoriteMode = "Universal"
+		saveConfigState()
 		renderFavorites()
 	end, state.favoriteMode ~= "Universal")
 
@@ -2815,6 +2935,7 @@ ui.previewCode = createText(ui.previewScroll, {
 
 ui.selectedPreview = ui.previewCode
 
+registerConfigBackedState()
 loadFavorites()
 createEmptyScripts()
 renderFavorites()
