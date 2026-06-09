@@ -197,6 +197,8 @@ local DetailsEndpoint = "https://scriptblox.com/api/script/"
 local RawEndpoint = "https://scriptblox.com/api/script/raw/"
 local RscriptsEndpoint = "https://rscripts.net/api/v2/scripts"
 local RscriptsDetailsEndpoint = "https://rscripts.net/api/v2/script"
+local GameSearchEndpoint = "https://games.roblox.com/v1/games/list"
+local GameIconEndpoint = "https://thumbnails.roblox.com/v1/games/icons"
 local SiteURL = "https://scriptblox.com"
 local RscriptsSiteURL = "https://rscripts.net"
 local ImageFolder = "ScriptBloxFinderImages"
@@ -224,6 +226,11 @@ local state = {
 	lastUrl = "",
 	favorites = {},
 	favoriteMode = "Current Game",
+	gameQuery = "",
+	gamePage = 1,
+	gameMax = 18,
+	gameResults = {},
+	gameBusy = false,
 	liveEnabled = true,
 	liveInterval = 25,
 	liveIdleInterval = 25,
@@ -245,6 +252,8 @@ local ui = {
 	maxInput = nil,
 	gameInput = nil,
 	authorInput = nil,
+	gamesSearchInput = nil,
+	gamesInfo = nil,
 	sortDropdown = nil,
 	orderDropdown = nil,
 	status = nil,
@@ -274,9 +283,12 @@ local ui = {
 local Window
 local SearchTab
 local ScriptsTab
+local GamesTab
 local SelectedTab
 local FavoritesTab
 local searchScripts
+local searchGames
+local renderGames
 local selectScript
 local renderFavorites
 local renderScripts
@@ -2862,6 +2874,492 @@ local function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
 end
 
 
+
+local function getGameTitle(gameData)
+	if type(gameData) ~= "table" then
+		return "Unknown Game"
+	end
+
+	return firstNonEmpty(gameData.Name, gameData.name, gameData.title, gameData.gameName, "Unknown Game")
+end
+
+local function getGameUniverseId(gameData)
+	if type(gameData) ~= "table" then
+		return ""
+	end
+
+	return tostring(firstNonEmpty(
+		gameData.UniverseId,
+		gameData.universeId,
+		gameData.universeID,
+		gameData.id,
+		gameData.Id
+	))
+end
+
+local function getGamePlaceId(gameData)
+	if type(gameData) ~= "table" then
+		return ""
+	end
+
+	return tostring(firstNonEmpty(
+		gameData.PlaceId,
+		gameData.placeId,
+		gameData.rootPlaceId,
+		gameData.rootPlaceID,
+		gameData.rootPlace,
+		gameData.playRootPlaceId
+	))
+end
+
+local function getGameImage(gameData)
+	if type(gameData) ~= "table" then
+		return ""
+	end
+
+	return firstNonEmpty(
+		gameData.Image,
+		gameData.image,
+		gameData.imageUrl,
+		gameData.gameIconUrl,
+		gameData.thumbnailUrl,
+		gameData.iconUrl
+	)
+end
+
+local function normalizeRobloxGame(item)
+	if type(item) ~= "table" then
+		return nil
+	end
+
+	local universeId = tostring(firstNonEmpty(item.universeId, item.universeID, item.id, item.Id))
+	local placeId = tostring(firstNonEmpty(item.placeId, item.rootPlaceId, item.rootPlaceID, item.rootPlace, item.playRootPlaceId))
+
+	if universeId == "" and placeId == "" then
+		return nil
+	end
+
+	return {
+		Name = firstNonEmpty(item.name, item.title, item.gameName, "Unknown Game"),
+		UniverseId = universeId,
+		PlaceId = placeId,
+		Image = firstNonEmpty(item.imageUrl, item.gameIconUrl, item.thumbnailUrl, item.iconUrl),
+		Playing = tonumber(item.playerCount or item.playing or item.players or item.concurrentUserCount or 0) or 0,
+		Visits = tonumber(item.visits or item.totalVisits or item.visitCount or 0) or 0,
+		Creator = firstNonEmpty(item.creatorName, item.creator, type(item.creator) == "table" and item.creator.name or ""),
+		Description = firstNonEmpty(item.description, item.gameDescription, "")
+	}
+end
+
+local function parseGamesResponse(decoded)
+	local sourceList = nil
+
+	if type(decoded) ~= "table" then
+		return {}
+	end
+
+	if type(decoded.games) == "table" then
+		sourceList = decoded.games
+	elseif type(decoded.data) == "table" then
+		sourceList = decoded.data
+	elseif type(decoded.results) == "table" then
+		sourceList = decoded.results
+	elseif type(decoded.recommendations) == "table" then
+		sourceList = decoded.recommendations
+	else
+		sourceList = {}
+	end
+
+	local output = {}
+
+	for _, item in ipairs(sourceList) do
+		local normalized = normalizeRobloxGame(item)
+		if normalized then
+			table.insert(output, normalized)
+		end
+	end
+
+	return output
+end
+
+local function hydrateGameIcons(games)
+	local universeIds = {}
+	local lookup = {}
+
+	for _, gameData in ipairs(games or {}) do
+		local universeId = getGameUniverseId(gameData)
+
+		if universeId ~= "" and getGameImage(gameData) == "" then
+			table.insert(universeIds, universeId)
+			lookup[universeId] = gameData
+		end
+	end
+
+	if #universeIds == 0 then
+		return
+	end
+
+	local url = GameIconEndpoint
+		.. "?universeIds=" .. encode(table.concat(universeIds, ","))
+		.. "&size=150x150&format=Png&isCircular=false"
+
+	local ok, body = requestGet(url)
+	if not ok or type(body) ~= "string" then
+		return
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" or type(decoded.data) ~= "table" then
+		return
+	end
+
+	for _, iconInfo in ipairs(decoded.data) do
+		local targetId = tostring(iconInfo.targetId or iconInfo.targetID or iconInfo.universeId or "")
+		local gameData = lookup[targetId]
+
+		if gameData and type(iconInfo.imageUrl) == "string" and iconInfo.imageUrl ~= "" then
+			gameData.Image = iconInfo.imageUrl
+		end
+	end
+end
+
+local function buildGamesSearchUrl()
+	local query = trim(state.gameQuery or "")
+	local startRows = math.max(0, (tonumber(state.gamePage) or 1) - 1) * state.gameMax
+
+	local url = GameSearchEndpoint
+		.. "?model.maxRows=" .. encode(state.gameMax)
+		.. "&model.startRows=" .. encode(startRows)
+		.. "&maxRows=" .. encode(state.gameMax)
+		.. "&startRows=" .. encode(startRows)
+
+	if query ~= "" then
+		url = url .. "&model.keyword=" .. encode(query) .. "&keyword=" .. encode(query)
+	end
+
+	return url
+end
+
+local function teleportToGame(gameData)
+	local placeId = tonumber(getGamePlaceId(gameData))
+
+	if not placeId then
+		setStatus("Missing game PlaceId.")
+		return
+	end
+
+	setStatus("Teleporting to " .. getGameTitle(gameData) .. "...")
+
+	local ok, err = pcall(function()
+		TeleportService:Teleport(placeId, LocalPlayer)
+	end)
+
+	if not ok then
+		setStatus("Teleport failed.")
+		warn(err)
+	end
+end
+
+local function clearGamesPage()
+	local page = GamesTab and GamesTab.Page
+	if not page then
+		return
+	end
+
+	for _, child in ipairs(page:GetChildren()) do
+		if not child:IsA("UILayout") and not child:IsA("UIPadding") then
+			child:Destroy()
+		end
+	end
+end
+
+local function createGameCard(parent, gameData, index)
+	local card = Instance.new("TextButton")
+	card.Name = "GameCard_" .. tostring(index)
+	card.AutoButtonColor = false
+	card.Text = ""
+	card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
+	card.BorderSizePixel = 0
+	card.ClipsDescendants = true
+	card.LayoutOrder = index
+	card.Parent = parent
+
+	addCorner(card, 8)
+	addStroke(card, color("Border", Color3.fromRGB(51, 65, 85)), 0.36, 1)
+
+	local title = getGameTitle(gameData)
+	local placeId = getGamePlaceId(gameData)
+	local universeId = getGameUniverseId(gameData)
+	local imageAsset = resolveImage(getGameImage(gameData), "game_" .. firstNonEmpty(universeId, placeId, title))
+
+	local thumbnail = Instance.new("ImageLabel")
+	thumbnail.Name = "Thumbnail"
+	thumbnail.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
+	thumbnail.BorderSizePixel = 0
+	thumbnail.Position = UDim2.fromOffset(10, 10)
+	thumbnail.Size = UDim2.new(1, -20, 0, 104)
+	thumbnail.ScaleType = Enum.ScaleType.Crop
+	thumbnail.Image = imageAsset
+	thumbnail.Parent = card
+	addCorner(thumbnail, 8)
+	addStroke(thumbnail, color("Border", Color3.fromRGB(51, 65, 85)), 0.5, 1)
+
+	if imageAsset == "" then
+		createText(thumbnail, {
+			Text = "No Image",
+			Font = Enum.Font.GothamMedium,
+			TextSize = 12,
+			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+			Size = UDim2.fromScale(1, 1)
+		})
+	end
+
+	createText(card, {
+		Text = title,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		Position = UDim2.fromOffset(10, 120),
+		Size = UDim2.new(1, -20, 0, 18),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	createText(card, {
+		Text = "Players " .. compactNumber(gameData.Playing or 0),
+		Font = Enum.Font.GothamMedium,
+		TextSize = 11,
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+		Position = UDim2.fromOffset(10, 140),
+		Size = UDim2.new(1, -20, 0, 16),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	createText(card, {
+		Text = placeId ~= "" and ("PlaceId " .. placeId) or "PlaceId unavailable",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 10,
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+		Position = UDim2.fromOffset(10, 158),
+		Size = UDim2.new(1, -20, 0, 14),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	card.MouseEnter:Connect(function()
+		card.BackgroundColor3 = color("Hover", Color3.fromRGB(37, 49, 75))
+	end)
+
+	card.MouseLeave:Connect(function()
+		card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
+	end)
+
+	card.MouseButton1Click:Connect(function()
+		teleportToGame(gameData)
+	end)
+
+	return card
+end
+
+renderGames = function()
+	if not GamesTab then
+		return
+	end
+
+	clearGamesPage()
+
+	local page = GamesTab.Page
+
+	local top = createPanel(page, 126, 1, color("Card", Color3.fromRGB(17, 24, 39)))
+	top.Name = "GamesTop"
+
+	createText(top, {
+		Text = "Games",
+		Font = Enum.Font.GothamBold,
+		TextSize = 16,
+		TextColor3 = color("Primary", Color3.fromRGB(67, 135, 244)),
+		Position = UDim2.fromOffset(14, 10),
+		Size = UDim2.new(1, -28, 0, 22)
+	})
+
+	ui.gamesInfo = createText(top, {
+		Text = state.gameQuery ~= "" and ("Search: " .. state.gameQuery) or "Search Roblox games",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+		Position = UDim2.fromOffset(14, 34),
+		Size = UDim2.new(1, -28, 0, 18),
+		TextTruncate = Enum.TextTruncate.AtEnd
+	})
+
+	ui.gamesSearchInput = createInput(
+		top,
+		"Search Games",
+		"Type a game name",
+		state.gameQuery,
+		UDim2.fromOffset(14, 58),
+		UDim2.new(1, -240, 0, 34),
+		function(value, enterPressed)
+			state.gameQuery = trim(value)
+			if enterPressed then
+				state.gamePage = 1
+				searchGames()
+			end
+		end
+	)
+
+	createButton(top, "Search", UDim2.new(1, -214, 0, 82), UDim2.fromOffset(96, 30), function()
+		state.gamePage = 1
+		searchGames()
+	end, false)
+
+	createButton(top, "Clear", UDim2.new(1, -108, 0, 82), UDim2.fromOffset(82, 30), function()
+		state.gameQuery = ""
+		state.gamePage = 1
+		state.gameResults = {}
+		if ui.gamesSearchInput then
+			ui.gamesSearchInput.Text = ""
+		end
+		renderGames()
+	end, true)
+
+	if #state.gameResults == 0 then
+		local empty = createPanel(page, 92, 2, color("Card", Color3.fromRGB(17, 24, 39)))
+		empty.Name = "NoGames"
+
+		createText(empty, {
+			Text = "No games shown",
+			Font = Enum.Font.GothamBold,
+			TextSize = 15,
+			Position = UDim2.fromOffset(14, 14),
+			Size = UDim2.new(1, -28, 0, 24)
+		})
+
+		createText(empty, {
+			Text = "Search for a Roblox game, then click a result to teleport.",
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+			TextWrapped = true,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			Position = UDim2.fromOffset(14, 44),
+			Size = UDim2.new(1, -28, 0, 36)
+		})
+
+		return
+	end
+
+	local nav = createPanel(page, 54, 2, color("Card", Color3.fromRGB(17, 24, 39)))
+	nav.Name = "GamesNav"
+
+	createText(nav, {
+		Text = "Page " .. tostring(state.gamePage) .. "  •  " .. tostring(#state.gameResults) .. " results",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
+		Position = UDim2.fromOffset(14, 17),
+		Size = UDim2.new(1, -240, 0, 20)
+	})
+
+	createButton(nav, "Previous", UDim2.new(1, -214, 0, 12), UDim2.fromOffset(96, 30), function()
+		if state.gamePage <= 1 then
+			setStatus("Already on the first game page.")
+			return
+		end
+
+		state.gamePage = math.max(1, state.gamePage - 1)
+		searchGames()
+	end, true)
+
+	createButton(nav, "Next", UDim2.new(1, -108, 0, 12), UDim2.fromOffset(82, 30), function()
+		state.gamePage += 1
+		searchGames()
+	end, false)
+
+	local grid = Instance.new("Frame")
+	grid.Name = "GamesGrid"
+	grid.BackgroundTransparency = 1
+	grid.BorderSizePixel = 0
+	grid.ClipsDescendants = true
+	grid.LayoutOrder = 3
+	grid.Size = UDim2.new(1, -10, 0, 0)
+	grid.Parent = page
+
+	local gridLayout = Instance.new("UIGridLayout")
+	gridLayout.CellSize = UDim2.new(0.333333, -10, 0, 184)
+	gridLayout.CellPadding = UDim2.fromOffset(10, 10)
+	gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	gridLayout.Parent = grid
+
+	for index, gameData in ipairs(state.gameResults) do
+		createGameCard(grid, gameData, index)
+	end
+
+	local rows = math.max(0, math.ceil(#state.gameResults / 3))
+	grid.Size = UDim2.new(1, -10, 0, rows * 194)
+end
+
+searchGames = function()
+	if state.gameBusy then
+		return
+	end
+
+	if ui.gamesSearchInput then
+		state.gameQuery = trim(ui.gamesSearchInput.Text)
+	end
+
+	if state.gameQuery == "" then
+		setStatus("Type a game name first.")
+		renderGames()
+		safeSelectTab(GamesTab)
+		return
+	end
+
+	state.gameBusy = true
+	setStatus("Searching games...")
+
+	local ok, body = requestGet(buildGamesSearchUrl())
+	if not ok or type(body) ~= "string" then
+		state.gameBusy = false
+		setStatus("Game search failed.")
+		state.gameResults = {}
+		renderGames()
+		safeSelectTab(GamesTab)
+		return
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" then
+		state.gameBusy = false
+		setStatus("Failed to decode game search.")
+		state.gameResults = {}
+		renderGames()
+		safeSelectTab(GamesTab)
+		return
+	end
+
+	local results = parseGamesResponse(decoded)
+	hydrateGameIcons(results)
+
+	state.gameResults = results
+	state.gameBusy = false
+
+	renderGames()
+	safeSelectTab(GamesTab)
+
+	if #results == 0 then
+		setStatus("No games found.")
+	else
+		setStatus("Found " .. tostring(#results) .. " games.")
+	end
+end
+
+
 local function parseProviderResponse(decoded)
 	if decoded.message or decoded.error then
 		return nil, 0, tostring(decoded.message or decoded.error)
@@ -3423,6 +3921,11 @@ ScriptsTab = Window:CreateTab({
 	Icon = "image"
 })
 
+GamesTab = Window:CreateTab({
+	Name = "Games",
+	Icon = "gamepad-2"
+})
+
 SelectedTab = Window:CreateTab({
 	Name = "Selected",
 	Icon = "info"
@@ -3435,6 +3938,7 @@ FavoritesTab = Window:CreateTab({
 
 local searchPage = preparePage(SearchTab)
 preparePage(ScriptsTab)
+preparePage(GamesTab)
 local selectedPage = preparePage(SelectedTab)
 preparePage(FavoritesTab)
 
@@ -3890,6 +4394,7 @@ ui.selectedPreview = ui.previewCode
 registerConfigBackedState()
 loadFavorites()
 createEmptyScripts()
+renderGames()
 renderFavorites()
 updateFilterSummary()
 updateSelected()
