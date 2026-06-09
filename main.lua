@@ -225,7 +225,10 @@ local state = {
 	favorites = {},
 	favoriteMode = "Current Game",
 	liveEnabled = true,
-	liveInterval = 20,
+	liveInterval = 4,
+	liveIdleInterval = 10,
+	liveBurstChecks = 0,
+	liveNoChangeCount = 0,
 	liveBusy = false,
 	liveStarted = false,
 	liveSnapshot = {}
@@ -2866,6 +2869,25 @@ local function updateViewBadges(results)
 	end
 end
 
+local function mergeVisibleResultFields(results)
+	local byId = {}
+
+	for _, item in ipairs(results or {}) do
+		local id = getScriptIdentifier(item)
+		if id then
+			byId[tostring(id)] = item
+		end
+	end
+
+	for index, current in ipairs(state.results or {}) do
+		local id = getScriptIdentifier(current)
+		local updated = id and byId[tostring(id)]
+		if updated then
+			state.results[index] = mergeTables(current, updated)
+		end
+	end
+end
+
 local function applyLiveResults(results, totalPages)
 	local newCount = 0
 	local viewChanges = 0
@@ -2892,7 +2914,6 @@ local function applyLiveResults(results, totalPages)
 		return false
 	end
 
-	state.results = results
 	state.totalPages = totalPages or state.totalPages
 
 	local replacementSelected = findSelectedInResults(results)
@@ -2901,9 +2922,11 @@ local function applyLiveResults(results, totalPages)
 	end
 
 	if newCount > 0 then
+		state.results = results
 		updateLiveSnapshot(results)
 		renderScripts()
 	else
+		mergeVisibleResultFields(results)
 		updateViewBadges(results)
 		updateLiveSnapshot(results)
 	end
@@ -2921,11 +2944,11 @@ end
 
 local function checkLiveUpdates()
 	if not state.liveEnabled or state.busy or state.liveBusy then
-		return
+		return false
 	end
 
 	if not state.results or #state.results == 0 then
-		return
+		return false
 	end
 
 	state.liveBusy = true
@@ -2933,7 +2956,7 @@ local function checkLiveUpdates()
 	local ok, body = requestGet(buildSearchUrl(), buildSearchHeaders())
 	if not ok or type(body) ~= "string" then
 		state.liveBusy = false
-		return
+		return false
 	end
 
 	local decodedOk, decoded = pcall(function()
@@ -2942,17 +2965,23 @@ local function checkLiveUpdates()
 
 	if not decodedOk or type(decoded) ~= "table" then
 		state.liveBusy = false
-		return
+		return false
 	end
 
 	local results, totalPages, err = parseProviderResponse(decoded)
 	if err or type(results) ~= "table" then
 		state.liveBusy = false
-		return
+		return false
 	end
 
-	applyLiveResults(results, totalPages)
+	local changed = applyLiveResults(results, totalPages)
 	state.liveBusy = false
+	return changed == true
+end
+
+local function scheduleFastChecks()
+	state.liveBurstChecks = 6
+	state.liveNoChangeCount = 0
 end
 
 local function startLiveWatcher()
@@ -2963,8 +2992,25 @@ local function startLiveWatcher()
 	state.liveStarted = true
 
 	task.spawn(function()
-		while task.wait(state.liveInterval) do
-			checkLiveUpdates()
+		while true do
+			local delay = state.liveInterval
+
+			if state.liveBurstChecks and state.liveBurstChecks > 0 then
+				delay = 2
+				state.liveBurstChecks = math.max(0, state.liveBurstChecks - 1)
+			elseif state.liveNoChangeCount and state.liveNoChangeCount >= 4 then
+				delay = state.liveIdleInterval
+			end
+
+			task.wait(delay)
+
+			local changed = checkLiveUpdates()
+			if changed then
+				state.liveNoChangeCount = 0
+				state.liveBurstChecks = 3
+			else
+				state.liveNoChangeCount = math.min((state.liveNoChangeCount or 0) + 1, 6)
+			end
 		end
 	end)
 end
@@ -3191,9 +3237,10 @@ searchScripts = function()
 		setStatus("Found " .. tostring(#state.results) .. " scripts.")
 	end
 	state.busy = false
+	scheduleFastChecks()
 
 	task.defer(function()
-		task.wait(2)
+		task.wait(1)
 		checkLiveUpdates()
 	end)
 end
@@ -3689,8 +3736,9 @@ updateFilterSummary()
 updateSelected()
 safeSelectTab(SearchTab)
 startLiveWatcher()
+scheduleFastChecks()
 task.defer(function()
-	task.wait(2)
+	task.wait(1)
 	checkLiveUpdates()
 end)
 setStatus("Ready.")
