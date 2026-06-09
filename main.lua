@@ -1761,6 +1761,41 @@ local function highlightLuau(source)
 	return table.concat(result)
 end
 
+local function highlightLuauWithLineNumbers(source)
+	source = normalizeCodeText(source)
+	local output = {}
+	local lineNumber = 1
+	local position = 1
+
+	if source == "" then
+		return paint("   1  ", "Punctuation")
+	end
+
+	while position <= #source + 1 do
+		local nextNewline = source:find("\n", position, true)
+		local line
+
+		if nextNewline then
+			line = source:sub(position, nextNewline - 1)
+			position = nextNewline + 1
+		else
+			line = source:sub(position)
+			position = #source + 2
+		end
+
+		table.insert(output, paint(string.format("%4d  ", lineNumber), "Punctuation"))
+		table.insert(output, highlightLuau(line))
+
+		if position <= #source + 1 then
+			table.insert(output, "\n")
+		end
+
+		lineNumber = lineNumber + 1
+	end
+
+	return table.concat(output)
+end
+
 local function buildLineNumbers(text)
 	text = normalizeCodeText(text)
 	local lineCount = 1
@@ -1787,12 +1822,7 @@ local function updateCustomCodeBlock(text)
 	ui.previewCode.RichText = true
 	ui.previewCode.TextWrapped = false
 	ui.previewCode.TextTruncate = Enum.TextTruncate.None
-	ui.previewCode.Text = highlightLuau(text)
-
-	if ui.previewLines then
-		ui.previewLines.Text = buildLineNumbers(text)
-		ui.previewLines.Position = UDim2.fromOffset(0, 10 - (ui.previewScroll and ui.previewScroll.CanvasPosition.Y or 0))
-	end
+	ui.previewCode.Text = highlightLuauWithLineNumbers(text)
 
 	task.defer(function()
 		if not ui.previewCode or not ui.previewScroll then
@@ -1804,10 +1834,6 @@ local function updateCustomCodeBlock(text)
 		local height = math.max(bounds.Y + 30, ui.previewScroll.AbsoluteSize.Y + 1)
 
 		ui.previewCode.Size = UDim2.fromOffset(width, height)
-
-		if ui.previewLines then
-			ui.previewLines.Size = UDim2.fromOffset(38, height)
-		end
 
 		ui.previewScroll.CanvasSize = UDim2.fromOffset(width + 12, height + 12)
 	end)
@@ -2721,36 +2747,16 @@ orderBox.MouseButton1Click:Connect(function()
 	updateFilterSummary()
 end)
 
-local filterWrap = createPanel(searchPage, 46, 3, color("Card", Color3.fromRGB(36, 26, 25)))
-filterWrap.Name = "FilterSummary"
-pcall(function()
-	for _, child in ipairs(filterWrap:GetChildren()) do
-		if child:IsA("UICorner") then
-			child.CornerRadius = UDim.new(0, 10)
-		end
-	end
-end)
+ui.filterSummary = Instance.new("TextLabel")
+ui.filterSummary.Name = "FilterSummaryHidden"
+ui.filterSummary.BackgroundTransparency = 1
+ui.filterSummary.BorderSizePixel = 0
+ui.filterSummary.Text = ""
+ui.filterSummary.Visible = false
+ui.filterSummary.Size = UDim2.fromOffset(0, 0)
+ui.filterSummary.Parent = searchPage
 
-createText(filterWrap, {
-	Text = "Active filters",
-	Font = Enum.Font.GothamBold,
-	TextSize = 12,
-	TextColor3 = color("Muted", Color3.fromRGB(187, 153, 150)),
-	Position = UDim2.fromOffset(14, 6),
-	Size = UDim2.new(1, -28, 0, 16)
-})
-
-ui.filterSummary = createText(filterWrap, {
-	Text = "",
-	Font = Enum.Font.GothamMedium,
-	TextSize = 12,
-	TextColor3 = color("Text", Color3.fromRGB(248, 238, 237)),
-	Position = UDim2.fromOffset(14, 23),
-	Size = UDim2.new(1, -28, 0, 18),
-	TextTruncate = Enum.TextTruncate.AtEnd
-})
-
-local startupPanel = createPanel(searchPage, 74, 4, color("Card", Color3.fromRGB(24, 24, 27)))
+local startupPanel = createPanel(searchPage, 74, 3, color("Card", Color3.fromRGB(24, 24, 27)))
 
 createText(startupPanel, {
 	Text = "Startup",
@@ -2892,7 +2898,7 @@ createButton(previewPanel, "Copy", UDim2.new(1, -96, 0, 8), UDim2.fromOffset(82,
 end, true)
 
 local codeFrame = Instance.new("Frame")
-codeFrame.BackgroundColor3 = color("Input", Color3.fromRGB(31, 31, 35))
+codeFrame.BackgroundColor3 = color("Input", Color3.fromRGB(24, 17, 17))
 codeFrame.BorderSizePixel = 0
 codeFrame.ClipsDescendants = true
 codeFrame.Position = UDim2.fromOffset(14, 44)
@@ -2901,50 +2907,25 @@ codeFrame.Parent = previewPanel
 addCorner(codeFrame, 10)
 addStroke(codeFrame, color("Border", Color3.fromRGB(74, 85, 104)), 0.08, 1)
 
-local lineWrap = Instance.new("Frame")
-lineWrap.BackgroundColor3 = color("CardAlt", Color3.fromRGB(39, 39, 42))
-lineWrap.BorderSizePixel = 0
-lineWrap.Size = UDim2.new(0, 32, 1, 0)
-lineWrap.Parent = codeFrame
-
-ui.previewLines = createText(lineWrap, {
-	Text = "1",
-	Font = Enum.Font.Code,
-	TextSize = 12,
-	TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
-	TextXAlignment = Enum.TextXAlignment.Right,
-	TextYAlignment = Enum.TextYAlignment.Top,
-	TextWrapped = false,
-	TextTruncate = Enum.TextTruncate.None,
-	Position = UDim2.fromOffset(0, 10),
-	Size = UDim2.new(1, -4, 0, 120),
-	ClipsDescendants = false
-})
-
 ui.previewScroll = Instance.new("ScrollingFrame")
 ui.previewScroll.BackgroundTransparency = 1
 ui.previewScroll.BorderSizePixel = 0
-ui.previewScroll.Position = UDim2.fromOffset(32, 0)
-ui.previewScroll.Size = UDim2.new(1, -32, 1, 0)
+ui.previewScroll.Position = UDim2.fromOffset(0, 0)
+ui.previewScroll.Size = UDim2.fromScale(1, 1)
 ui.previewScroll.CanvasSize = UDim2.fromOffset(0, 0)
 ui.previewScroll.ScrollBarThickness = 6
 ui.previewScroll.ScrollingDirection = Enum.ScrollingDirection.XY
 ui.previewScroll.ScrollBarImageColor3 = color("BorderStrong", Color3.fromRGB(107, 114, 128))
 ui.previewScroll.Parent = codeFrame
 
-ui.previewScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
-	if ui.previewLines then
-		ui.previewLines.Position = UDim2.fromOffset(0, 10 - ui.previewScroll.CanvasPosition.Y)
-	end
-end)
-
 ui.previewCode = createText(ui.previewScroll, {
-	Text = "Script preview will appear here.",
+	Text = "   1  Script preview will appear here.",
 	Font = Enum.Font.Code,
 	TextSize = 12,
 	TextColor3 = color("Text", Color3.fromRGB(241, 245, 249)),
 	TextWrapped = false,
 	TextTruncate = Enum.TextTruncate.None,
+	TextXAlignment = Enum.TextXAlignment.Left,
 	TextYAlignment = Enum.TextYAlignment.Top,
 	Position = UDim2.fromOffset(10, 10),
 	Size = UDim2.fromOffset(500, 120),
