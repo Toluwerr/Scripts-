@@ -172,9 +172,9 @@ pcall(function()
 	elseif Google.Themes and Google.Themes.DarkGoogle then
 		Google.ActiveTheme = "DarkGoogle"
 		Google.Theme = Google.Themes.DarkGoogle
-	elseif Google.Themes and Google.Themes.DarkRed then
-		Google.ActiveTheme = "DarkRed"
-		Google.Theme = Google.Themes.DarkRed
+	elseif Google.Themes and Google.Themes.DarkGoogle then
+		Google.ActiveTheme = "DarkGoogle"
+		Google.Theme = Google.Themes.DarkGoogle
 	end
 end)
 
