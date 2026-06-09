@@ -253,6 +253,8 @@ state = {
 	peopleResults = {},
 	peopleBusy = false,
 	peopleMax = 20,
+	peoplePage = 1,
+	peopleMode = "Server",
 	liveEnabled = true,
 	liveInterval = 25,
 	liveIdleInterval = 25,
@@ -4376,6 +4378,139 @@ function sortPeopleByPresence(people)
 	end)
 end
 
+function personFromPlayer(player)
+	if not player then
+		return nil
+	end
+
+	local userId = tostring(player.UserId or "")
+	local username = tostring(player.Name or "")
+	local displayName = tostring(player.DisplayName or username)
+
+	if userId == "" or username == "" then
+		return nil
+	end
+
+	return {
+		Id = userId,
+		Name = username,
+		DisplayName = displayName ~= "" and displayName or username,
+		Avatar = "rbxthumb://type=AvatarHeadShot&id=" .. userId .. "&w=150&h=150",
+		PresenceType = 2,
+		PresenceText = "In Game",
+		PresenceRank = 4,
+		LastLocation = "Current server",
+		IsServerPlayer = true
+	}
+end
+
+function personMatchesQuery(person, query)
+	query = trim(query or ""):lower()
+
+	if query == "" then
+		return true
+	end
+
+	local id = getPersonId(person):lower()
+	local username = getPersonUsername(person):lower()
+	local displayName = getPersonDisplayName(person):lower()
+
+	return username:find(query, 1, true) ~= nil
+		or displayName:find(query, 1, true) ~= nil
+		or id == query
+end
+
+function addUniquePerson(output, seen, person)
+	if type(person) ~= "table" then
+		return
+	end
+
+	local id = getPersonId(person)
+	if id == "" or seen[id] then
+		return
+	end
+
+	seen[id] = true
+	table.insert(output, person)
+end
+
+function getServerPeople(query)
+	local output = {}
+	local seen = {}
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		local person = personFromPlayer(player)
+		if person and personMatchesQuery(person, query) then
+			addUniquePerson(output, seen, person)
+		end
+	end
+
+	sortPeopleByPresence(output)
+
+	return output, seen
+end
+
+function trimPeoplePage(results)
+	results = type(results) == "table" and results or {}
+
+	local maxResults = tonumber(state.peopleMax) or 20
+	local page = math.max(1, tonumber(state.peoplePage) or 1)
+	local startIndex = ((page - 1) * maxResults) + 1
+	local trimmed = {}
+
+	for index = startIndex, math.min(#results, startIndex + maxResults - 1) do
+		table.insert(trimmed, results[index])
+	end
+
+	return trimmed
+end
+
+function searchExactRobloxUser(query, seen)
+	query = trim(query or "")
+	seen = type(seen) == "table" and seen or {}
+
+	if query == "" then
+		return {}
+	end
+
+	local userId = nil
+	local username = nil
+
+	local ok = pcall(function()
+		userId = Players:GetUserIdFromNameAsync(query)
+	end)
+
+	if not ok or not userId then
+		return {}
+	end
+
+	pcall(function()
+		username = Players:GetNameFromUserIdAsync(userId)
+	end)
+
+	username = username or query
+	local idText = tostring(userId)
+
+	if seen[idText] then
+		return {}
+	end
+
+	return {
+		{
+			Id = idText,
+			Name = username,
+			DisplayName = username,
+			Avatar = "rbxthumb://type=AvatarHeadShot&id=" .. idText .. "&w=150&h=150",
+			PresenceType = 0,
+			PresenceText = "Offline",
+			PresenceRank = 1,
+			LastLocation = "",
+			IsServerPlayer = false
+		}
+	}
+end
+
+
 function clearPeoplePage()
 	local page = PeopleTab and PeopleTab.Page
 	if not page then
@@ -4495,7 +4630,7 @@ renderPeople = function()
 	})
 
 	ui.peopleInfo = createText(top, {
-		Text = state.peopleQuery ~= "" and ("Search: " .. state.peopleQuery) or "Search Roblox users",
+		Text = state.peopleQuery ~= "" and ("Search: " .. state.peopleQuery) or "Current server players",
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
 		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
@@ -4507,13 +4642,14 @@ renderPeople = function()
 	ui.peopleSearchInput = createInput(
 		top,
 		"Search People",
-		"Type a Roblox username",
+		"Search current players or exact username",
 		state.peopleQuery,
 		UDim2.fromOffset(14, 58),
 		UDim2.new(1, -250, 0, 34),
 		function(value, enterPressed)
 			state.peopleQuery = trim(value)
 			if enterPressed then
+				state.peoplePage = 1
 				searchPeople()
 			end
 		end
@@ -4523,22 +4659,24 @@ renderPeople = function()
 		ui.peopleSearchInput.InputBegan:Connect(function(input)
 			if input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
 				state.peopleQuery = trim(ui.peopleSearchInput.Text)
+				state.peoplePage = 1
 				searchPeople()
 			end
 		end)
 	end)
 
 	createButton(top, "Search", UDim2.new(1, -224, 0, 84), UDim2.fromOffset(104, 30), function()
+		state.peoplePage = 1
 		searchPeople()
 	end, false)
 
 	createButton(top, "Clear", UDim2.new(1, -108, 0, 84), UDim2.fromOffset(82, 30), function()
 		state.peopleQuery = ""
-		state.peopleResults = {}
+		state.peoplePage = 1
 		if ui.peopleSearchInput then
 			ui.peopleSearchInput.Text = ""
 		end
-		renderPeople()
+		searchPeople()
 	end, true)
 
 	if #state.peopleResults == 0 then
@@ -4546,7 +4684,7 @@ renderPeople = function()
 		empty.Name = "NoPeople"
 
 		createText(empty, {
-			Text = "No people shown",
+			Text = "No players shown",
 			Font = Enum.Font.GothamBold,
 			TextSize = 15,
 			Position = UDim2.fromOffset(14, 14),
@@ -4554,7 +4692,7 @@ renderPeople = function()
 		})
 
 		createText(empty, {
-			Text = "Search a Roblox username. Results are capped at 20 and sorted online first.",
+			Text = "Players from the current server load automatically. Search filters this server and can also find an exact Roblox username.",
 			Font = Enum.Font.Gotham,
 			TextSize = 12,
 			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
@@ -4578,13 +4716,33 @@ renderPeople = function()
 	end
 
 	createText(info, {
-		Text = tostring(#state.peopleResults) .. " results  •  " .. tostring(onlineCount) .. " online",
+		Text = "Page " .. tostring(state.peoplePage) .. "  •  " .. tostring(#state.peopleResults) .. " shown  •  " .. tostring(onlineCount) .. " online",
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
 		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
 		Position = UDim2.fromOffset(14, 14),
-		Size = UDim2.new(1, -28, 0, 20)
+		Size = UDim2.new(1, -240, 0, 20)
 	})
+
+	createButton(info, "Previous", UDim2.new(1, -214, 0, 9), UDim2.fromOffset(96, 30), function()
+		if state.peoplePage <= 1 then
+			setStatus("Already on the first people page.")
+			return
+		end
+
+		state.peoplePage = math.max(1, state.peoplePage - 1)
+		searchPeople()
+	end, true)
+
+	createButton(info, "Next", UDim2.new(1, -108, 0, 9), UDim2.fromOffset(82, 30), function()
+		if #state.peopleResults < state.peopleMax then
+			setStatus("No more people on the next page.")
+			return
+		end
+
+		state.peoplePage += 1
+		searchPeople()
+	end, false)
 
 	local grid = Instance.new("Frame")
 	grid.Name = "PeopleGrid"
@@ -4618,63 +4776,68 @@ searchPeople = function()
 		state.peopleQuery = trim(ui.peopleSearchInput.Text)
 	end
 
-	if state.peopleQuery == "" then
-		setStatus("Type a Roblox username first.")
-		renderPeople()
-		safeSelectTab(PeopleTab)
-		return
-	end
-
 	state.peopleBusy = true
-	setStatus("Searching people...")
 
-	local results = {}
+	local query = trim(state.peopleQuery or "")
+	local allResults, seen = getServerPeople(query)
 
-	local function tryUserSearch(url)
-		local ok, body = requestGet(url)
-		if not ok or type(body) ~= "string" then
-			return {}
+	if query ~= "" then
+		local function tryUserSearch(url)
+			local ok, body = requestGet(url)
+			if not ok or type(body) ~= "string" then
+				return {}
+			end
+
+			local decodedOk, decoded = pcall(function()
+				return HttpService:JSONDecode(body)
+			end)
+
+			if not decodedOk or type(decoded) ~= "table" then
+				return {}
+			end
+
+			return parsePeopleResponse(decoded)
 		end
 
-		local decodedOk, decoded = pcall(function()
-			return HttpService:JSONDecode(body)
-		end)
-
-		if not decodedOk or type(decoded) ~= "table" then
-			return {}
+		local remoteResults = tryUserSearch(buildPeopleSearchUrl(false))
+		if #remoteResults == 0 then
+			remoteResults = tryUserSearch(buildPeopleSearchUrl(true))
 		end
 
-		return parsePeopleResponse(decoded)
-	end
-
-	results = tryUserSearch(buildPeopleSearchUrl(false))
-
-	if #results == 0 then
-		results = tryUserSearch(buildPeopleSearchUrl(true))
-	end
-
-	if #results > state.peopleMax then
-		local trimmed = {}
-		for index = 1, state.peopleMax do
-			trimmed[index] = results[index]
+		for _, person in ipairs(remoteResults) do
+			addUniquePerson(allResults, seen, person)
 		end
-		results = trimmed
+
+		for _, person in ipairs(searchExactRobloxUser(query, seen)) do
+			addUniquePerson(allResults, seen, person)
+		end
 	end
 
-	hydratePeopleAvatars(results)
-	hydratePeoplePresence(results)
-	sortPeopleByPresence(results)
+	hydratePeopleAvatars(allResults)
+	hydratePeoplePresence(allResults)
 
-	state.peopleResults = results
+	for _, person in ipairs(allResults) do
+		if person.IsServerPlayer then
+			person.PresenceType = 2
+			person.PresenceText = "In Game"
+			person.PresenceRank = 4
+			person.LastLocation = "Current server"
+		end
+	end
+
+	sortPeopleByPresence(allResults)
+
+	local pagedResults = trimPeoplePage(allResults)
+	state.peopleResults = pagedResults
 	state.peopleBusy = false
 
 	renderPeople()
 	safeSelectTab(PeopleTab)
 
-	if #results == 0 then
-		setStatus("No people found.")
+	if #allResults == 0 then
+		setStatus(query == "" and "No players found in this server." or "No matching players found.")
 	else
-		setStatus("Found " .. tostring(#results) .. " people.")
+		setStatus("Showing " .. tostring(#pagedResults) .. " of " .. tostring(#allResults) .. " people.")
 	end
 end
 
@@ -5714,11 +5877,25 @@ ui.selectedPreview = ui.previewCode
 registerConfigBackedState()
 loadFavorites()
 createEmptyScripts()
-renderPeople()
+searchPeople()
 renderFavorites()
 updateFilterSummary()
 updateSelected()
 safeSelectTab(SearchTab)
+pcall(function()
+	Players.PlayerAdded:Connect(function()
+		if state.peopleQuery == "" then
+			task.defer(searchPeople)
+		end
+	end)
+
+	Players.PlayerRemoving:Connect(function()
+		if state.peopleQuery == "" then
+			task.defer(searchPeople)
+		end
+	end)
+end)
+
 startLiveWatcher()
 startBadgeViewWatcher()
 scheduleFastChecks()
