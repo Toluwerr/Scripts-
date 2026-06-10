@@ -258,7 +258,8 @@ state = {
 	peopleCursors = {["1"] = ""},
 	peopleNextCursor = "",
 	peopleLastQuery = nil,
-	peopleDefaultQuery = "a",
+	peopleDefaultQuery = "roblox",
+	peopleFallbackQueries = {"roblox", "builder", "player", "dev", "game"},
 	peoplePresenceAvailable = true,
 	liveEnabled = true,
 	liveInterval = 25,
@@ -4336,6 +4337,64 @@ function hydratePeopleAvatars(people)
 	end
 end
 
+function decodePresenceResponse(body)
+	if type(body) ~= "string" or body == "" then
+		return nil
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if decodedOk and type(decoded) == "table" and type(decoded.userPresences) == "table" then
+		return decoded
+	end
+
+	return nil
+end
+
+function applyPresenceResponse(decoded, lookup)
+	if type(decoded) ~= "table" or type(decoded.userPresences) ~= "table" then
+		return 0
+	end
+
+	local applied = 0
+
+	for _, item in ipairs(decoded.userPresences) do
+		local id = tostring(firstNonEmpty(item.userId, item.UserId))
+		local person = lookup[id]
+
+		if person then
+			local presenceType = tonumber(item.userPresenceType or item.UserPresenceType)
+			local text, rank = getPresenceInfo(presenceType)
+
+			person.PresenceType = presenceType ~= nil and presenceType or -1
+			person.PresenceText = text
+			person.PresenceRank = rank
+			person.PresenceKnown = presenceType ~= nil
+			person.LastLocation = firstNonEmpty(item.lastLocation, item.LastLocation, "")
+			applied += 1
+		end
+	end
+
+	return applied
+end
+
+function applyCurrentServerPresence(people)
+	for _, person in ipairs(people or {}) do
+		local id = tonumber(getPersonId(person))
+		local player = id and Players:GetPlayerByUserId(id)
+
+		if player then
+			person.PresenceType = 2
+			person.PresenceText = "In Game"
+			person.PresenceRank = 4
+			person.PresenceKnown = true
+			person.LastLocation = "Current server"
+		end
+	end
+end
+
 function hydratePeoplePresence(people)
 	people = type(people) == "table" and people or {}
 
@@ -4351,6 +4410,10 @@ function hydratePeoplePresence(people)
 		if id then
 			table.insert(ids, id)
 			lookup[tostring(id)] = person
+			if not person.PresenceKnown then
+				person.PresenceText = "Checking..."
+				person.PresenceRank = 0
+			end
 		end
 	end
 
@@ -4358,48 +4421,53 @@ function hydratePeoplePresence(people)
 		return false
 	end
 
+	local endpoints = {
+		PresenceEndpoint,
+		PresenceProxyEndpoint
+	}
+
 	local payload = {
 		userIds = ids
 	}
 
-	local ok, body = requestPostJson(PresenceEndpoint, payload)
-	if not ok or type(body) ~= "string" then
-		ok, body = requestPostJson(PresenceProxyEndpoint, payload)
-	end
+	for _, endpoint in ipairs(endpoints) do
+		local ok, body = requestPostJson(endpoint, payload)
+		local decoded = ok and decodePresenceResponse(body) or nil
 
-	if not ok or type(body) ~= "string" then
-		state.peoplePresenceAvailable = false
-		return false
-	end
-
-	local decodedOk, decoded = pcall(function()
-		return HttpService:JSONDecode(body)
-	end)
-
-	if not decodedOk or type(decoded) ~= "table" or type(decoded.userPresences) ~= "table" then
-		state.peoplePresenceAvailable = false
-		return false
-	end
-
-	state.peoplePresenceAvailable = true
-
-	for _, item in ipairs(decoded.userPresences) do
-		local id = tostring(firstNonEmpty(item.userId, item.UserId))
-		local person = lookup[id]
-
-		if person then
-			local presenceType = tonumber(item.userPresenceType or item.UserPresenceType or 0)
-			local text, rank = getPresenceInfo(presenceType)
-
-			person.PresenceType = presenceType ~= nil and presenceType or -1
-			person.PresenceText = text
-			person.PresenceRank = rank
-			person.PresenceKnown = true
-			person.LastLocation = firstNonEmpty(item.lastLocation, item.LastLocation, "")
+		if decoded then
+			local applied = applyPresenceResponse(decoded, lookup)
+			applyCurrentServerPresence(people)
+			state.peoplePresenceAvailable = applied > 0
+			return applied > 0
 		end
 	end
 
-	return true
+	local totalApplied = 0
+
+	for _, id in ipairs(ids) do
+		local singlePayload = {
+			userIds = {id}
+		}
+
+		for _, endpoint in ipairs(endpoints) do
+			local ok, body = requestPostJson(endpoint, singlePayload)
+			local decoded = ok and decodePresenceResponse(body) or nil
+
+			if decoded then
+				totalApplied += applyPresenceResponse(decoded, lookup)
+				break
+			end
+		end
+
+		if totalApplied > 0 then
+			task.wait(0.03)
+		end
+	end
+
+	applyCurrentServerPresence(people)
+	state.peoplePresenceAvailable = totalApplied > 0
+
+	return totalApplied > 0
 end
 
 function sortPeopleByPresence(people)
@@ -4539,7 +4607,7 @@ function searchExactRobloxUser(query, seen)
 			DisplayName = username,
 			Avatar = "rbxthumb://type=AvatarHeadShot&id=" .. idText .. "&w=150&h=150",
 			PresenceType = -1,
-			PresenceText = "Unknown",
+			PresenceText = "Checking...",
 			PresenceRank = 0,
 			LastLocation = "",
 			PresenceKnown = false,
@@ -4832,8 +4900,19 @@ searchPeople = function(selectTab)
 	local results = {}
 	local nextCursor = ""
 
-	local function tryUserSearch(proxy)
+	local function tryUserSearch(proxy, forcedQuery)
+		local originalQuery = state.peopleQuery
+		local originalDefault = state.peopleDefaultQuery
+
+		if forcedQuery then
+			state.peopleDefaultQuery = forcedQuery
+		end
+
 		local ok, body = requestGet(buildPeopleSearchUrl(proxy, cursor))
+
+		state.peopleQuery = originalQuery
+		state.peopleDefaultQuery = originalDefault
+
 		if not ok or type(body) ~= "string" then
 			return {}, ""
 		end
@@ -4853,6 +4932,20 @@ searchPeople = function(selectTab)
 
 	if #results == 0 then
 		results, nextCursor = tryUserSearch(true)
+	end
+
+	if #results == 0 and query == "" and type(state.peopleFallbackQueries) == "table" then
+		for _, fallbackQuery in ipairs(state.peopleFallbackQueries) do
+			results, nextCursor = tryUserSearch(false, fallbackQuery)
+			if #results > 0 then
+				break
+			end
+
+			results, nextCursor = tryUserSearch(true, fallbackQuery)
+			if #results > 0 then
+				break
+			end
+		end
 	end
 
 	if query ~= "" and #results == 0 then
@@ -4897,7 +4990,11 @@ searchPeople = function(selectTab)
 	if #results == 0 then
 		setStatus(query == "" and "No global Roblox users found." or "No matching Roblox users found.")
 	else
-		setStatus("Showing " .. tostring(#results) .. " global Roblox users.")
+		if state.peoplePresenceAvailable == false then
+			setStatus("Showing " .. tostring(#results) .. " users. Presence endpoint did not respond.")
+		else
+			setStatus("Showing " .. tostring(#results) .. " global Roblox users.")
+		end
 	end
 end
 
