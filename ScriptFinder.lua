@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
+local MarketplaceService = game:GetService("MarketplaceService")
 local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
@@ -1257,6 +1258,68 @@ local function currentPlaceId()
 	return tostring(game.PlaceId or "")
 end
 
+local PlaceNameCache = {}
+
+local function normalizeGameText(value)
+	value = tostring(value or ""):lower()
+	value = value:gsub("[%c%p]", " ")
+	value = value:gsub("%s+", " ")
+	value = trim(value)
+	return value
+end
+
+local function getPlaceName(placeId)
+	placeId = trim(placeId)
+	if placeId == "" then
+		return ""
+	end
+
+	if PlaceNameCache[placeId] ~= nil then
+		return PlaceNameCache[placeId]
+	end
+
+	local placeNumber = tonumber(placeId)
+	if not placeNumber then
+		PlaceNameCache[placeId] = ""
+		return ""
+	end
+
+	local name = ""
+	local ok, info = pcall(function()
+		return MarketplaceService:GetProductInfo(placeNumber, Enum.InfoType.Asset)
+	end)
+
+	if ok and type(info) == "table" then
+		name = firstNonEmpty(info.Name, info.name)
+	end
+
+	PlaceNameCache[placeId] = name
+	return name
+end
+
+local function getActivePlaceName()
+	local placeId = trim(state.placeId or "")
+	if placeId == "" then
+		return ""
+	end
+
+	return getPlaceName(placeId)
+end
+
+local function gameNameMatches(scriptGameName, activeGameName)
+	scriptGameName = normalizeGameText(scriptGameName)
+	activeGameName = normalizeGameText(activeGameName)
+
+	if scriptGameName == "" or activeGameName == "" then
+		return false
+	end
+
+	return scriptGameName == activeGameName
+		or scriptGameName:find(activeGameName, 1, true) ~= nil
+		or activeGameName:find(scriptGameName, 1, true) ~= nil
+end
+
+
 local function getScriptPlaceId(scriptData)
 	if not scriptData then
 		return ""
@@ -1688,7 +1751,12 @@ local function buildRscriptsSearchTerm()
 	end
 
 	if trim(state.placeId) ~= "" then
-		table.insert(parts, trim(state.placeId))
+		local placeName = getActivePlaceName()
+		if placeName ~= "" then
+			table.insert(parts, placeName)
+		else
+			table.insert(parts, trim(state.placeId))
+		end
 	end
 
 	if state.universalOnly then
@@ -1753,13 +1821,13 @@ local function fetchDetails(scriptData)
 	return scriptData
 end
 
-local function buildSearchUrl()
-	local url = RscriptsEndpoint .. "?page=" .. encode(state.page)
+local function buildRscriptsUrl(searchTerm, page)
+	local url = RscriptsEndpoint .. "?page=" .. encode(page or state.page)
 	url = url .. "&orderBy=" .. encode(mapSortForRscripts(state.sortBy))
 	url = url .. "&sort=" .. encode(state.order ~= "" and state.order or "desc")
 	url = url .. "&notPaid=true"
 
-	local searchTerm = buildRscriptsSearchTerm()
+	searchTerm = trim(searchTerm or "")
 	if searchTerm ~= "" then
 		url = url .. "&q=" .. encode(searchTerm)
 	end
@@ -1776,6 +1844,11 @@ local function buildSearchUrl()
 		url = url .. "&verifiedOnly=true"
 	end
 
+	return url
+end
+
+local function buildSearchUrl()
+	local url = buildRscriptsUrl(buildRscriptsSearchTerm(), state.page)
 	state.lastUrl = url
 	return url
 end
@@ -2856,6 +2929,132 @@ local function parseProviderResponse(decoded)
 	return normalizeRscriptsList(decoded.scripts), decoded.info and tonumber(decoded.info.maxPages) or 0, nil
 end
 
+
+local function resultMatchesActiveGame(scriptData)
+	local activePlaceId = trim(state.placeId or "")
+	if activePlaceId == "" then
+		return true
+	end
+
+	local resultPlaceId = trim(getScriptPlaceId(scriptData))
+	if resultPlaceId ~= "" and resultPlaceId == activePlaceId then
+		return true
+	end
+
+	local activeGameName = getActivePlaceName()
+	if activeGameName ~= "" and gameNameMatches(getGameName(scriptData), activeGameName) then
+		return true
+	end
+
+	return false
+end
+
+local function filterActiveGameResults(results)
+	if trim(state.placeId or "") == "" then
+		return results or {}
+	end
+
+	local filtered = {}
+	for _, item in ipairs(results or {}) do
+		if resultMatchesActiveGame(item) then
+			table.insert(filtered, item)
+		end
+	end
+
+	return filtered
+end
+
+local function fetchProviderUrl(url)
+	local ok, body = requestGetRetry(url, buildSearchHeaders(), 2)
+	if not ok or type(body) ~= "string" then
+		return nil, 0, tostring(body or "Request failed")
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if not decodedOk or type(decoded) ~= "table" then
+		return nil, 0, "Failed to decode response."
+	end
+
+	return parseProviderResponse(decoded)
+end
+
+local function collectActiveGameResults(initialResults, initialTotalPages)
+	if trim(state.placeId or "") == "" then
+		return initialResults or {}, initialTotalPages or 0
+	end
+
+	local targetCount = math.clamp(tonumber(state.max) or 12, 1, 30)
+	local collected = {}
+	local seen = {}
+
+	local function addList(list)
+		for _, item in ipairs(list or {}) do
+			if resultMatchesActiveGame(item) then
+				local id = tostring(getScriptIdentifier(item) or "")
+				if id ~= "" and not seen[id] then
+					seen[id] = true
+					table.insert(collected, item)
+				end
+
+				if #collected >= targetCount then
+					return true
+				end
+			end
+		end
+
+		return false
+	end
+
+	if addList(initialResults) then
+		return collected, 1
+	end
+
+	if state.page ~= 1 then
+		return collected, initialTotalPages or 0
+	end
+
+	local terms = {}
+	local mainTerm = trim(buildRscriptsSearchTerm())
+	local placeName = getActivePlaceName()
+	local placeId = trim(state.placeId or "")
+
+	local function addTerm(term)
+		term = trim(term)
+		if term == "" then
+			return
+		end
+
+		for _, existing in ipairs(terms) do
+			if existing == term then
+				return
+			end
+		end
+
+		table.insert(terms, term)
+	end
+
+	addTerm(mainTerm)
+	addTerm(placeName)
+	addTerm(placeId)
+
+	local maxPagesToScan = 3
+	for _, term in ipairs(terms) do
+		for page = 1, maxPagesToScan do
+			if not (term == mainTerm and page == state.page) then
+				local extraResults = fetchProviderUrl(buildRscriptsUrl(term, page))
+				if type(extraResults) == "table" and addList(extraResults) then
+					return collected, 1
+				end
+			end
+		end
+	end
+
+	return collected, #collected > 0 and 1 or (initialTotalPages or 0)
+end
+
 local function findSelectedInResults(results)
 	if not state.selected then
 		return nil
@@ -3371,6 +3570,10 @@ searchScripts = function()
 		return
 	end
 
+	if trim(state.placeId or "") ~= "" then
+		results, totalPages = collectActiveGameResults(results, totalPages)
+	end
+
 	if not results or #results == 0 then
 		state.results = {}
 		state.totalPages = 0
@@ -3517,13 +3720,26 @@ ui.gameInput = createInput(
 )
 
 createButton(searchPanel, "Current Game", UDim2.new(1, -116, 0, 180), UDim2.fromOffset(102, 32), function()
-	state.placeId = tostring(game.PlaceId)
+	state.page = 1
+	state.query = ""
+	state.placeId = currentPlaceId()
+
+	if ui.searchInput then
+		ui.searchInput.Text = ""
+	end
 
 	if ui.gameInput then
 		ui.gameInput.Text = state.placeId
 	end
 
-	setStatus("Game filter set to current game.")
+	local placeName = getActivePlaceName()
+	if placeName ~= "" then
+		setStatus("Loading scripts for " .. placeName .. "...")
+	else
+		setStatus("Loading scripts for current game...")
+	end
+
+	searchScripts()
 end, true)
 
 createButton(searchPanel, "Search", UDim2.fromOffset(14, 226), UDim2.fromOffset(96, 34), function()
