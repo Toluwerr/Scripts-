@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
+local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -215,6 +216,7 @@ local state = {
 	selected = nil,
 	totalPages = 0,
 	busy = false,
+	searchQueued = false,
 	lastUrl = "",
 	favorites = {},
 	favoriteMode = "Current Game",
@@ -420,6 +422,25 @@ local function requestGet(url, headers)
 	return false, tostring(result)
 end
 
+local function requestGetRetry(url, headers, attempts)
+	attempts = math.max(1, math.floor(tonumber(attempts) or 2))
+
+	local lastError = nil
+	for attempt = 1, attempts do
+		local ok, body = requestGet(url, headers)
+		if ok and type(body) == "string" and body ~= "" then
+			return true, body
+		end
+
+		lastError = body
+		if attempt < attempts then
+			task.wait(0.2 * attempt)
+		end
+	end
+
+	return false, tostring(lastError or "Request failed")
+end
+
 local function copyText(text)
 	text = tostring(text or "")
 	if text == "" then
@@ -614,6 +635,33 @@ local function addGradient(parent, topColor, bottomColor, rotation)
 	return gradient
 end
 
+local function playTween(instance, duration, properties, style, direction)
+	if not instance or not instance.Parent then
+		return
+	end
+
+	pcall(function()
+		TweenService:Create(
+			instance,
+			TweenInfo.new(duration or 0.14, style or Enum.EasingStyle.Quad, direction or Enum.EasingDirection.Out),
+			properties
+		):Play()
+	end)
+end
+
+local function addScaleAnimation(instance, startScale)
+	local scale = Instance.new("UIScale")
+	scale.Scale = startScale or 1
+	scale.Parent = instance
+	return scale
+end
+
+local function animateIn(instance)
+	local scale = addScaleAnimation(instance, 0.985)
+	playTween(scale, 0.18, {Scale = 1}, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+	return scale
+end
+
 local function addPadding(parent, left, top, right, bottom)
 	local padding = Instance.new("UIPadding")
 	padding.PaddingLeft = UDim.new(0, left or 0)
@@ -679,13 +727,24 @@ local function createButton(parent, text, position, size, callback, soft)
 
 	local normal = button.BackgroundColor3
 	local hover = soft and Color3.fromRGB(37, 49, 75) or color("PrimaryHover", Color3.fromRGB(95, 158, 255))
+	local scale = addScaleAnimation(button, 1)
 
 	button.MouseEnter:Connect(function()
-		button.BackgroundColor3 = hover
+		playTween(button, 0.12, {BackgroundColor3 = hover})
+		playTween(scale, 0.12, {Scale = 1.025})
 	end)
 
 	button.MouseLeave:Connect(function()
-		button.BackgroundColor3 = normal
+		playTween(button, 0.12, {BackgroundColor3 = normal})
+		playTween(scale, 0.12, {Scale = 1})
+	end)
+
+	button.MouseButton1Down:Connect(function()
+		playTween(scale, 0.08, {Scale = 0.97})
+	end)
+
+	button.MouseButton1Up:Connect(function()
+		playTween(scale, 0.1, {Scale = 1.025})
 	end)
 
 	button.MouseButton1Click:Connect(function()
@@ -770,7 +829,12 @@ local function createInput(parent, title, placeholder, defaultValue, position, s
 	addPadding(box, 14, 0, 14, 0)
 	forceInputTextStyle(box)
 
+	box.Focused:Connect(function()
+		playTween(box, 0.12, {BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))})
+	end)
+
 	box.FocusLost:Connect(function(enterPressed)
+		playTween(box, 0.12, {BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))})
 		callback(box.Text, enterPressed)
 	end)
 
@@ -848,12 +912,19 @@ local function preparePage(tab)
 		end
 	end
 
-	local layout = tab.Layout or page:FindFirstChildOfClass("UIListLayout")
+	local layout = nil
+	if typeof(tab.Layout) == "Instance" and tab.Layout:IsA("UIListLayout") then
+		layout = tab.Layout
+	else
+		layout = page:FindFirstChildOfClass("UIListLayout")
+	end
+
 	if not layout then
 		layout = Instance.new("UIListLayout")
 		layout.Parent = page
-		tab.Layout = layout
 	end
+
+	tab.Layout = layout
 
 	layout.FillDirection = Enum.FillDirection.Vertical
 	layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
@@ -868,11 +939,14 @@ local function preparePage(tab)
 	page.CanvasSize = UDim2.fromOffset(0, 0)
 	page.ClipsDescendants = true
 
-	layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-		if page and page.Parent then
+	local function updateCanvas()
+		if page and page.Parent and layout and layout.Parent and layout:IsA("UIListLayout") then
 			page.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 28)
 		end
-	end)
+	end
+
+	layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCanvas)
+	task.defer(updateCanvas)
 
 	return page
 end
@@ -2476,12 +2550,24 @@ local function createScriptCard(parent, scriptData, index)
 		TextTruncate = Enum.TextTruncate.AtEnd
 	})
 
+	local cardScale = animateIn(card)
+
 	card.MouseEnter:Connect(function()
-		card.BackgroundColor3 = color("Hover", Color3.fromRGB(30, 41, 59))
+		playTween(card, 0.12, {BackgroundColor3 = color("Hover", Color3.fromRGB(30, 41, 59))})
+		playTween(cardScale, 0.12, {Scale = 1.012})
 	end)
 
 	card.MouseLeave:Connect(function()
-		card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
+		playTween(card, 0.12, {BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))})
+		playTween(cardScale, 0.12, {Scale = 1})
+	end)
+
+	card.MouseButton1Down:Connect(function()
+		playTween(cardScale, 0.08, {Scale = 0.985})
+	end)
+
+	card.MouseButton1Up:Connect(function()
+		playTween(cardScale, 0.1, {Scale = 1.012})
 	end)
 
 	card.MouseButton1Click:Connect(function()
@@ -2591,12 +2677,24 @@ local function createFavoriteCard(parent, item, index)
 
 	remove.TextSize = 11
 
+	local cardScale = animateIn(card)
+
 	card.MouseEnter:Connect(function()
-		card.BackgroundColor3 = color("Hover", Color3.fromRGB(30, 41, 59))
+		playTween(card, 0.12, {BackgroundColor3 = color("Hover", Color3.fromRGB(30, 41, 59))})
+		playTween(cardScale, 0.12, {Scale = 1.012})
 	end)
 
 	card.MouseLeave:Connect(function()
-		card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
+		playTween(card, 0.12, {BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))})
+		playTween(cardScale, 0.12, {Scale = 1})
+	end)
+
+	card.MouseButton1Down:Connect(function()
+		playTween(cardScale, 0.08, {Scale = 0.985})
+	end)
+
+	card.MouseButton1Up:Connect(function()
+		playTween(cardScale, 0.1, {Scale = 1.012})
 	end)
 
 	card.MouseButton1Click:Connect(function()
@@ -2702,11 +2800,14 @@ renderFavorites = function()
 		createFavoriteCard(grid, item, index)
 	end
 
-	gridLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-		grid.Size = UDim2.new(1, -10, 0, gridLayout.AbsoluteContentSize.Y + 8)
-	end)
+	local function updateFavoriteGridSize()
+		if grid and grid.Parent and gridLayout and gridLayout.Parent and gridLayout:IsA("UIGridLayout") then
+			grid.Size = UDim2.new(1, -10, 0, gridLayout.AbsoluteContentSize.Y + 8)
+		end
+	end
 
-	grid.Size = UDim2.new(1, -10, 0, gridLayout.AbsoluteContentSize.Y + 8)
+	gridLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateFavoriteGridSize)
+	task.defer(updateFavoriteGridSize)
 end
 
 
@@ -2774,6 +2875,26 @@ local function findSelectedInResults(results)
 	return nil
 end
 
+local function setBadgeViews(idText, views, pulse)
+	local label = ui.viewBadges and ui.viewBadges[tostring(idText)]
+	if not (label and label.Parent) then
+		return
+	end
+
+	label.Text = "Views " .. compactNumber(views)
+
+	if pulse then
+		local badge = label.Parent
+		local original = badge.BackgroundColor3
+		playTween(badge, 0.1, {BackgroundColor3 = color("PrimaryHover", Color3.fromRGB(95, 158, 255))})
+		task.delay(0.16, function()
+			if badge and badge.Parent then
+				playTween(badge, 0.2, {BackgroundColor3 = original})
+			end
+		end)
+	end
+end
+
 local function updateViewBadges(results)
 	if not ui.viewBadges then
 		return
@@ -2784,11 +2905,7 @@ local function updateViewBadges(results)
 		if id then
 			local idText = tostring(id)
 			local views = storeStableView(idText, getViewCount(item))
-			local label = ui.viewBadges[idText]
-
-			if label and label.Parent then
-				label.Text = "Views " .. compactNumber(views)
-			end
+			setBadgeViews(idText, views, false)
 		end
 	end
 end
@@ -2849,10 +2966,7 @@ local function updateOneVisibleScriptViews(index)
 	state.results[index] = merged
 	storeStableView(idText, newViews)
 
-	local label = ui.viewBadges and ui.viewBadges[idText]
-	if label and label.Parent then
-		label.Text = "Views " .. compactNumber(newViews)
-	end
+	setBadgeViews(idText, newViews, true)
 
 	if state.selected and tostring(getScriptIdentifier(state.selected) or "") == idText then
 		state.selected = mergeTables(state.selected, merged)
@@ -2992,7 +3106,7 @@ local function checkLiveUpdates()
 
 	state.liveBusy = true
 
-	local ok, body = requestGet(buildSearchUrl(), buildSearchHeaders())
+	local ok, body = requestGetRetry(buildSearchUrl(), buildSearchHeaders(), 3)
 	if not ok or type(body) ~= "string" then
 		state.liveBusy = false
 		return false
@@ -3047,6 +3161,7 @@ renderScripts = function()
 
 	local top = createPanel(page, 110, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 	top.Name = "ScriptsTop"
+	addGradient(top, color("Card", Color3.fromRGB(17, 24, 39)), Color3.fromRGB(13, 20, 34), 90)
 
 	createText(top, {
 		Text = getScriptsTitle(),
@@ -3135,8 +3250,30 @@ end
 
 searchScripts = function()
 	if state.busy then
+		if not state.searchQueued then
+			state.searchQueued = true
+			setStatus("Finishing current request, then searching again...")
+
+			task.spawn(function()
+				local waited = 0
+				while state.busy and waited < 8 do
+					task.wait(0.2)
+					waited += 0.2
+				end
+
+				if not state.busy then
+					state.searchQueued = false
+					searchScripts()
+				else
+					state.searchQueued = false
+				end
+			end)
+		end
+
 		return
 	end
+
+	state.searchQueued = false
 
 	if ui.searchInput then
 		state.query = trim(ui.searchInput.Text)
@@ -3303,6 +3440,8 @@ local selectedPage = preparePage(SelectedTab)
 preparePage(FavoritesTab)
 
 local searchPanel = createPanel(searchPage, 290, 1, color("Card", Color3.fromRGB(17, 24, 39)))
+searchPanel.Name = "SearchPanel"
+addGradient(searchPanel, color("Card", Color3.fromRGB(17, 24, 39)), Color3.fromRGB(13, 20, 34), 90)
 
 ui.searchInput = createInput(
 	searchPanel,
