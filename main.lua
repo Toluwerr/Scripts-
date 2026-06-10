@@ -212,6 +212,8 @@ AvatarHeadshotEndpoint = "https://thumbnails.roblox.com/v1/users/avatar-headshot
 AvatarHeadshotProxyEndpoint = "https://thumbnails.roproxy.com/v1/users/avatar-headshot"
 PresenceEndpoint = "https://presence.roblox.com/v1/presence/users"
 PresenceProxyEndpoint = "https://presence.roproxy.com/v1/presence/users"
+OnlineStatusEndpoint = "https://api.roblox.com/users/"
+OnlineStatusProxyEndpoint = "https://api.roproxy.com/users/"
 SiteURL = "https://scriptblox.com"
 RscriptsSiteURL = "https://rscripts.net"
 ImageFolder = "ScriptBloxFinderImages"
@@ -4203,7 +4205,7 @@ function getPresenceInfo(presenceType)
 		return "Offline", 1, color("Muted", Color3.fromRGB(148, 163, 184))
 	end
 
-	return "Unknown", 0, color("Muted", Color3.fromRGB(148, 163, 184))
+	return "Unavailable", 0, color("Muted", Color3.fromRGB(148, 163, 184))
 end
 
 function normalizePerson(item)
@@ -4395,6 +4397,117 @@ function applyCurrentServerPresence(people)
 	end
 end
 
+function decodeOnlineStatusResponse(body)
+	if type(body) ~= "string" or body == "" then
+		return nil
+	end
+
+	local decodedOk, decoded = pcall(function()
+		return HttpService:JSONDecode(body)
+	end)
+
+	if decodedOk and type(decoded) == "table" then
+		return decoded
+	end
+
+	return nil
+end
+
+function getPresenceTypeFromOnlineStatus(decoded)
+	if type(decoded) ~= "table" then
+		return -1
+	end
+
+	local presenceType = tonumber(decoded.PresenceType or decoded.presenceType)
+	if presenceType ~= nil then
+		return presenceType
+	end
+
+	local isOnline = decoded.IsOnline
+	if isOnline == nil then
+		isOnline = decoded.isOnline
+	end
+
+	if isOnline == false then
+		return 0
+	end
+
+	if isOnline == true then
+		local locationType = tonumber(decoded.LocationType or decoded.locationType)
+		local lastLocation = tostring(decoded.LastLocation or decoded.lastLocation or ""):lower()
+
+		if locationType == 4 or lastLocation:find("playing", 1, true) then
+			return 2
+		elseif locationType == 3 or lastLocation:find("creating", 1, true) or lastLocation:find("studio", 1, true) then
+			return 3
+		else
+			return 1
+		end
+	end
+
+	return -1
+end
+
+function applyOnlineStatusResponse(person, decoded)
+	if type(person) ~= "table" or type(decoded) ~= "table" then
+		return false
+	end
+
+	local presenceType = getPresenceTypeFromOnlineStatus(decoded)
+	if presenceType < 0 then
+		return false
+	end
+
+	local text, rank = getPresenceInfo(presenceType)
+
+	person.PresenceType = presenceType
+	person.PresenceText = text
+	person.PresenceRank = rank
+	person.PresenceKnown = true
+	person.LastLocation = firstNonEmpty(decoded.LastLocation, decoded.lastLocation, "")
+
+	return true
+end
+
+function hydratePeopleOnlineStatusFallback(people)
+	people = type(people) == "table" and people or {}
+
+	if #people == 0 then
+		return false
+	end
+
+	local applied = 0
+
+	for _, person in ipairs(people) do
+		local id = getPersonId(person)
+
+		if id ~= "" and not person.PresenceKnown then
+			local endpoints = {
+				OnlineStatusEndpoint .. encode(id) .. "/onlinestatus/",
+				OnlineStatusProxyEndpoint .. encode(id) .. "/onlinestatus/"
+			}
+
+			for _, endpoint in ipairs(endpoints) do
+				local ok, body = requestGet(endpoint)
+				local decoded = ok and decodeOnlineStatusResponse(body) or nil
+
+				if decoded and applyOnlineStatusResponse(person, decoded) then
+					applied += 1
+					break
+				end
+			end
+
+			if applied > 0 then
+				task.wait(0.03)
+			end
+		end
+	end
+
+	applyCurrentServerPresence(people)
+
+	return applied > 0
+end
+
 function hydratePeoplePresence(people)
 	people = type(people) == "table" and people or {}
 
@@ -4411,7 +4524,7 @@ function hydratePeoplePresence(people)
 			table.insert(ids, id)
 			lookup[tostring(id)] = person
 			if not person.PresenceKnown then
-				person.PresenceText = "Checking..."
+				person.PresenceText = "Checking"
 				person.PresenceRank = 0
 			end
 		end
@@ -4465,9 +4578,15 @@ function hydratePeoplePresence(people)
 	end
 
 	applyCurrentServerPresence(people)
-	state.peoplePresenceAvailable = totalApplied > 0
 
-	return totalApplied > 0
+	if totalApplied <= 0 then
+		local legacyApplied = hydratePeopleOnlineStatusFallback(people)
+		state.peoplePresenceAvailable = legacyApplied
+		return legacyApplied
+	end
+
+	state.peoplePresenceAvailable = true
+	return true
 end
 
 function sortPeopleByPresence(people)
