@@ -1,16 +1,16 @@
-Players = game:GetService("Players")
-HttpService = game:GetService("HttpService")
-TeleportService = game:GetService("TeleportService")
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
 
-LocalPlayer = Players.LocalPlayer
+local LocalPlayer = Players.LocalPlayer
 
 
-AutoRerunURL = "https://raw.githubusercontent.com/Toluwerr/Script-Finder/refs/heads/main/main.lua"
-AutoRerunFolder = "ScriptFinderSettings"
-AutoRerunConfig = AutoRerunFolder .. "/AutoRerun.txt"
-AutoRerunAutoexec = "autoexec/ScriptFinder.lua"
+local AutoRerunURL = "https://raw.githubusercontent.com/Toluwerr/Script-Finder/refs/heads/main/main.lua"
+local AutoRerunFolder = "ScriptFinderSettings"
+local AutoRerunConfig = AutoRerunFolder .. "/AutoRerun.txt"
+local AutoRerunAutoexec = "autoexec/ScriptFinder.lua"
 
-function ensureAutoRerunFolder()
+local function ensureAutoRerunFolder()
 	if type(makefolder) == "function" and type(isfolder) == "function" then
 		pcall(function()
 			if not isfolder(AutoRerunFolder) then
@@ -20,7 +20,7 @@ function ensureAutoRerunFolder()
 	end
 end
 
-function getAutoRerunEnabled()
+local function getAutoRerunEnabled()
 	if type(isfile) == "function" and type(readfile) == "function" then
 		local ok, result = pcall(function()
 			if isfile(AutoRerunConfig) then
@@ -36,7 +36,7 @@ function getAutoRerunEnabled()
 	return true
 end
 
-function writeAutoRerunEnabled(value)
+local function writeAutoRerunEnabled(value)
 	if type(writefile) ~= "function" then
 		return
 	end
@@ -48,10 +48,10 @@ function writeAutoRerunEnabled(value)
 	end)
 end
 
-AutoRerunEnabled = getAutoRerunEnabled()
+local AutoRerunEnabled = getAutoRerunEnabled()
 
-AutoRerunLoader = [[
-Enabled = true
+local AutoRerunLoader = [[
+local Enabled = true
 pcall(function()
 	if type(isfile) == "function" and type(readfile) == "function" and isfile("ScriptFinderSettings/AutoRerun.txt") then
 		Enabled = readfile("ScriptFinderSettings/AutoRerun.txt") ~= "false"
@@ -62,7 +62,7 @@ if Enabled then
 end
 ]]
 
-function getTeleportQueue()
+local function getTeleportQueue()
 	if type(queue_on_teleport) == "function" then
 		return queue_on_teleport
 	end
@@ -82,7 +82,7 @@ function getTeleportQueue()
 	return nil
 end
 
-function queueSelfOnTeleport()
+local function queueSelfOnTeleport()
 	if not AutoRerunEnabled then
 		return
 	end
@@ -96,7 +96,7 @@ function queueSelfOnTeleport()
 	end
 end
 
-function saveAutoExecuteLoader()
+local function saveAutoExecuteLoader()
 	if type(writefile) ~= "function" then
 		return
 	end
@@ -118,7 +118,7 @@ function saveAutoExecuteLoader()
 	end)
 end
 
-function saveConfigState()
+local function saveConfigState()
 	if Configs then
 		pcall(function()
 			Configs:Save("script_finder")
@@ -126,7 +126,7 @@ function saveConfigState()
 	end
 end
 
-function setAutoRerun(value)
+local function setAutoRerun(value)
 	AutoRerunEnabled = value == true
 	writeAutoRerunEnabled(AutoRerunEnabled)
 	saveAutoExecuteLoader()
@@ -149,9 +149,9 @@ pcall(function()
 	end)
 end)
 
-Google = "https://raw.githubusercontent.com/Toluwerr/Google-UI/refs/heads/main/main.lua"
+local Google = "https://raw.githubusercontent.com/Toluwerr/Google-UI/refs/heads/main/main.lua"
 
-loaded, Google = pcall(function()
+local loaded, Google = pcall(function()
 	local Source = game:HttpGet(Google .. "?cache=" .. tostring(os.time()) .. tostring(math.random(1000, 9999)))
 	Source = Source:gsub("([,{]%s*)pad%s*=", "%1Padding =")
 	Source = Source:gsub("%.pad", ".Padding")
@@ -178,7 +178,7 @@ pcall(function()
 	end
 end)
 
-Configs = nil
+local Configs = nil
 pcall(function()
 	if type(Google.CreateConfigManager) == "function" then
 		Configs = Google:CreateConfigManager({
@@ -191,31 +191,16 @@ pcall(function()
 	end
 end)
 
-SearchEndpoint = "https://scriptblox.com/api/script/search"
-FetchEndpoint = "https://scriptblox.com/api/script/fetch"
-DetailsEndpoint = "https://scriptblox.com/api/script/"
-RawEndpoint = "https://scriptblox.com/api/script/raw/"
-RscriptsEndpoint = "https://rscripts.net/api/v2/scripts"
-RscriptsDetailsEndpoint = "https://rscripts.net/api/v2/script"
-GameSearchEndpoint = "https://www.roblox.com/games/list-json"
-GameSearchProxyEndpoint = "https://www.roproxy.com/games/list-json"
-GameIconEndpoint = "https://thumbnails.roblox.com/v1/games/icons"
-GameIconProxyEndpoint = "https://thumbnails.roproxy.com/v1/games/icons"
-GameDetailsEndpoint = "https://games.roblox.com/v1/games"
-GameDetailsProxyEndpoint = "https://games.roproxy.com/v1/games"
-GameOmniSearchEndpoint = "https://apis.roblox.com/search-api/omni-search"
-GameOmniSearchProxyEndpoint = "https://apis.roproxy.com/search-api/omni-search"
-RolimonsGameListEndpoint = "https://api.rolimons.com/games/v1/gamelist"
-SiteURL = "https://scriptblox.com"
-RscriptsSiteURL = "https://rscripts.net"
-ImageFolder = "ScriptBloxFinderImages"
-ScriptBloxLogoURL = "rbxthumb://type=Asset&id=84945399616047&w=150&h=150"
-RscriptsLogoURL = "rbxthumb://type=Asset&id=108648055077644&w=150&h=150"
-FavoritesFile = AutoRerunFolder .. "/Favorites.json"
+local RscriptsEndpoint = "https://rscripts.net/api/v2/scripts"
+local RscriptsDetailsEndpoint = "https://rscripts.net/api/v2/script"
+local RscriptsSiteURL = "https://rscripts.net"
+local ImageFolder = "RscriptsFinderImages"
+local RscriptsLogoURL = "rbxthumb://type=Asset&id=108648055077644&w=150&h=150"
+local FavoritesFile = AutoRerunFolder .. "/Favorites.json"
 
-state = {
+local state = {
 	query = "",
-	source = "scriptblox",
+	source = "rscripts",
 	page = 1,
 	max = 12,
 	sortBy = "updatedAt",
@@ -233,16 +218,6 @@ state = {
 	lastUrl = "",
 	favorites = {},
 	favoriteMode = "Current Game",
-	gameQuery = "",
-	gamePage = 1,
-	gameMax = 18,
-	gameResults = {},
-	gameBusy = false,
-	rolimonsGamesLoaded = false,
-	rolimonsGames = {},
-	gameLastError = "",
-	gameSearchDebug = "",
-	gameBusyToken = 0,
 	liveEnabled = true,
 	liveInterval = 25,
 	liveIdleInterval = 25,
@@ -259,20 +234,17 @@ state = {
 	liveSnapshot = {}
 }
 
-ui = {
+local ui = {
 	searchInput = nil,
 	maxInput = nil,
 	gameInput = nil,
 	authorInput = nil,
-	gamesSearchInput = nil,
-	gamesInfo = nil,
 	sortDropdown = nil,
 	orderDropdown = nil,
 	status = nil,
 	filterSummary = nil,
 	scriptsInfo = nil,
-	sourceScriptBloxButton = nil,
-	sourceRscriptsButton = nil,
+	providerLogo = nil,
 	viewBadges = {},
 	selectedImage = nil,
 	selectedAuthorImage = nil,
@@ -292,26 +264,23 @@ ui = {
 	favoriteUniversalButton = nil
 }
 
-Window = nil
-SearchTab = nil
-ScriptsTab = nil
-GamesTab = nil
-SelectedTab = nil
-FavoritesTab = nil
-searchScripts = nil
-searchGames = nil
-renderGames = nil
-selectScript = nil
-renderFavorites = nil
-renderScripts = nil
-updateFavoriteButton = nil
-favoriteSelected = nil
+local Window
+local SearchTab
+local ScriptsTab
+local SelectedTab
+local FavoritesTab
+local searchScripts
+local selectScript
+local renderFavorites
+local renderScripts
+local updateFavoriteButton
+local favoriteSelected
 
-function theme()
+local function theme()
 	return Google.Theme or {}
 end
 
-PaletteOverrides = {
+local PaletteOverrides = {
 	Card = Color3.fromRGB(17, 24, 39),
 	CardAlt = Color3.fromRGB(30, 41, 59),
 	Input = Color3.fromRGB(15, 23, 42),
@@ -325,7 +294,7 @@ PaletteOverrides = {
 	Muted = Color3.fromRGB(148, 163, 184)
 }
 
-function color(name, fallback)
+local function color(name, fallback)
 	if PaletteOverrides[name] then
 		return PaletteOverrides[name]
 	end
@@ -334,15 +303,15 @@ function color(name, fallback)
 	return t[name] or fallback
 end
 
-function trim(value)
+local function trim(value)
 	return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
-function encode(value)
+local function encode(value)
 	return HttpService:UrlEncode(tostring(value or ""))
 end
 
-function setStatus(text)
+local function setStatus(text)
 	text = tostring(text or "")
 	if ui.status then
 		ui.status.Text = text
@@ -362,7 +331,7 @@ function setStatus(text)
 	end
 end
 
-function safeSelectTab(tab)
+local function safeSelectTab(tab)
 	if Window and Window.SelectTab then
 		local ok = pcall(function()
 			Window:SelectTab(tab)
@@ -397,61 +366,50 @@ function safeSelectTab(tab)
 	end
 end
 
-function requestGet(url, headers)
+local function requestGet(url, headers)
 	headers = type(headers) == "table" and headers or nil
 
-	local requestData = {Url = url, Method = "GET"}
-	if headers then
-		requestData.Headers = headers
-	end
-
-	local requestMethods = {}
-
-	if type(request) == "function" then
-		table.insert(requestMethods, request)
-	end
-
-	if type(http_request) == "function" then
-		table.insert(requestMethods, http_request)
-	end
-
-	if syn and type(syn.request) == "function" then
-		table.insert(requestMethods, syn.request)
-	end
-
-	if fluxus and type(fluxus.request) == "function" then
-		table.insert(requestMethods, fluxus.request)
-	end
-
-	if http and type(http.request) == "function" then
-		table.insert(requestMethods, http.request)
-	end
-
-	local lastError = nil
-
-	for _, method in ipairs(requestMethods) do
-		local ok, response = pcall(function()
-			return method(requestData)
-		end)
-
-		if ok and response then
-			if type(response) == "table" then
-				if response.Body then
-					return true, response.Body
-				end
-
-				if response.body then
-					return true, response.body
-				end
-			elseif type(response) == "string" then
-				return true, response
-			end
-		elseif not ok then
-			lastError = response
-		end
-	end
-
 	local ok, result = pcall(function()
+		local requestData = {Url = url, Method = "GET"}
+		if headers then
+			requestData.Headers = headers
+		end
+
+		if type(request) == "function" then
+			local response = request(requestData)
+			if response and response.Body then
+				return response.Body
+			end
+		end
+
+		if type(http_request) == "function" then
+			local response = http_request(requestData)
+			if response and response.Body then
+				return response.Body
+			end
+		end
+
+		if syn and type(syn.request) == "function" then
+			local response = syn.request(requestData)
+			if response and response.Body then
+				return response.Body
+			end
+		end
+
+		if fluxus and type(fluxus.request) == "function" then
+			local response = fluxus.request(requestData)
+			if response and response.Body then
+				return response.Body
+			end
+		end
+
+		if http and type(http.request) == "function" then
+			local response = http.request(requestData)
+			if response and response.Body then
+				return response.Body
+			end
+		end
+
 		return game:HttpGet(url)
 	end)
 
@@ -459,91 +417,10 @@ function requestGet(url, headers)
 		return true, result
 	end
 
-	return false, tostring(result or lastError or "Request failed")
+	return false, tostring(result)
 end
 
-function requestPostJson(url, payload, headers)
-	local body = ""
-	local encodedOk, encoded = pcall(function()
-		return HttpService:JSONEncode(payload or {})
-	end)
-
-	if encodedOk then
-		body = encoded
-	else
-		body = "{}"
-	end
-
-	headers = type(headers) == "table" and headers or {}
-	headers["Content-Type"] = headers["Content-Type"] or "application/json"
-	headers["Accept"] = headers["Accept"] or "application/json"
-
-	local requestData = {
-		Url = url,
-		Method = "POST",
-		Headers = headers,
-		Body = body
-	}
-
-	local requestMethods = {}
-
-	if type(request) == "function" then
-		table.insert(requestMethods, request)
-	end
-
-	if type(http_request) == "function" then
-		table.insert(requestMethods, http_request)
-	end
-
-	if syn and type(syn.request) == "function" then
-		table.insert(requestMethods, syn.request)
-	end
-
-	if fluxus and type(fluxus.request) == "function" then
-		table.insert(requestMethods, fluxus.request)
-	end
-
-	if http and type(http.request) == "function" then
-		table.insert(requestMethods, http.request)
-	end
-
-	local lastError = nil
-
-	for _, method in ipairs(requestMethods) do
-		local ok, response = pcall(function()
-			return method(requestData)
-		end)
-
-		if ok and response then
-			if type(response) == "table" then
-				if response.Body then
-					return true, response.Body
-				end
-
-				if response.body then
-					return true, response.body
-				end
-			elseif type(response) == "string" then
-				return true, response
-			end
-		elseif not ok then
-			lastError = response
-		end
-	end
-
-	local ok, result = pcall(function()
-		return game:HttpPost(url, body, Enum.HttpContentType.ApplicationJson)
-	end)
-
-	if ok then
-		return true, result
-	end
-
-	return false, tostring(result or lastError or "POST request failed")
-end
-
-
-function copyText(text)
+local function copyText(text)
 	text = tostring(text or "")
 	if text == "" then
 		setStatus("Nothing to copy.")
@@ -578,11 +455,11 @@ function copyText(text)
 	return copied
 end
 
-function writeSupported()
+local function writeSupported()
 	return type(writefile) == "function" and (type(getcustomasset) == "function" or type(getsynasset) == "function")
 end
 
-function customAsset(path)
+local function customAsset(path)
 	if type(getcustomasset) == "function" then
 		local ok, result = pcall(function()
 			return getcustomasset(path)
@@ -604,7 +481,7 @@ function customAsset(path)
 	return ""
 end
 
-function ensureImageFolder()
+local function ensureImageFolder()
 	if type(makefolder) == "function" and type(isfolder) == "function" then
 		pcall(function()
 			if not isfolder(ImageFolder) then
@@ -614,7 +491,7 @@ function ensureImageFolder()
 	end
 end
 
-function safeName(value)
+local function safeName(value)
 	value = tostring(value or "image")
 	value = value:gsub("[^%w_%-]", "_")
 	value = value:gsub("_+", "_")
@@ -627,7 +504,7 @@ function safeName(value)
 	return value
 end
 
-function normalizeImageURL(value)
+local function normalizeImageURL(value)
 	value = tostring(value or "")
 
 	if value == "" then
@@ -643,19 +520,19 @@ function normalizeImageURL(value)
 	end
 
 	if value:match("^/") then
-		return SiteURL .. value
+		return RscriptsSiteURL .. value
 	end
 
 	if value:match("^https?://") then
 		return value
 	end
 
-	return SiteURL .. "/" .. value
+	return RscriptsSiteURL .. "/" .. value
 end
 
-imageCache = {}
+local imageCache = {}
 
-function resolveImage(value, identifier)
+local function resolveImage(value, identifier)
 	local url = normalizeImageURL(value)
 
 	if url == "" then
@@ -703,7 +580,7 @@ function resolveImage(value, identifier)
 	return asset
 end
 
-function addCorner(parent, radius)
+local function addCorner(parent, radius)
 	local corner = Instance.new("UICorner")
 	local value = radius or 6
 
@@ -716,7 +593,7 @@ function addCorner(parent, radius)
 	return corner
 end
 
-function addStroke(parent, strokeColor, transparency, thickness)
+local function addStroke(parent, strokeColor, transparency, thickness)
 	local stroke = Instance.new("UIStroke")
 	stroke.Color = strokeColor
 	stroke.Transparency = math.max(transparency or 0.45, 0.32)
@@ -726,7 +603,7 @@ function addStroke(parent, strokeColor, transparency, thickness)
 	return stroke
 end
 
-function addGradient(parent, topColor, bottomColor, rotation)
+local function addGradient(parent, topColor, bottomColor, rotation)
 	local gradient = Instance.new("UIGradient")
 	gradient.Color = ColorSequence.new({
 		ColorSequenceKeypoint.new(0, topColor),
@@ -737,7 +614,7 @@ function addGradient(parent, topColor, bottomColor, rotation)
 	return gradient
 end
 
-function addPadding(parent, left, top, right, bottom)
+local function addPadding(parent, left, top, right, bottom)
 	local padding = Instance.new("UIPadding")
 	padding.PaddingLeft = UDim.new(0, left or 0)
 	padding.PaddingTop = UDim.new(0, top or 0)
@@ -747,7 +624,7 @@ function addPadding(parent, left, top, right, bottom)
 	return padding
 end
 
-function createText(parent, data)
+local function createText(parent, data)
 	local label = Instance.new("TextLabel")
 	label.BackgroundTransparency = data.BackgroundTransparency or 1
 	label.BackgroundColor3 = data.BackgroundColor3 or color("Card", Color3.fromRGB(17, 24, 39))
@@ -768,7 +645,7 @@ function createText(parent, data)
 	return label
 end
 
-function createPanel(parent, height, layoutOrder, backgroundColor)
+local function createPanel(parent, height, layoutOrder, backgroundColor)
 	local panel = Instance.new("Frame")
 	panel.BackgroundColor3 = backgroundColor or color("Card", Color3.fromRGB(17, 24, 39))
 	panel.BorderSizePixel = 0
@@ -783,7 +660,7 @@ function createPanel(parent, height, layoutOrder, backgroundColor)
 	return panel
 end
 
-function createButton(parent, text, position, size, callback, soft)
+local function createButton(parent, text, position, size, callback, soft)
 	local button = Instance.new("TextButton")
 	button.Name = safeName(text)
 	button.Text = text
@@ -818,7 +695,7 @@ function createButton(parent, text, position, size, callback, soft)
 	return button
 end
 
-function forceInputTextStyle(box)
+local function forceInputTextStyle(box)
 	local inputTextColor = Color3.fromRGB(255, 255, 255)
 	local placeholderColor = Color3.fromRGB(148, 163, 184)
 
@@ -852,7 +729,7 @@ function forceInputTextStyle(box)
 	return box
 end
 
-function createInput(parent, title, placeholder, defaultValue, position, size, callback)
+local function createInput(parent, title, placeholder, defaultValue, position, size, callback)
 	createText(parent, {
 		Text = title,
 		Font = Enum.Font.GothamSemibold,
@@ -900,7 +777,7 @@ function createInput(parent, title, placeholder, defaultValue, position, size, c
 	return box
 end
 
-function createCheck(parent, title, position, size, defaultValue, callback)
+local function createCheck(parent, title, position, size, defaultValue, callback)
 	local button = Instance.new("TextButton")
 	button.BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))
 	button.BorderSizePixel = 0
@@ -955,7 +832,7 @@ function createCheck(parent, title, position, size, defaultValue, callback)
 	return button
 end
 
-function preparePage(tab)
+local function preparePage(tab)
 	local page = tab and tab.Page
 	if not page then
 		return nil
@@ -1000,7 +877,7 @@ function preparePage(tab)
 	return page
 end
 
-function firstNonEmpty(...)
+local function firstNonEmpty(...)
 	local values = {...}
 	for _, value in ipairs(values) do
 		if type(value) == "string" and trim(value) ~= "" then
@@ -1010,18 +887,18 @@ function firstNonEmpty(...)
 	return ""
 end
 
-function boolToText(value)
+local function boolToText(value)
 	return value and "Yes" or "No"
 end
 
-function getScriptIdentifier(scriptData)
+local function getScriptIdentifier(scriptData)
 	if not scriptData then
 		return nil
 	end
 	return scriptData.slug or scriptData._id or scriptData.id
 end
 
-function parseCount(value)
+local function parseCount(value)
 	if type(value) == "number" then
 		return math.max(0, math.floor(value))
 	end
@@ -1042,7 +919,7 @@ function parseCount(value)
 	return math.max(0, math.floor(number))
 end
 
-function getViewCount(scriptData)
+local function getViewCount(scriptData)
 	if type(scriptData) ~= "table" then
 		return 0
 	end
@@ -1060,7 +937,7 @@ function getViewCount(scriptData)
 	)
 end
 
-function setViewCount(scriptData, value)
+local function setViewCount(scriptData, value)
 	if type(scriptData) ~= "table" then
 		return scriptData
 	end
@@ -1081,7 +958,7 @@ function setViewCount(scriptData, value)
 	return scriptData
 end
 
-function stableViewCount(scriptData)
+local function stableViewCount(scriptData)
 	local rawViews = getViewCount(scriptData)
 	local id = getScriptIdentifier(scriptData)
 
@@ -1092,7 +969,7 @@ function stableViewCount(scriptData)
 	return rawViews
 end
 
-function storeStableView(id, value)
+local function storeStableView(id, value)
 	if not id then
 		return value
 	end
@@ -1107,7 +984,7 @@ function storeStableView(id, value)
 end
 
 
-function compactNumber(value)
+local function compactNumber(value)
 	value = tonumber(value) or 0
 
 	if value >= 1000000 then
@@ -1119,7 +996,7 @@ function compactNumber(value)
 	return tostring(math.floor(value))
 end
 
-function updateLiveSnapshot(results)
+local function updateLiveSnapshot(results)
 	local snapshot = {}
 	local previous = state.liveSnapshot or {}
 
@@ -1136,14 +1013,14 @@ function updateLiveSnapshot(results)
 end
 
 
-function getScriptTitle(scriptData)
+local function getScriptTitle(scriptData)
 	if not scriptData then
 		return "Unknown"
 	end
 	return firstNonEmpty(scriptData.title, scriptData.name, scriptData.slug, scriptData._id, "Unknown")
 end
 
-function getGameName(scriptData)
+local function getGameName(scriptData)
 	if scriptData and type(scriptData.game) == "table" then
 		local name = firstNonEmpty(scriptData.game.name, scriptData.game.title, scriptData.game.gameName)
 		if name ~= "" then
@@ -1158,14 +1035,14 @@ function getGameName(scriptData)
 	return "Unknown Game"
 end
 
-function getScriptImage(scriptData)
+local function getScriptImage(scriptData)
 	if not scriptData then
 		return ""
 	end
 	return firstNonEmpty(scriptData.image, type(scriptData.game) == "table" and firstNonEmpty(scriptData.game.imageUrl, scriptData.game.imgurl) or "")
 end
 
-function getAuthorName(scriptData)
+local function getAuthorName(scriptData)
 	if not scriptData then
 		return ""
 	end
@@ -1197,7 +1074,7 @@ function getAuthorName(scriptData)
 	return ""
 end
 
-function getAuthorImage(scriptData)
+local function getAuthorImage(scriptData)
 	if not scriptData then
 		return ""
 	end
@@ -1236,7 +1113,7 @@ function getAuthorImage(scriptData)
 end
 
 
-function formatDate(value)
+local function formatDate(value)
 	value = tostring(value or "")
 	if value:match("^%d%d%d%d%-%d%d%-%d%d") then
 		return value:sub(1, 10)
@@ -1244,7 +1121,7 @@ function formatDate(value)
 	return ""
 end
 
-function getDateLine(scriptData)
+local function getDateLine(scriptData)
 	if not scriptData then
 		return ""
 	end
@@ -1263,7 +1140,7 @@ function getDateLine(scriptData)
 	return ""
 end
 
-function getFeatures(scriptData)
+local function getFeatures(scriptData)
 	if not scriptData then
 		return "No script selected."
 	end
@@ -1276,7 +1153,7 @@ function getFeatures(scriptData)
 	return "No feature text provided."
 end
 
-function tagsToText(tags)
+local function tagsToText(tags)
 	if type(tags) ~= "table" or #tags == 0 then
 		return "None"
 	end
@@ -1298,15 +1175,15 @@ function tagsToText(tags)
 end
 
 
-function truthy(value)
+local function truthy(value)
 	return value == true or value == 1 or value == "1" or tostring(value):lower() == "true" or tostring(value):lower() == "yes"
 end
 
-function currentPlaceId()
+local function currentPlaceId()
 	return tostring(game.PlaceId or "")
 end
 
-function getScriptPlaceId(scriptData)
+local function getScriptPlaceId(scriptData)
 	if not scriptData then
 		return ""
 	end
@@ -1335,7 +1212,7 @@ function getScriptPlaceId(scriptData)
 	return ""
 end
 
-function isUniversalScript(scriptData)
+local function isUniversalScript(scriptData)
 	if not scriptData then
 		return false
 	end
@@ -1343,7 +1220,7 @@ function isUniversalScript(scriptData)
 	return truthy(scriptData.isUniversal) or truthy(scriptData.universal) or tostring(getGameName(scriptData)):lower() == "universal"
 end
 
-function favoriteItems()
+local function favoriteItems()
 	local items = {}
 
 	for _, item in pairs(state.favorites) do
@@ -1359,7 +1236,7 @@ function favoriteItems()
 	return items
 end
 
-function loadFavorites()
+local function loadFavorites()
 	state.favorites = {}
 
 	if Configs and Google.Options and Google.Options.ScriptFinderFavorites then
@@ -1417,7 +1294,7 @@ function loadFavorites()
 	end
 end
 
-function saveFavorites()
+local function saveFavorites()
 	if Configs and Google.Options and Google.Options.ScriptFinderFavorites then
 		local ok, saved = pcall(function()
 			return Configs:Save("script_finder")
@@ -1454,7 +1331,7 @@ function saveFavorites()
 	return writeOk == true
 end
 
-function makeFavoriteEntry(scriptData)
+local function makeFavoriteEntry(scriptData)
 	local id = getScriptIdentifier(scriptData)
 	if not id then
 		return nil
@@ -1476,7 +1353,7 @@ function makeFavoriteEntry(scriptData)
 		Id = tostring(id),
 		Title = getScriptTitle(scriptData),
 		Game = getGameName(scriptData),
-		Source = scriptData._source or state.source or "scriptblox",
+		Source = "rscripts",
 		Image = getScriptImage(scriptData),
 		PlaceId = placeId,
 		Universal = universal,
@@ -1485,7 +1362,7 @@ function makeFavoriteEntry(scriptData)
 	}
 end
 
-function isFavorite(scriptData)
+local function isFavorite(scriptData)
 	local id = getScriptIdentifier(scriptData)
 	return id ~= nil and state.favorites[tostring(id)] ~= nil
 end
@@ -1503,7 +1380,7 @@ updateFavoriteButton = function()
 	ui.favoriteButton.Text = isFavorite(state.selected) and "Favorited" or "Favorite Script"
 end
 
-function removeFavorite(id)
+local function removeFavorite(id)
 	id = tostring(id or "")
 	if id == "" then
 		return
@@ -1559,7 +1436,7 @@ favoriteSelected = function()
 	end
 end
 
-function setFavoritesFromSaved(value)
+local function setFavoritesFromSaved(value)
 	state.favorites = {}
 
 	local source = value
@@ -1590,7 +1467,7 @@ function setFavoritesFromSaved(value)
 	end
 end
 
-function registerConfigBackedState()
+local function registerConfigBackedState()
 	if not Google.Options then
 		return
 	end
@@ -1632,19 +1509,16 @@ function registerConfigBackedState()
 end
 
 
-function getSourceName(source)
-	source = tostring(source or state.source or "scriptblox")
-	if source == "rscripts" then
-		return "Rscripts"
-	end
-	return "ScriptBlox"
+
+local function getSourceName()
+	return "Rscripts"
 end
 
-function isRscripts()
-	return state.source == "rscripts"
+local function isRscripts()
+	return true
 end
 
-function mapSortForRscripts(value)
+local function mapSortForRscripts(value)
 	value = tostring(value or "")
 	if value == "views" then
 		return "views"
@@ -1656,7 +1530,7 @@ function mapSortForRscripts(value)
 	return "date"
 end
 
-function normalizeRscriptsScript(item)
+local function normalizeRscriptsScript(item)
 	if type(item) ~= "table" then
 		return nil
 	end
@@ -1706,7 +1580,7 @@ function normalizeRscriptsScript(item)
 	}
 end
 
-function normalizeRscriptsList(list)
+local function normalizeRscriptsList(list)
 	local output = {}
 	if type(list) ~= "table" then
 		return output
@@ -1722,8 +1596,8 @@ function normalizeRscriptsList(list)
 	return output
 end
 
-function buildSearchHeaders()
-	if state.source == "rscripts" and trim(state.owner or "") ~= "" then
+local function buildSearchHeaders()
+	if trim(state.owner or "") ~= "" then
 		return {
 			Username = trim(state.owner)
 		}
@@ -1732,7 +1606,7 @@ function buildSearchHeaders()
 	return nil
 end
 
-function buildRscriptsSearchTerm()
+local function buildRscriptsSearchTerm()
 	local parts = {}
 
 	if trim(state.query) ~= "" then
@@ -1751,7 +1625,7 @@ function buildRscriptsSearchTerm()
 end
 
 
-function mergeTables(base, extra)
+local function mergeTables(base, extra)
 	local merged = {}
 
 	if type(base) == "table" then
@@ -1769,43 +1643,14 @@ function mergeTables(base, extra)
 	return merged
 end
 
-function fetchDetails(scriptData)
+local function fetchDetails(scriptData)
 	local identifier = getScriptIdentifier(scriptData)
 
 	if not identifier then
 		return scriptData
 	end
 
-	if scriptData and scriptData._source == "rscripts" then
-		local ok, body = requestGet(RscriptsDetailsEndpoint .. "?id=" .. encode(identifier))
-		if not ok then
-			return scriptData
-		end
-
-		local decodedOk, decoded = pcall(function()
-			return HttpService:JSONDecode(body)
-		end)
-
-		if not decodedOk or type(decoded) ~= "table" then
-			return scriptData
-		end
-
-		local item = nil
-		if type(decoded.script) == "table" then
-			item = decoded.script[1] or decoded.script
-		elseif type(decoded.success) == "table" then
-			item = decoded.success[1] or decoded.success
-		end
-
-		local normalized = normalizeRscriptsScript(item)
-		if normalized then
-			return mergeTables(scriptData, normalized)
-		end
-
-		return scriptData
-	end
-
-	local ok, body = requestGet(DetailsEndpoint .. encode(identifier))
+	local ok, body = requestGet(RscriptsDetailsEndpoint .. "?id=" .. encode(identifier))
 	if not ok then
 		return scriptData
 	end
@@ -1818,94 +1663,51 @@ function fetchDetails(scriptData)
 		return scriptData
 	end
 
+	local item = nil
 	if type(decoded.script) == "table" then
-		decoded.script._source = "scriptblox"
-		return mergeTables(scriptData, decoded.script)
+		item = decoded.script[1] or decoded.script
+	elseif type(decoded.success) == "table" then
+		item = decoded.success[1] or decoded.success
+	end
+
+	local normalized = normalizeRscriptsScript(item)
+	if normalized then
+		normalized._source = "rscripts"
+		return mergeTables(scriptData, normalized)
 	end
 
 	return scriptData
 end
 
-function buildSearchUrl()
-	if state.source == "rscripts" then
-		local url = RscriptsEndpoint .. "?page=" .. encode(state.page)
-		url = url .. "&orderBy=" .. encode(mapSortForRscripts(state.sortBy))
-		url = url .. "&sort=" .. encode(state.order ~= "" and state.order or "desc")
-		url = url .. "&notPaid=true"
+local function buildSearchUrl()
+	local url = RscriptsEndpoint .. "?page=" .. encode(state.page)
+	url = url .. "&orderBy=" .. encode(mapSortForRscripts(state.sortBy))
+	url = url .. "&sort=" .. encode(state.order ~= "" and state.order or "desc")
+	url = url .. "&notPaid=true"
 
-		local searchTerm = buildRscriptsSearchTerm()
-		if searchTerm ~= "" then
-			url = url .. "&q=" .. encode(searchTerm)
-		end
-
-		if state.unpatchedOnly then
-			url = url .. "&unpatched=true"
-		end
-
-		if state.noKeyOnly then
-			url = url .. "&noKeySystem=true"
-		end
-
-		if state.verifiedOnly then
-			url = url .. "&verifiedOnly=true"
-		end
-
-		state.lastUrl = url
-		return url
-	end
-
-	local hasQuery = trim(state.query) ~= ""
-	local url = hasQuery and SearchEndpoint or FetchEndpoint
-
-	if hasQuery then
-		url = url .. "?q=" .. encode(state.query)
-	else
-		url = url .. "?page=" .. encode(state.page)
-	end
-
-	if hasQuery then
-		url = url .. "&page=" .. encode(state.page)
-	end
-
-	url = url .. "&max=" .. encode(state.max)
-	url = url .. "&sortBy=" .. encode(state.sortBy ~= "" and state.sortBy or "updatedAt")
-	url = url .. "&order=" .. encode(state.order ~= "" and state.order or "desc")
-	url = url .. "&mode=free"
-
-	if tostring(state.placeId or "") ~= "" then
-		url = url .. "&placeId=" .. encode(state.placeId)
-	end
-
-	if tostring(state.owner or "") ~= "" then
-		url = url .. "&owner=" .. encode(state.owner)
-	end
-
-	if hasQuery then
-		url = url .. "&strict=false"
+	local searchTerm = buildRscriptsSearchTerm()
+	if searchTerm ~= "" then
+		url = url .. "&q=" .. encode(searchTerm)
 	end
 
 	if state.unpatchedOnly then
-		url = url .. "&patched=0"
+		url = url .. "&unpatched=true"
 	end
 
 	if state.noKeyOnly then
-		url = url .. "&key=0"
+		url = url .. "&noKeySystem=true"
 	end
 
 	if state.verifiedOnly then
-		url = url .. "&verified=1"
-	end
-
-	if state.universalOnly then
-		url = url .. "&universal=1"
+		url = url .. "&verifiedOnly=true"
 	end
 
 	state.lastUrl = url
 	return url
 end
 
-getSortLabel = nil
-function updateFilterSummary()
+local getSortLabel
+local function updateFilterSummary()
 	if not ui.filterSummary then
 		return
 	end
@@ -1943,7 +1745,7 @@ function updateFilterSummary()
 	ui.filterSummary.Text = #filters > 0 and table.concat(filters, "  •  ") or "No filters"
 end
 
-function getSortByFromLabel(label)
+local function getSortByFromLabel(label)
 	label = tostring(label or "")
 	if label == "Newest" then
 		return "updatedAt"
@@ -1957,7 +1759,7 @@ function getSortByFromLabel(label)
 	return "updatedAt"
 end
 
-function getOrderFromLabel(label)
+local function getOrderFromLabel(label)
 	label = tostring(label or "")
 	if label == "Ascending" then
 		return "asc"
@@ -1977,7 +1779,7 @@ getSortLabel = function()
 	return state.order == "asc" and "Oldest Updated" or "Latest"
 end
 
-function getScriptsTitle()
+local function getScriptsTitle()
 	local sourceName = getSourceName(state.source)
 
 	if state.query ~= "" then
@@ -1991,7 +1793,7 @@ function getScriptsTitle()
 	return sourceName .. " " .. getSortLabel() .. " Scripts"
 end
 
-function getLoadingText()
+local function getLoadingText()
 	local sourceName = getSourceName(state.source)
 
 	if state.query ~= "" then
@@ -2005,9 +1807,9 @@ function getLoadingText()
 	return "Loading " .. sourceName .. " " .. string.lower(getSortLabel()) .. " scripts..."
 end
 
-setPreviewCode = nil
+local setPreviewCode
 
-function normalizeCodeText(text)
+local function normalizeCodeText(text)
 	text = tostring(text or "")
 	text = text:gsub("\r\n", "\n")
 	text = text:gsub("\r", "\n")
@@ -2016,7 +1818,7 @@ function normalizeCodeText(text)
 end
 
 
-function extractScriptText(value)
+local function extractScriptText(value)
 	local text = tostring(value or "")
 	local stripped = trim(text)
 
@@ -2067,7 +1869,7 @@ function extractScriptText(value)
 	return normalizeCodeText(text)
 end
 
-function resolveExecutableText(value)
+local function resolveExecutableText(value)
 	local text = extractScriptText(value)
 	local stripped = trim(text)
 
@@ -2087,7 +1889,7 @@ function resolveExecutableText(value)
 	return text
 end
 
-function runExecutableText(text)
+local function runExecutableText(text)
 	text = resolveExecutableText(text)
 
 	if not text or trim(text) == "" then
@@ -2131,7 +1933,7 @@ function runExecutableText(text)
 end
 
 
-function fetchRawSelected()
+local function fetchRawSelected()
 	if not state.selected then
 		setStatus("Select a script first.")
 		return nil
@@ -2147,26 +1949,15 @@ function fetchRawSelected()
 		return codeText
 	end
 
-	local identifier = getScriptIdentifier(state.selected)
-	if not identifier then
-		setStatus("Missing script identifier.")
+	local rawUrl = state.selected.rawScript
+	if not rawUrl or tostring(rawUrl) == "" then
+		setStatus("Raw script link is unavailable.")
 		return nil
 	end
 
 	setStatus("Fetching raw script...")
 
-	local rawUrl = nil
-	if state.selected._source == "rscripts" then
-		rawUrl = state.selected.rawScript
-	end
-
-	local ok, body
-	if rawUrl and tostring(rawUrl) ~= "" then
-		ok, body = requestGet(rawUrl)
-	else
-		ok, body = requestGet(RawEndpoint .. encode(identifier))
-	end
-
+	local ok, body = requestGet(rawUrl)
 	if not ok or type(body) ~= "string" then
 		setStatus("Failed to fetch raw script.")
 		return nil
@@ -2183,7 +1974,8 @@ function fetchRawSelected()
 end
 
 
-function escapeRichText(value)
+
+local function escapeRichText(value)
 	value = tostring(value or "")
 	value = value:gsub("&", "&amp;")
 	value = value:gsub("<", "&lt;")
@@ -2192,7 +1984,7 @@ function escapeRichText(value)
 	return value
 end
 
-syntaxColors = {
+local syntaxColors = {
 	Text = "224,214,212",
 	Comment = "106,153,85",
 	String = "214,157,133",
@@ -2207,7 +1999,7 @@ syntaxColors = {
 	Punctuation = "145,130,128"
 }
 
-keywordSet = {
+local keywordSet = {
 	["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true, ["elseif"] = true,
 	["end"] = true, ["for"] = true, ["function"] = true, ["if"] = true, ["in"] = true,
 	["local"] = true, ["not"] = true, ["or"] = true, ["repeat"] = true, ["return"] = true,
@@ -2215,11 +2007,11 @@ keywordSet = {
 	["type"] = true
 }
 
-constantSet = {
+local constantSet = {
 	["true"] = true, ["false"] = true, ["nil"] = true, ["self"] = true
 }
 
-globalSet = {
+local globalSet = {
 	game = true, workspace = true, script = true,
 	Instance = true, Enum = true, Color3 = true, Vector2 = true, Vector3 = true,
 	UDim = true, UDim2 = true, CFrame = true, TweenInfo = true,
@@ -2227,7 +2019,7 @@ globalSet = {
 	ColorSequence = true, BrickColor = true, Region3 = true
 }
 
-serviceSet = {
+local serviceSet = {
 	Players = true, RunService = true, UserInputService = true, TweenService = true,
 	HttpService = true, CoreGui = true, Workspace = true, ReplicatedStorage = true,
 	Lighting = true, StarterGui = true, StarterPack = true, StarterPlayer = true,
@@ -2235,7 +2027,7 @@ serviceSet = {
 	TeleportService = true, MarketplaceService = true, Debris = true, PathfindingService = true
 }
 
-builtinSet = {
+local builtinSet = {
 	print = true, warn = true, error = true, pcall = true, xpcall = true,
 	pairs = true, ipairs = true, next = true, type = true, typeof = true,
 	tostring = true, tonumber = true, require = true, loadstring = true,
@@ -2245,19 +2037,19 @@ builtinSet = {
 	os = true, debug = true, utf8 = true, wait = true, spawn = true, delay = true
 }
 
-function paint(value, colorName)
+local function paint(value, colorName)
 	return '<font color="rgb(' .. syntaxColors[colorName] .. ')">' .. escapeRichText(value) .. '</font>'
 end
 
-function isAlpha(value)
+local function isAlpha(value)
 	return value:match("[%a_]") ~= nil
 end
 
-function isAlnum(value)
+local function isAlnum(value)
 	return value:match("[%w_]") ~= nil
 end
 
-function previousNonSpace(text, index)
+local function previousNonSpace(text, index)
 	for i = index, 1, -1 do
 		local char = text:sub(i, i)
 		if char ~= " " and char ~= "\t" and char ~= "\n" then
@@ -2267,7 +2059,7 @@ function previousNonSpace(text, index)
 	return ""
 end
 
-function highlightLuau(source)
+local function highlightLuau(source)
 	source = normalizeCodeText(source)
 	local result = {}
 	local i = 1
@@ -2358,7 +2150,7 @@ function highlightLuau(source)
 	return table.concat(result)
 end
 
-function highlightLuauWithLineNumbers(source)
+local function highlightLuauWithLineNumbers(source)
 	source = normalizeCodeText(source)
 	local output = {}
 	local lineNumber = 1
@@ -2393,7 +2185,7 @@ function highlightLuauWithLineNumbers(source)
 	return table.concat(output)
 end
 
-function buildLineNumbers(text)
+local function buildLineNumbers(text)
 	text = normalizeCodeText(text)
 	local lineCount = 1
 	for _ in text:gmatch("\n") do
@@ -2408,7 +2200,7 @@ function buildLineNumbers(text)
 	return table.concat(lines, "\n")
 end
 
-function updateCustomCodeBlock(text)
+local function updateCustomCodeBlock(text)
 	text = normalizeCodeText(text)
 	ui.previewRaw = text
 
@@ -2458,7 +2250,7 @@ setPreviewCode = function(text)
 	end
 end
 
-function updateSelected()
+local function updateSelected()
 	if not ui.selectedTitle then
 		return
 	end
@@ -2501,8 +2293,7 @@ function updateSelected()
 		"Key: " .. boolToText(scriptData.key),
 		"Patched: " .. boolToText(scriptData.isPatched),
 		"Universal: " .. boolToText(scriptData.isUniversal),
-		"Type: " .. tostring(scriptData.scriptType or "free"),
-		"Source: " .. getSourceName(scriptData._source or state.source)
+		"Type: " .. tostring(scriptData.scriptType or "free")
 	}
 
 	if dateLine ~= "" then
@@ -2533,7 +2324,7 @@ function updateSelected()
 end
 
 
-function executeSelected()
+local function executeSelected()
 	local raw = fetchRawSelected()
 
 	if not raw or trim(raw) == "" then
@@ -2552,15 +2343,8 @@ selectScript = function(scriptData)
 	state.selected = fetchDetails(scriptData)
 
 	if not (type(state.selected.script) == "string" and state.selected.script ~= "") then
-		local identifier = getScriptIdentifier(state.selected)
-
-		if state.selected._source == "rscripts" and state.selected.rawScript and tostring(state.selected.rawScript) ~= "" then
+		if state.selected.rawScript and tostring(state.selected.rawScript) ~= "" then
 			local ok, body = requestGet(state.selected.rawScript)
-			if ok and type(body) == "string" and body ~= "" then
-				state.selected.script = extractScriptText(body)
-			end
-		elseif identifier then
-			local ok, body = requestGet(RawEndpoint .. encode(identifier))
 			if ok and type(body) == "string" and body ~= "" then
 				state.selected.script = extractScriptText(body)
 			end
@@ -2572,7 +2356,7 @@ selectScript = function(scriptData)
 	setStatus("Selected: " .. getScriptTitle(state.selected))
 end
 
-function clearScriptsPage()
+local function clearScriptsPage()
 	local page = ScriptsTab and ScriptsTab.Page
 	if not page then
 		return
@@ -2589,7 +2373,7 @@ function clearScriptsPage()
 	end
 end
 
-function createEmptyScripts(text)
+local function createEmptyScripts(text)
 	clearScriptsPage()
 
 	local page = ScriptsTab.Page
@@ -2614,7 +2398,7 @@ function createEmptyScripts(text)
 	})
 end
 
-function createScriptCard(parent, scriptData, index)
+local function createScriptCard(parent, scriptData, index)
 	local card = Instance.new("TextButton")
 	card.Name = "ScriptCard_" .. tostring(index)
 	card.AutoButtonColor = false
@@ -2708,7 +2492,7 @@ function createScriptCard(parent, scriptData, index)
 end
 
 
-function clearFavoritesPage()
+local function clearFavoritesPage()
 	local page = FavoritesTab and FavoritesTab.Page
 	if not page then
 		return
@@ -2721,7 +2505,7 @@ function clearFavoritesPage()
 	end
 end
 
-function getVisibleFavorites()
+local function getVisibleFavorites()
 	local visible = {}
 	local placeId = currentPlaceId()
 
@@ -2740,7 +2524,7 @@ function getVisibleFavorites()
 	return visible
 end
 
-function createFavoriteCard(parent, item, index)
+local function createFavoriteCard(parent, item, index)
 	local data = item.Data or item
 	local card = Instance.new("TextButton")
 	card.Name = "FavoriteCard_" .. tostring(index)
@@ -2926,20 +2710,19 @@ renderFavorites = function()
 end
 
 
-function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
-	local active = state.source == source
 
+local function createProviderLogo(parent)
 	local button = Instance.new("TextButton")
-	button.Name = source .. "SourceButton"
+	button.Name = "RscriptsProviderLogo"
 	button.Text = ""
-	button.BackgroundColor3 = active and color("PrimarySoft", Color3.fromRGB(30, 58, 105)) or color("CardAlt", Color3.fromRGB(30, 41, 59))
+	button.BackgroundColor3 = color("PrimarySoft", Color3.fromRGB(30, 58, 105))
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
-	button.Position = UDim2.new(1, xOffset, 0, 6)
+	button.Position = UDim2.new(1, -62, 0, 6)
 	button.Size = UDim2.fromOffset(46, 46)
 	button.Parent = parent
 	addCorner(button, 8)
-	addStroke(button, active and color("Primary", Color3.fromRGB(67, 135, 244)) or color("Border", Color3.fromRGB(51, 65, 85)), active and 0.08 or 0.28, 1)
+	addStroke(button, color("Primary", Color3.fromRGB(67, 135, 244)), 0.08, 1)
 
 	local img = Instance.new("ImageLabel")
 	img.Name = "Logo"
@@ -2948,1226 +2731,31 @@ function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
 	img.BorderSizePixel = 0
 	img.Position = UDim2.fromOffset(5, 5)
 	img.Size = UDim2.fromOffset(36, 36)
-	img.Image = logoUrl
+	img.Image = RscriptsLogoURL
 	img.ImageTransparency = 0
 	img.ScaleType = Enum.ScaleType.Fit
 	img.Parent = button
 	addCorner(img, 7)
 
-	if source == "scriptblox" then
-		ui.sourceScriptBloxButton = button
-	else
-		ui.sourceRscriptsButton = button
-	end
-
-	button.MouseButton1Click:Connect(function()
-		if state.source == source then
-			return
-		end
-
-		state.source = source
-		state.page = 1
-		setStatus("Switched to " .. getSourceName(source) .. ".")
-		searchScripts()
-	end)
+	ui.providerLogo = button
 
 	return button
 end
 
 
-function getGameTitle(gameData)
-	if type(gameData) ~= "table" then
-		return "Unknown Game"
-	end
-
-	return firstNonEmpty(gameData.Name, gameData.name, gameData.title, gameData.gameName, "Unknown Game")
-end
-
-function getGameUniverseId(gameData)
-	if type(gameData) ~= "table" then
-		return ""
-	end
-
-	return tostring(firstNonEmpty(
-		gameData.UniverseId,
-		gameData.universeId,
-		gameData.universeID,
-		gameData.id,
-		gameData.Id
-	))
-end
-
-function getGamePlaceId(gameData)
-	if type(gameData) ~= "table" then
-		return ""
-	end
-
-	return tostring(firstNonEmpty(
-		gameData.PlaceId,
-		gameData.placeId,
-		gameData.RootPlaceId,
-		gameData.rootPlaceId,
-		gameData.rootPlaceID,
-		gameData.rootPlace,
-		gameData.playRootPlaceId,
-		gameData.primaryPlaceId,
-		gameData.Place,
-		gameData.place
-	))
-end
-
-function getGameImage(gameData)
-	if type(gameData) ~= "table" then
-		return ""
-	end
-
-	return firstNonEmpty(
-		gameData.Image,
-		gameData.image,
-		gameData.imageUrl,
-		gameData.gameIconUrl,
-		gameData.thumbnailUrl,
-		gameData.iconUrl
-	)
-end
-
-function normalizeRobloxGame(item)
-	if type(item) ~= "table" then
-		return nil
-	end
-
-	local creator = type(item.creator) == "table" and item.creator or {}
-	local universeId = tostring(firstNonEmpty(
-		item.universeId,
-		item.universeID,
-		item.UniverseId,
-		item.universe,
-		item.id,
-		item.Id
-	))
-
-	local placeId = tostring(firstNonEmpty(
-		item.placeId,
-		item.PlaceId,
-		item.rootPlaceId,
-		item.rootPlaceID,
-		item.rootPlace,
-		item.playRootPlaceId,
-		item.universeRootPlaceId,
-		item.primaryPlaceId
-	))
-
-	local name = firstNonEmpty(
-		item.name,
-		item.Name,
-		item.title,
-		item.Title,
-		item.gameName,
-		item.displayName
-	)
-
-	if name == "" then
-		return nil
-	end
-
-	if universeId == "" and placeId == "" then
-		return nil
-	end
-
-	return {
-		Name = name,
-		UniverseId = universeId,
-		PlaceId = placeId,
-		Image = firstNonEmpty(
-			item.imageUrl,
-			item.ImageUrl,
-			item.image,
-			item.Image,
-			item.gameIconUrl,
-			item.thumbnailUrl,
-			item.iconUrl
-		),
-		Playing = parseCount(item.playerCount or item.PlayerCount or item.playing or item.Playing or item.players or item.Players or item.concurrentUserCount or item.concurrentUsers or item.activePlayers or item.active_players or 0),
-		Visits = parseCount(item.visits or item.Visits or item.totalVisits or item.TotalVisits or item.visitCount or item.VisitCount or 0),
-		Creator = firstNonEmpty(item.creatorName, item.CreatorName, item.creator, creator.name, creator.Name),
-		Description = firstNonEmpty(item.description, item.Description, item.gameDescription, "")
-	}
-end
-
-function collectGameCandidates(value, output, seen, depth)
-	if type(value) ~= "table" or depth > 5 then
-		return
-	end
-
-	local normalized = normalizeRobloxGame(value)
-	if normalized then
-		local key = firstNonEmpty(normalized.UniverseId, normalized.PlaceId, normalized.Name)
-
-		if key ~= "" and not seen[key] then
-			seen[key] = true
-			table.insert(output, normalized)
-		end
-	end
-
-	for _, child in pairs(value) do
-		if type(child) == "table" then
-			collectGameCandidates(child, output, seen, depth + 1)
-		end
-	end
-end
-
-function parseGamesResponse(decoded)
-	if type(decoded) ~= "table" then
-		return {}
-	end
-
-	local output = {}
-	local seen = {}
-
-	if type(decoded) == "table" and #decoded > 0 then
-		for _, item in ipairs(decoded) do
-			collectGameCandidates(item, output, seen, 1)
-		end
-	else
-		local preferred = {
-			decoded.games,
-			decoded.data,
-			decoded.results,
-			decoded.recommendations,
-			decoded.searchResults,
-			decoded.contents,
-			decoded.contentGroups
-		}
-
-		for _, sourceList in ipairs(preferred) do
-			if type(sourceList) == "table" then
-				collectGameCandidates(sourceList, output, seen, 1)
-			end
-		end
-
-		if #output == 0 then
-			collectGameCandidates(decoded, output, seen, 1)
-		end
-	end
-
-	return output
-end
-
-function firstNumber(...)
-	local values = {...}
-
-	for _, value in ipairs(values) do
-		local parsed = parseCount(value)
-		if parsed and parsed > 0 then
-			return parsed
-		end
-	end
-
-	return 0
-end
-
-function normalizeRolimonsGame(placeId, entry)
-	if type(entry) ~= "table" then
-		return nil
-	end
-
-	local name = firstNonEmpty(entry.name, entry.Name, entry.title, entry.Title, entry[1])
-	if name == "" then
-		return nil
-	end
-
-	local image = firstNonEmpty(entry.image, entry.Image, entry.imageUrl, entry.thumbnail, entry.thumbnailUrl, entry.iconUrl)
-	for _, value in ipairs(entry) do
-		if type(value) == "string" and value ~= name and (value:find("http", 1, true) or value:find("rbxcdn", 1, true) or value:find("tr.rbxcdn", 1, true)) then
-			image = value
-			break
-		end
-	end
-
-	local playing = firstNumber(
-		entry.playing,
-		entry.Playing,
-		entry.players,
-		entry.Players,
-		entry.playerCount,
-		entry.PlayerCount,
-		entry.activePlayers,
-		entry.active_players,
-		entry.active,
-		entry.ccu,
-		entry.concurrentUsers,
-		entry[2]
-	)
-
-	if playing <= 0 then
-		for index = 2, math.min(#entry, 6) do
-			local value = entry[index]
-			if type(value) == "number" and value >= 0 and value < 10000000 then
-				playing = value
-				break
-			end
-		end
-	end
-
-	local visits = firstNumber(
-		entry.visits,
-		entry.Visits,
-		entry.totalVisits,
-		entry.TotalVisits,
-		entry.visitCount,
-		entry.VisitCount,
-		entry[4],
-		entry[5],
-		entry[6]
-	)
-
-	local universeId = tostring(firstNonEmpty(entry.universeId, entry.UniverseId, entry.universe_id, entry[4], entry[5]))
-
-	return {
-		Name = name,
-		PlaceId = tostring(placeId),
-		UniverseId = universeId,
-		Image = image,
-		Playing = playing,
-		Visits = visits,
-		Creator = firstNonEmpty(entry.creatorName, entry.CreatorName, entry.creator),
-		Description = firstNonEmpty(entry.description, entry.Description, "")
-	}
-end
-
-function parseRolimonsGameList(decoded)
-	local output = {}
-
-	if type(decoded) ~= "table" or type(decoded.games) ~= "table" then
-		return output
-	end
-
-	for placeId, entry in pairs(decoded.games) do
-		local normalized = normalizeRolimonsGame(placeId, entry)
-		if normalized then
-			table.insert(output, normalized)
-		end
-	end
-
-	table.sort(output, function(a, b)
-		return (tonumber(a.Playing) or 0) > (tonumber(b.Playing) or 0)
-	end)
-
-	return output
-end
-
-function loadRolimonsGames()
-	if state.rolimonsGamesLoaded and type(state.rolimonsGames) == "table" then
-		return true
-	end
-
-	local ok, body = requestGet(RolimonsGameListEndpoint, {
-		["Accept"] = "application/json",
-		["User-Agent"] = "Roblox/WinInet"
-	})
-
-	if not ok or type(body) ~= "string" then
-		state.gameLastError = "Rolimon game list request failed."
-		return false
-	end
-
-	local decodedOk, decoded = pcall(function()
-		return HttpService:JSONDecode(body)
-	end)
-
-	if not decodedOk or type(decoded) ~= "table" then
-		state.gameLastError = "Rolimon game list decode failed."
-		return false
-	end
-
-	local parsed = parseRolimonsGameList(decoded)
-	if #parsed == 0 then
-		state.gameLastError = "Rolimon game list returned no games."
-		return false
-	end
-
-	state.rolimonsGames = parsed
-	state.rolimonsGamesLoaded = true
-	return true
-end
-
-function localGameSearch(query, maxResults)
-	query = trim(query or ""):lower()
-	maxResults = tonumber(maxResults) or state.gameMax
-
-	if query == "" then
-		return {}
-	end
-
-	local terms = {}
-	for term in query:gmatch("%S+") do
-		table.insert(terms, term)
-	end
-
-	local scored = {}
-
-	for _, gameData in ipairs(state.rolimonsGames or {}) do
-		local name = getGameTitle(gameData)
-		local searchable = (name .. " " .. tostring(getGamePlaceId(gameData))):lower()
-		local matched = true
-		local score = tonumber(gameData.Playing) or 0
-
-		for _, term in ipairs(terms) do
-			local startIndex = searchable:find(term, 1, true)
-			if not startIndex then
-				matched = false
-				break
-			end
-
-			if startIndex == 1 then
-				score += 100000000
-			else
-				score += 1000000
-			end
-		end
-
-		if matched then
-			table.insert(scored, {
-				score = score,
-				game = gameData
-			})
-		end
-	end
-
-	table.sort(scored, function(a, b)
-		if a.score == b.score then
-			return getGameTitle(a.game) < getGameTitle(b.game)
-		end
-
-		return a.score > b.score
-	end)
-
-	local page = math.max(1, tonumber(state.gamePage) or 1)
-	local startIndex = ((page - 1) * maxResults) + 1
-	local results = {}
-
-	for index = startIndex, math.min(#scored, startIndex + maxResults - 1) do
-		table.insert(results, scored[index].game)
-	end
-
-	return results
-end
-
-function tryRolimonsGameSearch()
-	if not loadRolimonsGames() then
-		return {}
-	end
-
-	local results = localGameSearch(state.gameQuery, state.gameMax)
-	if #results > 0 then
-		state.gameSearchDebug = "Rolimon local search"
-	end
-
-	return results
-end
-
-function hydrateGameStats(games)
-	games = type(games) == "table" and games or {}
-
-	if #games == 0 then
-		return
-	end
-
-	local rolimonsByPlace = {}
-	local rolimonsByUniverse = {}
-
-	if loadRolimonsGames() then
-		for _, gameData in ipairs(state.rolimonsGames or {}) do
-			local placeId = getGamePlaceId(gameData)
-			local universeId = getGameUniverseId(gameData)
-
-			if placeId ~= "" then
-				rolimonsByPlace[placeId] = gameData
-			end
-
-			if universeId ~= "" then
-				rolimonsByUniverse[universeId] = gameData
-			end
-		end
-	end
-
-	for _, gameData in ipairs(games) do
-		local placeId = getGamePlaceId(gameData)
-		local universeId = getGameUniverseId(gameData)
-		local rolimonsData = (placeId ~= "" and rolimonsByPlace[placeId]) or (universeId ~= "" and rolimonsByUniverse[universeId])
-
-		if rolimonsData then
-			local rolimonsPlayers = tonumber(rolimonsData.Playing) or 0
-			local currentPlayers = tonumber(gameData.Playing) or 0
-
-			if rolimonsPlayers > currentPlayers then
-				gameData.Playing = rolimonsPlayers
-			end
-
-			if (tonumber(gameData.Visits) or 0) <= 0 and (tonumber(rolimonsData.Visits) or 0) > 0 then
-				gameData.Visits = rolimonsData.Visits
-			end
-
-			if getGameUniverseId(gameData) == "" and getGameUniverseId(rolimonsData) ~= "" then
-				gameData.UniverseId = getGameUniverseId(rolimonsData)
-			end
-
-			if getGameImage(gameData) == "" and getGameImage(rolimonsData) ~= "" then
-				gameData.Image = getGameImage(rolimonsData)
-			end
-		end
-	end
-
-	local universeIds = {}
-	local lookup = {}
-
-	for _, gameData in ipairs(games) do
-		local universeId = getGameUniverseId(gameData)
-		if universeId ~= "" and not lookup[universeId] then
-			lookup[universeId] = gameData
-			table.insert(universeIds, universeId)
-		end
-	end
-
-	if #universeIds == 0 then
-		return
-	end
-
-	local suffix = "?universeIds=" .. encode(table.concat(universeIds, ","))
-	local ok, body = requestGet(GameDetailsEndpoint .. suffix)
-
-	if not ok or type(body) ~= "string" then
-		ok, body = requestGet(GameDetailsProxyEndpoint .. suffix)
-	end
-
-	if not ok or type(body) ~= "string" then
-		return
-	end
-
-	local decodedOk, decoded = pcall(function()
-		return HttpService:JSONDecode(body)
-	end)
-
-	if not decodedOk or type(decoded) ~= "table" or type(decoded.data) ~= "table" then
-		return
-	end
-
-	for _, info in ipairs(decoded.data) do
-		local universeId = tostring(firstNonEmpty(info.id, info.universeId, info.universeID))
-		local gameData = lookup[universeId]
-
-		if gameData then
-			local playing = parseCount(info.playing or info.playerCount or info.PlayerCount or info.activePlayers or 0)
-			if playing > 0 or (tonumber(gameData.Playing) or 0) <= 0 then
-				gameData.Playing = playing
-			end
-
-			local visits = parseCount(info.visits or info.visitCount or info.TotalVisits or 0)
-			if visits > 0 then
-				gameData.Visits = visits
-			end
-
-			local rootPlaceId = firstNonEmpty(info.rootPlaceId, info.placeId, info.primaryPlaceId)
-			if getGamePlaceId(gameData) == "" and tostring(rootPlaceId) ~= "" then
-				gameData.PlaceId = tostring(rootPlaceId)
-			end
-
-			if getGameTitle(gameData) == "Unknown Game" then
-				gameData.Name = firstNonEmpty(info.name, info.Name, gameData.Name)
-			end
-		end
-	end
-end
-
-
-function hydrateGameIcons(games)
-	local universeIds = {}
-	local lookup = {}
-
-	for _, gameData in ipairs(games or {}) do
-		local universeId = getGameUniverseId(gameData)
-
-		if universeId ~= "" and getGameImage(gameData) == "" then
-			table.insert(universeIds, universeId)
-			lookup[universeId] = gameData
-		end
-	end
-
-	if #universeIds == 0 then
-		return
-	end
-
-	local urlSuffix = "?universeIds=" .. encode(table.concat(universeIds, ","))
-		.. "&size=150x150&format=Png&isCircular=false"
-
-	local ok, body = requestGet(GameIconEndpoint .. urlSuffix)
-	if not ok or type(body) ~= "string" then
-		ok, body = requestGet(GameIconProxyEndpoint .. urlSuffix)
-	end
-
-	if not ok or type(body) ~= "string" then
-		return
-	end
-
-	local decodedOk, decoded = pcall(function()
-		return HttpService:JSONDecode(body)
-	end)
-
-	if not decodedOk or type(decoded) ~= "table" or type(decoded.data) ~= "table" then
-		return
-	end
-
-	for _, iconInfo in ipairs(decoded.data) do
-		local targetId = tostring(iconInfo.targetId or iconInfo.targetID or iconInfo.universeId or "")
-		local gameData = lookup[targetId]
-
-		if gameData and type(iconInfo.imageUrl) == "string" and iconInfo.imageUrl ~= "" then
-			gameData.Image = iconInfo.imageUrl
-		end
-	end
-end
-
-function buildGamesSearchUrl()
-	local query = trim(state.gameQuery or "")
-	local startRows = math.max(0, (tonumber(state.gamePage) or 1) - 1) * state.gameMax
-
-	return GameSearchEndpoint
-		.. "?keyword=" .. encode(query)
-		.. "&startRows=" .. encode(startRows)
-		.. "&maxRows=" .. encode(state.gameMax)
-		.. "&isKeywordSuggestionEnabled=true"
-end
-
-function buildGamesOmniSearchUrl()
-	local query = trim(state.gameQuery or "")
-
-	return GameOmniSearchEndpoint
-		.. "?searchQuery=" .. encode(query)
-		.. "&pageType=all"
-		.. "&sessionId=" .. encode(tostring(game.JobId or ""))
-end
-
-function buildGamesSearchProxyUrl()
-	local query = trim(state.gameQuery or "")
-	local startRows = math.max(0, (tonumber(state.gamePage) or 1) - 1) * state.gameMax
-
-	return GameSearchProxyEndpoint
-		.. "?keyword=" .. encode(query)
-		.. "&startRows=" .. encode(startRows)
-		.. "&maxRows=" .. encode(state.gameMax)
-		.. "&isKeywordSuggestionEnabled=true"
-end
-
-function buildGamesOmniSearchProxyUrl()
-	local query = trim(state.gameQuery or "")
-
-	return GameOmniSearchProxyEndpoint
-		.. "?searchQuery=" .. encode(query)
-		.. "&pageType=all"
-		.. "&sessionId=" .. encode(tostring(game.JobId or ""))
-end
-
-function teleportToGame(gameData)
-	local placeId = tonumber(getGamePlaceId(gameData))
-
-	if not placeId then
-		setStatus("Missing game PlaceId.")
-		return
-	end
-
-	setStatus("Teleporting to " .. getGameTitle(gameData) .. "...")
-
-	local ok, err = pcall(function()
-		TeleportService:Teleport(placeId, LocalPlayer)
-	end)
-
-	if not ok then
-		setStatus("Teleport failed.")
-		warn(err)
-	end
-end
-
-function clearGamesPage()
-	local page = GamesTab and GamesTab.Page
-	if not page then
-		return
-	end
-
-	for _, child in ipairs(page:GetChildren()) do
-		if not child:IsA("UILayout") and not child:IsA("UIPadding") then
-			child:Destroy()
-		end
-	end
-end
-
-function createGameCard(parent, gameData, index)
-	local card = Instance.new("TextButton")
-	card.Name = "GameCard_" .. tostring(index)
-	card.AutoButtonColor = false
-	card.Text = ""
-	card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
-	card.BorderSizePixel = 0
-	card.ClipsDescendants = true
-	card.LayoutOrder = index
-	card.Parent = parent
-
-	addCorner(card, 8)
-	addStroke(card, color("Border", Color3.fromRGB(51, 65, 85)), 0.36, 1)
-
-	local title = getGameTitle(gameData)
-	local placeId = getGamePlaceId(gameData)
-	local universeId = getGameUniverseId(gameData)
-	local imageAsset = resolveImage(getGameImage(gameData), "game_" .. firstNonEmpty(universeId, placeId, title))
-
-	local thumbnail = Instance.new("ImageLabel")
-	thumbnail.Name = "Thumbnail"
-	thumbnail.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
-	thumbnail.BorderSizePixel = 0
-	thumbnail.Position = UDim2.fromOffset(10, 10)
-	thumbnail.Size = UDim2.new(1, -20, 0, 104)
-	thumbnail.ScaleType = Enum.ScaleType.Crop
-	thumbnail.Image = imageAsset
-	thumbnail.Parent = card
-	addCorner(thumbnail, 8)
-	addStroke(thumbnail, color("Border", Color3.fromRGB(51, 65, 85)), 0.5, 1)
-
-	if imageAsset == "" then
-		createText(thumbnail, {
-			Text = "No Image",
-			Font = Enum.Font.GothamMedium,
-			TextSize = 12,
-			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
-			TextXAlignment = Enum.TextXAlignment.Center,
-			TextYAlignment = Enum.TextYAlignment.Center,
-			Size = UDim2.fromScale(1, 1)
-		})
-	end
-
-	createText(card, {
-		Text = title,
-		Font = Enum.Font.GothamBold,
-		TextSize = 12,
-		Position = UDim2.fromOffset(10, 120),
-		Size = UDim2.new(1, -20, 0, 18),
-		TextTruncate = Enum.TextTruncate.AtEnd
-	})
-
-	createText(card, {
-		Text = "Players " .. compactNumber(tonumber(gameData.Playing) or 0),
-		Font = Enum.Font.GothamMedium,
-		TextSize = 11,
-		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
-		Position = UDim2.fromOffset(10, 140),
-		Size = UDim2.new(1, -20, 0, 16),
-		TextTruncate = Enum.TextTruncate.AtEnd
-	})
-
-	createText(card, {
-		Text = placeId ~= "" and ("PlaceId " .. placeId) or "PlaceId unavailable",
-		Font = Enum.Font.GothamMedium,
-		TextSize = 10,
-		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
-		Position = UDim2.fromOffset(10, 158),
-		Size = UDim2.new(1, -20, 0, 14),
-		TextTruncate = Enum.TextTruncate.AtEnd
-	})
-
-	card.MouseEnter:Connect(function()
-		card.BackgroundColor3 = color("Hover", Color3.fromRGB(37, 49, 75))
-	end)
-
-	card.MouseLeave:Connect(function()
-		card.BackgroundColor3 = color("Card", Color3.fromRGB(17, 24, 39))
-	end)
-
-	card.MouseButton1Click:Connect(function()
-		teleportToGame(gameData)
-	end)
-
-	return card
-end
-
-renderGames = function()
-	if not GamesTab then
-		return
-	end
-
-	clearGamesPage()
-
-	local page = GamesTab.Page
-
-	local top = createPanel(page, 138, 1, color("Card", Color3.fromRGB(17, 24, 39)))
-	top.Name = "GamesTop"
-
-	createText(top, {
-		Text = "Games",
-		Font = Enum.Font.GothamBold,
-		TextSize = 16,
-		TextColor3 = color("Primary", Color3.fromRGB(67, 135, 244)),
-		Position = UDim2.fromOffset(14, 10),
-		Size = UDim2.new(1, -28, 0, 22)
-	})
-
-	ui.gamesInfo = createText(top, {
-		Text = state.gameQuery ~= "" and ("Search: " .. state.gameQuery) or "Search Roblox games",
-		Font = Enum.Font.GothamMedium,
-		TextSize = 12,
-		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
-		Position = UDim2.fromOffset(14, 34),
-		Size = UDim2.new(1, -28, 0, 18),
-		TextTruncate = Enum.TextTruncate.AtEnd
-	})
-
-	ui.gamesSearchInput = createInput(
-		top,
-		"Search Games",
-		"Type a game name",
-		state.gameQuery,
-		UDim2.fromOffset(14, 58),
-		UDim2.new(1, -250, 0, 34),
-		function(value, enterPressed)
-			state.gameQuery = trim(value)
-			if enterPressed then
-				state.gamePage = 1
-				searchGames()
-			end
-		end
-	)
-
-	pcall(function()
-		ui.gamesSearchInput.InputBegan:Connect(function(input)
-			if input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
-				state.gameQuery = trim(ui.gamesSearchInput.Text)
-				state.gamePage = 1
-				searchGames()
-			end
-		end)
-	end)
-
-	createButton(top, "Search", UDim2.new(1, -224, 0, 84), UDim2.fromOffset(104, 30), function()
-		state.gamePage = 1
-		searchGames()
-	end, false)
-
-	createButton(top, "Clear", UDim2.new(1, -108, 0, 84), UDim2.fromOffset(82, 30), function()
-		state.gameQuery = ""
-		state.gamePage = 1
-		state.gameResults = {}
-		if ui.gamesSearchInput then
-			ui.gamesSearchInput.Text = ""
-		end
-		renderGames()
-	end, true)
-
-	if #state.gameResults == 0 then
-		local empty = createPanel(page, 92, 2, color("Card", Color3.fromRGB(17, 24, 39)))
-		empty.Name = "NoGames"
-
-		createText(empty, {
-			Text = "No games shown",
-			Font = Enum.Font.GothamBold,
-			TextSize = 15,
-			Position = UDim2.fromOffset(14, 14),
-			Size = UDim2.new(1, -28, 0, 24)
-		})
-
-		createText(empty, {
-			Text = "Search for a Roblox game, then click a result to teleport.",
-			Font = Enum.Font.Gotham,
-			TextSize = 12,
-			TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
-			TextWrapped = true,
-			TextYAlignment = Enum.TextYAlignment.Top,
-			Position = UDim2.fromOffset(14, 44),
-			Size = UDim2.new(1, -28, 0, 36)
-		})
-
-		return
-	end
-
-	local nav = createPanel(page, 54, 2, color("Card", Color3.fromRGB(17, 24, 39)))
-	nav.Name = "GamesNav"
-
-	createText(nav, {
-		Text = "Page " .. tostring(state.gamePage) .. "  •  " .. tostring(#state.gameResults) .. " results",
-		Font = Enum.Font.GothamMedium,
-		TextSize = 12,
-		TextColor3 = color("Muted", Color3.fromRGB(148, 163, 184)),
-		Position = UDim2.fromOffset(14, 17),
-		Size = UDim2.new(1, -240, 0, 20)
-	})
-
-	createButton(nav, "Previous", UDim2.new(1, -214, 0, 12), UDim2.fromOffset(96, 30), function()
-		if state.gamePage <= 1 then
-			setStatus("Already on the first game page.")
-			return
-		end
-
-		state.gamePage = math.max(1, state.gamePage - 1)
-		searchGames()
-	end, true)
-
-	createButton(nav, "Next", UDim2.new(1, -108, 0, 12), UDim2.fromOffset(82, 30), function()
-		state.gamePage += 1
-		searchGames()
-	end, false)
-
-	local grid = Instance.new("Frame")
-	grid.Name = "GamesGrid"
-	grid.BackgroundTransparency = 1
-	grid.BorderSizePixel = 0
-	grid.ClipsDescendants = true
-	grid.LayoutOrder = 3
-	grid.Size = UDim2.new(1, -10, 0, 0)
-	grid.Parent = page
-
-	local gridLayout = Instance.new("UIGridLayout")
-	gridLayout.CellSize = UDim2.new(0.333333, -10, 0, 184)
-	gridLayout.CellPadding = UDim2.fromOffset(10, 10)
-	gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	gridLayout.Parent = grid
-
-	for index, gameData in ipairs(state.gameResults) do
-		createGameCard(grid, gameData, index)
-	end
-
-	local rows = math.max(0, math.ceil(#state.gameResults / 3))
-	grid.Size = UDim2.new(1, -10, 0, rows * 194)
-end
-
-
-function addUniqueGame(output, seen, gameData)
-	if type(gameData) ~= "table" then
-		return
-	end
-
-	local name = getGameTitle(gameData)
-	local placeId = getGamePlaceId(gameData)
-	local universeId = getGameUniverseId(gameData)
-
-	if name == "" or name == "Unknown Game" then
-		return
-	end
-
-	if placeId == "" and universeId == "" then
-		return
-	end
-
-	local key = firstNonEmpty(placeId, universeId, name)
-	if seen[key] then
-		return
-	end
-
-	seen[key] = true
-	table.insert(output, gameData)
-end
-
-function gameFromScriptData(scriptData)
-	if type(scriptData) ~= "table" then
-		return nil
-	end
-
-	local gameInfo = type(scriptData.game) == "table" and scriptData.game or {}
-	local name = firstNonEmpty(
-		gameInfo.name,
-		gameInfo.title,
-		gameInfo.gameName,
-		gameInfo.Name,
-		scriptData.gameName,
-		scriptData.title
-	)
-
-	local placeId = getScriptPlaceId(scriptData)
-	local universeId = tostring(firstNonEmpty(
-		gameInfo.universeId,
-		gameInfo.UniverseId,
-		gameInfo.id,
-		scriptData.universeId
-	))
-
-	local image = firstNonEmpty(
-		gameInfo.imageUrl,
-		gameInfo.imgurl,
-		gameInfo.image,
-		gameInfo.thumbnailUrl,
-		scriptData.image
-	)
-
-	if name == "" or (placeId == "" and universeId == "") then
-		return nil
-	end
-
-	return {
-		Name = name,
-		PlaceId = placeId,
-		UniverseId = universeId,
-		Image = image,
-		Playing = tonumber(gameInfo.playing or gameInfo.playerCount or 0) or 0,
-		Visits = tonumber(gameInfo.visits or gameInfo.visitCount or 0) or 0,
-		Creator = "",
-		Description = ""
-	}
-end
-
-function searchGamesFromScriptBlox()
-	local url = SearchEndpoint
-		.. "?q=" .. encode(state.gameQuery)
-		.. "&page=1"
-		.. "&max=30"
-		.. "&strict=false"
-
-	local ok, body = requestGet(url)
-	if not ok or type(body) ~= "string" then
-		return {}
-	end
-
-	local decodedOk, decoded = pcall(function()
-		return HttpService:JSONDecode(body)
-	end)
-
-	if not decodedOk or type(decoded) ~= "table" or not decoded.result or type(decoded.result.scripts) ~= "table" then
-		return {}
-	end
-
-	local output = {}
-	local seen = {}
-
-	for _, scriptData in ipairs(decoded.result.scripts) do
-		addUniqueGame(output, seen, gameFromScriptData(scriptData))
-	end
-
-	if #output > 0 then
-		state.gameSearchDebug = "ScriptBlox game data"
-	end
-
-	return output
-end
-
-function searchGamesFromRscripts()
-	local url = RscriptsEndpoint
-		.. "?page=1"
-		.. "&q=" .. encode(state.gameQuery)
-		.. "&orderBy=date"
-		.. "&sort=desc"
-		.. "&notPaid=true"
-
-	local ok, body = requestGet(url)
-	if not ok or type(body) ~= "string" then
-		return {}
-	end
-
-	local decodedOk, decoded = pcall(function()
-		return HttpService:JSONDecode(body)
-	end)
-
-	if not decodedOk or type(decoded) ~= "table" or type(decoded.scripts) ~= "table" then
-		return {}
-	end
-
-	local output = {}
-	local seen = {}
-
-	for _, scriptData in ipairs(normalizeRscriptsList(decoded.scripts)) do
-		addUniqueGame(output, seen, gameFromScriptData(scriptData))
-	end
-
-	if #output > 0 then
-		state.gameSearchDebug = "Rscripts game data"
-	end
-
-	return output
-end
-
-KnownGames = {
-	["adopt me"] = {
-		Name = "Adopt Me!",
-		PlaceId = "920587237",
-		UniverseId = "383310974",
-		Image = "rbxthumb://type=GameIcon&id=383310974&w=150&h=150",
-		Playing = 0,
-		Visits = 0
-	},
-	["blox fruits"] = {
-		Name = "Blox Fruits",
-		PlaceId = "2753915549",
-		UniverseId = "994732206",
-		Image = "rbxthumb://type=GameIcon&id=994732206&w=150&h=150",
-		Playing = 0,
-		Visits = 0
-	},
-	["brookhaven"] = {
-		Name = "Brookhaven 🏡RP",
-		PlaceId = "4924922222",
-		UniverseId = "1686885941",
-		Image = "rbxthumb://type=GameIcon&id=1686885941&w=150&h=150",
-		Playing = 0,
-		Visits = 0
-	},
-	["grow a garden"] = {
-		Name = "Grow a Garden",
-		PlaceId = "126884695634066",
-		UniverseId = "7436755782",
-		Image = "rbxthumb://type=GameIcon&id=7436755782&w=150&h=150",
-		Playing = 0,
-		Visits = 0
-	},
-	["murder mystery 2"] = {
-		Name = "Murder Mystery 2",
-		PlaceId = "142823291",
-		UniverseId = "66654135",
-		Image = "rbxthumb://type=GameIcon&id=66654135&w=150&h=150",
-		Playing = 0,
-		Visits = 0
-	}
-}
-
-function searchKnownGames()
-	local query = trim(state.gameQuery or ""):lower()
-	local output = {}
-	local seen = {}
-
-	for key, gameData in pairs(KnownGames) do
-		if key:find(query, 1, true) or query:find(key, 1, true) or getGameTitle(gameData):lower():find(query, 1, true) then
-			addUniqueGame(output, seen, gameData)
-		end
-	end
-
-	if #output > 0 then
-		state.gameSearchDebug = "Known game fallback"
-	end
-
-	return output
-end
-
-
-searchGames = function()
-	if state.gameBusy then
-		return
-	end
-
-	if ui.gamesSearchInput then
-		state.gameQuery = trim(ui.gamesSearchInput.Text)
-	end
-
-	if state.gameQuery == "" then
-		setStatus("Type a game name first.")
-		renderGames()
-		safeSelectTab(GamesTab)
-		return
-	end
-
-	state.gameBusy = true
-	setStatus("Searching games...")
-
-	local results = {}
-
-	local function tryJsonSearch(url, label)
-		local ok, body = requestGet(url)
-		if not ok or type(body) ~= "string" then
-			return {}
-		end
-
-		local decodedOk, decoded = pcall(function()
-			return HttpService:JSONDecode(body)
-		end)
-
-		if not decodedOk or type(decoded) ~= "table" then
-			return {}
-		end
-
-		local parsed = parseGamesResponse(decoded)
-		if #parsed > 0 then
-			state.gameSearchDebug = label
-		end
-
-		return parsed
-	end
-
-	results = tryJsonSearch(buildGamesSearchUrl(), "Roblox list search")
-
-	if #results == 0 then
-		results = tryJsonSearch(buildGamesSearchProxyUrl(), "Roblox proxy list search")
-	end
-
-	if #results == 0 then
-		results = tryJsonSearch(buildGamesOmniSearchUrl(), "Roblox omni search")
-	end
-
-	if #results == 0 then
-		results = tryJsonSearch(buildGamesOmniSearchProxyUrl(), "Roblox proxy omni search")
-	end
-
-	if #results == 0 then
-		results = tryRolimonsGameSearch()
-	end
-
-	if #results == 0 then
-		results = searchGamesFromScriptBlox()
-	end
-
-	if #results == 0 then
-		results = searchGamesFromRscripts()
-	end
-
-	if #results == 0 then
-		results = searchKnownGames()
-	end
-
-	if not results or #results == 0 then
-		state.gameBusy = false
-		state.gameResults = {}
-		renderGames()
-		safeSelectTab(GamesTab)
-		setStatus("No games found from Roblox, proxy, Rolimon, ScriptBlox, or Rscripts.")
-		return
-	end
-
-	hydrateGameStats(results)
-	hydrateGameIcons(results)
-
-	state.gameResults = results
-	state.gameBusy = false
-
-	renderGames()
-	safeSelectTab(GamesTab)
-
-	if #results == 0 then
-		setStatus("No games found.")
-	else
-		setStatus("Found " .. tostring(#results) .. " games" .. (state.gameSearchDebug ~= "" and (" using " .. state.gameSearchDebug .. ".") or "."))
-	end
-end
-
-
-function parseProviderResponse(decoded)
+local function parseProviderResponse(decoded)
 	if decoded.message or decoded.error then
 		return nil, 0, tostring(decoded.message or decoded.error)
 	end
 
-	if state.source == "rscripts" then
-		if type(decoded.scripts) ~= "table" then
-			return {}, 0, nil
-		end
-
-		return normalizeRscriptsList(decoded.scripts), decoded.info and tonumber(decoded.info.maxPages) or 0, nil
-	end
-
-	if not decoded.result or type(decoded.result.scripts) ~= "table" then
+	if type(decoded.scripts) ~= "table" then
 		return {}, 0, nil
 	end
 
-	local results = decoded.result.scripts
-
-	for _, item in ipairs(results) do
-		if type(item) == "table" then
-			item._source = "scriptblox"
-		end
-	end
-
-	return results, tonumber(decoded.result.totalPages) or 0, nil
+	return normalizeRscriptsList(decoded.scripts), decoded.info and tonumber(decoded.info.maxPages) or 0, nil
 end
 
-function findSelectedInResults(results)
+local function findSelectedInResults(results)
 	if not state.selected then
 		return nil
 	end
@@ -4186,7 +2774,7 @@ function findSelectedInResults(results)
 	return nil
 end
 
-function updateViewBadges(results)
+local function updateViewBadges(results)
 	if not ui.viewBadges then
 		return
 	end
@@ -4205,7 +2793,7 @@ function updateViewBadges(results)
 	end
 end
 
-function mergeVisibleResultFields(results)
+local function mergeVisibleResultFields(results)
 	local byId = {}
 
 	for _, item in ipairs(results or {}) do
@@ -4229,7 +2817,7 @@ function mergeVisibleResultFields(results)
 	end
 end
 
-function updateOneVisibleScriptViews(index)
+local function updateOneVisibleScriptViews(index)
 	local current = state.results and state.results[index]
 	if type(current) ~= "table" then
 		return false
@@ -4274,7 +2862,7 @@ function updateOneVisibleScriptViews(index)
 	return true
 end
 
-function checkVisibleViewOnce()
+local function checkVisibleViewOnce()
 	if not state.liveEnabled or state.busy then
 		return false
 	end
@@ -4304,7 +2892,7 @@ function checkVisibleViewOnce()
 	return changed
 end
 
-function startBadgeViewWatcher()
+local function startBadgeViewWatcher()
 	if state.viewWatchStarted then
 		return
 	end
@@ -4329,7 +2917,7 @@ function startBadgeViewWatcher()
 	end
 end
 
-function applyLiveResults(results, totalPages)
+local function applyLiveResults(results, totalPages)
 	local newCount = 0
 	local viewChanges = 0
 	local oldSnapshot = state.liveSnapshot or {}
@@ -4389,11 +2977,11 @@ function applyLiveResults(results, totalPages)
 	return true
 end
 
-function refreshLiveButton()
+local function refreshLiveButton()
 	return
 end
 
-function checkLiveUpdates()
+local function checkLiveUpdates()
 	if not state.liveEnabled or state.busy or state.liveBusy then
 		return false
 	end
@@ -4430,12 +3018,12 @@ function checkLiveUpdates()
 	return changed == true
 end
 
-function scheduleFastChecks()
+local function scheduleFastChecks()
 	state.viewWatchIndex = 1
 	state.viewWatchBurst = 10
 end
 
-function startLiveWatcher()
+local function startLiveWatcher()
 	if state.liveStarted then
 		return
 	end
@@ -4478,8 +3066,7 @@ renderScripts = function()
 		Size = UDim2.new(1, -320, 0, 18)
 	})
 
-	createSourceCircle(top, "scriptblox", -114, "SB", ScriptBloxLogoURL)
-	createSourceCircle(top, "rscripts", -60, "R", RscriptsLogoURL)
+	createProviderLogo(top)
 
 	createButton(top, "Previous", UDim2.new(1, -224, 0, 66), UDim2.fromOffset(104, 28), function()
 		if state.page <= 1 then
@@ -4680,9 +3267,10 @@ searchScripts = function()
 		checkVisibleViewOnce()
 	end)
 end
+
 Window = Google:CreateWindow({
 	Title = "Script Finder",
-	Subtitle = "Powered by ScriptBlox.com and Rscripts.net",
+	Subtitle = "Powered by Rscripts.net",
 	Icon = "search",
 	Size = UDim2.fromOffset(740, 530),
 	MobileSize = UDim2.fromOffset(430, 610),
@@ -4699,7 +3287,6 @@ ScriptsTab = Window:CreateTab({
 	Icon = "image"
 })
 
-
 SelectedTab = Window:CreateTab({
 	Name = "Selected",
 	Icon = "info"
@@ -4710,12 +3297,12 @@ FavoritesTab = Window:CreateTab({
 	Icon = "star"
 })
 
-searchPage = preparePage(SearchTab)
+local searchPage = preparePage(SearchTab)
 preparePage(ScriptsTab)
-selectedPage = preparePage(SelectedTab)
+local selectedPage = preparePage(SelectedTab)
 preparePage(FavoritesTab)
 
-searchPanel = createPanel(searchPage, 290, 1, color("Card", Color3.fromRGB(17, 24, 39)))
+local searchPanel = createPanel(searchPage, 290, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 
 ui.searchInput = createInput(
 	searchPanel,
@@ -4835,7 +3422,7 @@ createButton(searchPanel, "Clear", UDim2.fromOffset(120, 226), UDim2.fromOffset(
 	setStatus("Cleared.")
 end, true)
 
-statusWrap = Instance.new("Frame")
+local statusWrap = Instance.new("Frame")
 statusWrap.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
 statusWrap.BorderSizePixel = 0
 statusWrap.ClipsDescendants = true
@@ -4855,7 +3442,7 @@ ui.status = createText(statusWrap, {
 	Size = UDim2.new(1, -20, 1, 0)
 })
 
-filtersPanel = createPanel(searchPage, 162, 2, color("Card", Color3.fromRGB(17, 24, 39)))
+local filtersPanel = createPanel(searchPage, 162, 2, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(filtersPanel, {
 	Text = "Filters",
@@ -4885,8 +3472,8 @@ createCheck(filtersPanel, "Universal", UDim2.new(0.5, 6, 0, 82), UDim2.new(0.5, 
 	updateFilterSummary()
 end)
 
-orderBox = nil
-sortBox = Instance.new("TextButton")
+local orderBox
+local sortBox = Instance.new("TextButton")
 sortBox.Text = "Sort: Newest"
 sortBox.Font = Enum.Font.GothamMedium
 sortBox.TextSize = 12
@@ -4900,13 +3487,13 @@ sortBox.Parent = filtersPanel
 addCorner(sortBox, 10)
 addStroke(sortBox, color("Border", Color3.fromRGB(51, 65, 85)), 0.08, 1)
 
-sortModes = {
+local sortModes = {
 	{"Newest", "updatedAt"},
 	{"Most Viewed", "views"},
 	{"Most Liked", "likeCount"},
 	{"Created", "createdAt"}
 }
-sortIndex = 1
+local sortIndex = 1
 
 sortBox.MouseButton1Click:Connect(function()
 	sortIndex = sortIndex + 1
@@ -4961,7 +3548,7 @@ ui.filterSummary.Visible = false
 ui.filterSummary.Size = UDim2.fromOffset(0, 0)
 ui.filterSummary.Parent = searchPage
 
-startupPanel = createPanel(searchPage, 74, 3, color("Card", Color3.fromRGB(17, 24, 39)))
+local startupPanel = createPanel(searchPage, 74, 3, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(startupPanel, {
 	Text = "Startup",
@@ -4975,7 +3562,7 @@ createCheck(startupPanel, "Auto Reopen", UDim2.fromOffset(14, 36), UDim2.new(1, 
 	setAutoRerun(value)
 end)
 
-selectedTop = createPanel(selectedPage, 248, 1, color("Card", Color3.fromRGB(17, 24, 39)))
+local selectedTop = createPanel(selectedPage, 248, 1, color("Card", Color3.fromRGB(17, 24, 39)))
 
 ui.selectedImage = Instance.new("ImageLabel")
 ui.selectedImage.BackgroundColor3 = color("CardAlt", Color3.fromRGB(30, 41, 59))
@@ -4989,7 +3576,7 @@ ui.selectedImage.Parent = selectedTop
 addCorner(ui.selectedImage, 12)
 addStroke(ui.selectedImage, color("Border", Color3.fromRGB(51, 65, 85)), 0.18, 1)
 
-authorWrap = Instance.new("Frame")
+local authorWrap = Instance.new("Frame")
 authorWrap.BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))
 authorWrap.BorderSizePixel = 0
 authorWrap.Position = UDim2.fromOffset(104, 104)
@@ -5051,11 +3638,7 @@ createButton(selectedTop, "Copy Page", UDim2.fromOffset(286, 168), UDim2.fromOff
 
 	local identifier = getScriptIdentifier(state.selected)
 	if identifier then
-		if state.selected._source == "rscripts" then
-			copyText(RscriptsSiteURL .. "/script/" .. identifier)
-		else
-			copyText(SiteURL .. "/script/" .. identifier)
-		end
+		copyText(RscriptsSiteURL .. "/script/" .. identifier)
 	else
 		setStatus("Missing script page.")
 	end
@@ -5069,7 +3652,7 @@ ui.favoriteButton = createButton(selectedTop, "Favorite Script", UDim2.fromOffse
 	favoriteSelected()
 end, true)
 
-featurePanel = createPanel(selectedPage, 132, 2, color("Card", Color3.fromRGB(17, 24, 39)))
+local featurePanel = createPanel(selectedPage, 132, 2, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(featurePanel, {
 	Text = "Features",
@@ -5090,7 +3673,7 @@ ui.selectedFeatures = createText(featurePanel, {
 	Size = UDim2.new(1, -28, 0, 82)
 })
 
-tagsPanel = createPanel(selectedPage, 72, 3, color("Card", Color3.fromRGB(17, 24, 39)))
+local tagsPanel = createPanel(selectedPage, 72, 3, color("Card", Color3.fromRGB(17, 24, 39)))
 
 createText(tagsPanel, {
 	Text = "Tags",
@@ -5111,7 +3694,7 @@ ui.selectedTags = createText(tagsPanel, {
 	Size = UDim2.new(1, -28, 0, 28)
 })
 
-previewPanel = createPanel(selectedPage, 340, 4, color("Card", Color3.fromRGB(17, 24, 39)))
+local previewPanel = createPanel(selectedPage, 340, 4, color("Card", Color3.fromRGB(17, 24, 39)))
 previewPanel.Name = "ScriptPreview"
 
 createText(previewPanel, {
@@ -5126,7 +3709,7 @@ createButton(previewPanel, "Copy", UDim2.new(1, -96, 0, 8), UDim2.fromOffset(82,
 	copyText(ui.previewRaw or "")
 end, true)
 
-codeFrame = Instance.new("Frame")
+local codeFrame = Instance.new("Frame")
 codeFrame.BackgroundColor3 = color("Input", Color3.fromRGB(15, 23, 42))
 codeFrame.BorderSizePixel = 0
 codeFrame.ClipsDescendants = true
