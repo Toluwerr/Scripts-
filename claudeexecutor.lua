@@ -92,12 +92,6 @@ task.defer(function()
 	end)
 end)
 
-for _, child in ipairs(PlayerGui:GetChildren()) do
-	if child:IsA("ScreenGui") and string.find(string.lower(child.Name), "claude") then
-		child:Destroy()
-	end
-end
-
 local LOGO_IMAGE = "rbxthumb://type=Asset&id=96364738447644&w=420&h=420"
 
 local Theme = {
@@ -580,6 +574,17 @@ local function HttpGet(url)
 	return false, tostring(body or bodyGame or "request failed")
 end
 
+local function HttpGetWithHeaders(url, headers)
+	headers = type(headers) == "table" and headers or {}
+	local ok, body = pcall(function()
+		return HttpService:GetAsync(url, true, headers)
+	end)
+	if ok and type(body) == "string" and body ~= "" then
+		return true, body
+	end
+	return HttpGet(url)
+end
+
 local function JsonDecode(text)
 	local ok, data = pcall(function()
 		return HttpService:JSONDecode(text)
@@ -616,6 +621,54 @@ local function GetCustomAssetPath(fileName)
 		end
 	end
 	return ""
+end
+
+local ImageWaiters = {}
+
+local function ResolveExternalImageAsync(url, callback)
+	if type(callback) ~= "function" or type(url) ~= "string" or url == "" or not url:match("^https?://") then
+		return
+	end
+	if ImageCache[url] then
+		if ImageCache[url] ~= false then
+			callback(ImageCache[url])
+		end
+		return
+	end
+	if type(writefile) ~= "function" then
+		return
+	end
+	if ImageWaiters[url] then
+		table.insert(ImageWaiters[url], callback)
+		return
+	end
+	ImageWaiters[url] = {callback}
+	task.spawn(function()
+		local resolved = false
+		local ok, body = HttpGet(url)
+		if ok and type(body) == "string" and body ~= "" then
+			local lower = string.lower(url)
+			local extension = lower:match("%.png") and ".png" or (lower:match("%.webp") and ".webp" or ".jpg")
+			local fileName = "claude_rscripts_" .. HashText(url) .. extension
+			local wrote = pcall(function()
+				writefile(fileName, body)
+			end)
+			if wrote then
+				local asset = GetCustomAssetPath(fileName)
+				if asset ~= "" then
+					ImageCache[url] = asset
+					resolved = true
+					for _, waiter in ipairs(ImageWaiters[url] or {}) do
+						pcall(waiter, asset)
+					end
+				end
+			end
+		end
+		if not resolved then
+			ImageCache[url] = false
+		end
+		ImageWaiters[url] = nil
+	end)
 end
 
 local function TryExternalImage(url)
@@ -1159,6 +1212,14 @@ Gui.ResetOnSpawn = false
 Gui.DisplayOrder = 999999
 Gui.Parent = PlayerGui
 
+for _, child in ipairs(PlayerGui:GetChildren()) do
+	if child ~= Gui and child:IsA("ScreenGui") and string.find(string.lower(child.Name), "claude") then
+		pcall(function()
+			child:Destroy()
+		end)
+	end
+end
+
 local Panel = Instance.new("Frame")
 Panel.Name = "Panel"
 Panel.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -1340,6 +1401,37 @@ DetailCanvas.BackgroundTransparency = 1
 DetailCanvas.BorderSizePixel = 0
 DetailCanvas.ZIndex = 6
 DetailCanvas.Parent = DetailScroll
+
+local ProfilePage = Instance.new("Frame")
+ProfilePage.Name = "ProfilePage"
+ProfilePage.Size = UDim2.fromScale(1, 1)
+ProfilePage.BackgroundTransparency = 1
+ProfilePage.BorderSizePixel = 0
+ProfilePage.Visible = false
+ProfilePage.ClipsDescendants = true
+ProfilePage.ZIndex = 4
+ProfilePage.Parent = PageHost
+
+local ProfileScroll = Instance.new("ScrollingFrame")
+ProfileScroll.Name = "ProfileScroll"
+ProfileScroll.Size = UDim2.new(1, -6, 1, 0)
+ProfileScroll.BackgroundTransparency = 1
+ProfileScroll.BorderSizePixel = 0
+ProfileScroll.ScrollBarThickness = 6
+ProfileScroll.ScrollBarImageColor3 = Theme.Stroke
+ProfileScroll.CanvasSize = UDim2.fromOffset(0, 900)
+ProfileScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ProfileScroll.ClipsDescendants = true
+ProfileScroll.ZIndex = 5
+ProfileScroll.Parent = ProfilePage
+
+local ProfileCanvas = Instance.new("Frame")
+ProfileCanvas.Name = "ProfileCanvas"
+ProfileCanvas.Size = UDim2.new(1, -36, 0, 900)
+ProfileCanvas.BackgroundTransparency = 1
+ProfileCanvas.BorderSizePixel = 0
+ProfileCanvas.ZIndex = 6
+ProfileCanvas.Parent = ProfileScroll
 
 local ConsolePage = Instance.new("Frame")
 ConsolePage.Name = "ConsolePage"
@@ -1900,6 +1992,85 @@ ResultsPad.PaddingRight = UDim.new(0, 58)
 ResultsPad.PaddingBottom = UDim.new(0, 64)
 ResultsPad.Parent = ResultsScroll
 
+local ProfileHeader = Instance.new("Frame")
+ProfileHeader.Name = "ProfileHeader"
+ProfileHeader.Position = UDim2.fromOffset(8, 0)
+ProfileHeader.Size = UDim2.new(1, -16, 0, 228)
+ProfileHeader.BackgroundColor3 = Theme.BG2
+ProfileHeader.BorderSizePixel = 0
+ProfileHeader.ClipsDescendants = true
+ProfileHeader.ZIndex = 6
+ProfileHeader.Parent = ProfileCanvas
+Corner(ProfileHeader, 14)
+Stroke(ProfileHeader, Theme.Stroke, 0.25, 1)
+
+local ProfileBack = ActionButton(ProfileHeader, "ArrowLeft", "BACK", 98, false)
+ProfileBack.Position = UDim2.fromOffset(12, 12)
+ProfileBack.ZIndex = 8
+
+local ProfileAvatar = Instance.new("ImageLabel")
+ProfileAvatar.Position = UDim2.fromOffset(18, 72)
+ProfileAvatar.Size = UDim2.fromOffset(86, 86)
+ProfileAvatar.BackgroundColor3 = Theme.BG3
+ProfileAvatar.BorderSizePixel = 0
+ProfileAvatar.ScaleType = Enum.ScaleType.Crop
+ProfileAvatar.ImageTransparency = 1
+ProfileAvatar.ZIndex = 7
+ProfileAvatar.Parent = ProfileHeader
+Corner(ProfileAvatar, 43)
+Stroke(ProfileAvatar, Theme.Stroke, 0.25, 1)
+
+local ProfileName = Label(ProfileHeader, "@profile", 22, Theme.Text, Enum.Font.GothamBold)
+ProfileName.Position = UDim2.fromOffset(122, 74)
+ProfileName.Size = UDim2.new(1, -150, 0, 32)
+ProfileName.TextTruncate = Enum.TextTruncate.AtEnd
+ProfileName.ZIndex = 7
+
+local ProfileBadges = Label(ProfileHeader, "", 12, Theme.Orange2, Enum.Font.GothamBold)
+ProfileBadges.Position = UDim2.fromOffset(122, 106)
+ProfileBadges.Size = UDim2.new(1, -150, 0, 22)
+ProfileBadges.TextTruncate = Enum.TextTruncate.AtEnd
+ProfileBadges.ZIndex = 7
+
+local ProfileBio = Label(ProfileHeader, "", 12, Theme.Text, Enum.Font.GothamMedium)
+ProfileBio.Position = UDim2.fromOffset(122, 132)
+ProfileBio.Size = UDim2.new(1, -150, 0, 54)
+ProfileBio.TextWrapped = true
+ProfileBio.TextYAlignment = Enum.TextYAlignment.Top
+ProfileBio.ZIndex = 7
+
+local ProfileMeta = Label(ProfileHeader, "", 12, Theme.Muted, Enum.Font.GothamMedium)
+ProfileMeta.Position = UDim2.fromOffset(122, 190)
+ProfileMeta.Size = UDim2.new(1, -150, 0, 24)
+ProfileMeta.TextTruncate = Enum.TextTruncate.AtEnd
+ProfileMeta.ZIndex = 7
+
+local ProfileScriptsTitle = Label(ProfileCanvas, "Scripts by this creator", 18, Theme.Text, Enum.Font.GothamBold)
+ProfileScriptsTitle.Position = UDim2.fromOffset(8, 254)
+ProfileScriptsTitle.Size = UDim2.new(1, -16, 0, 28)
+ProfileScriptsTitle.ZIndex = 6
+
+local ProfileScriptsStatus = Label(ProfileCanvas, "Loading scripts...", 12, Theme.Muted, Enum.Font.GothamMedium)
+ProfileScriptsStatus.Position = UDim2.fromOffset(8, 282)
+ProfileScriptsStatus.Size = UDim2.new(1, -16, 0, 22)
+ProfileScriptsStatus.ZIndex = 6
+
+local ProfileScriptsList = Instance.new("Frame")
+ProfileScriptsList.Name = "ProfileScriptsList"
+ProfileScriptsList.Position = UDim2.fromOffset(8, 318)
+ProfileScriptsList.Size = UDim2.new(1, -16, 0, 500)
+ProfileScriptsList.BackgroundTransparency = 1
+ProfileScriptsList.BorderSizePixel = 0
+ProfileScriptsList.ZIndex = 6
+ProfileScriptsList.Parent = ProfileCanvas
+
+local ProfileScriptsLayout = Instance.new("UIListLayout")
+ProfileScriptsLayout.FillDirection = Enum.FillDirection.Vertical
+ProfileScriptsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+ProfileScriptsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+ProfileScriptsLayout.Padding = UDim.new(0, 10)
+ProfileScriptsLayout.Parent = ProfileScriptsList
+
 local DetailTop = Instance.new("Frame")
 DetailTop.Name = "DetailTop"
 DetailTop.Position = UDim2.fromOffset(0, 0)
@@ -1962,6 +2133,45 @@ AuthorInfo.Size = UDim2.fromOffset(148, 34)
 AuthorInfo.TextTruncate = Enum.TextTruncate.AtEnd
 AuthorInfo.ZIndex = 7
 
+local AuthorProfileButton = Instance.new("TextButton")
+AuthorProfileButton.Name = "AuthorProfileButton"
+AuthorProfileButton.AnchorPoint = Vector2.new(1, 0)
+AuthorProfileButton.Position = UDim2.new(1, -4, 0, 0)
+AuthorProfileButton.Size = UDim2.fromOffset(260, 48)
+AuthorProfileButton.BackgroundColor3 = Theme.BG2
+AuthorProfileButton.BorderSizePixel = 0
+AuthorProfileButton.Text = ""
+AuthorProfileButton.AutoButtonColor = false
+AuthorProfileButton.ClipsDescendants = true
+AuthorProfileButton.ZIndex = 6
+AuthorProfileButton.Parent = DetailTop
+Corner(AuthorProfileButton, 12)
+Stroke(AuthorProfileButton, Theme.Stroke, 0.35, 1)
+
+AuthorAvatar.Parent = AuthorProfileButton
+AuthorAvatar.AnchorPoint = Vector2.new(0, 0.5)
+AuthorAvatar.Position = UDim2.fromOffset(8, 24)
+AuthorAvatar.Size = UDim2.fromOffset(32, 32)
+AuthorAvatar.ZIndex = 8
+
+AuthorInfo.Parent = AuthorProfileButton
+AuthorInfo.AnchorPoint = Vector2.new(0, 0)
+AuthorInfo.Position = UDim2.fromOffset(48, 4)
+AuthorInfo.Size = UDim2.new(1, -58, 0, 22)
+AuthorInfo.ZIndex = 8
+
+local AuthorHint = Label(AuthorProfileButton, "VIEW PROFILE", 9, Theme.Muted, Enum.Font.GothamBold)
+AuthorHint.Position = UDim2.fromOffset(48, 25)
+AuthorHint.Size = UDim2.new(1, -58, 0, 16)
+AuthorHint.ZIndex = 8
+
+AuthorProfileButton.MouseEnter:Connect(function()
+	Tween(AuthorProfileButton, { BackgroundColor3 = Theme.BG3 }, 0.12)
+end)
+AuthorProfileButton.MouseLeave:Connect(function()
+	Tween(AuthorProfileButton, { BackgroundColor3 = Theme.BG2 }, 0.12)
+end)
+
 local DetailButtons = Instance.new("Frame")
 DetailButtons.Name = "DetailButtons"
 DetailButtons.AnchorPoint = Vector2.new(1, 0)
@@ -1987,6 +2197,12 @@ local DetailCode = CreateCodeEditor(DetailCanvas, "", false)
 DetailCode.Frame.Position = UDim2.fromOffset(8, 392)
 DetailCode.Frame.Size = UDim2.new(1, -28, 0, 496)
 DetailCode.Frame.ZIndex = 6
+
+local CurrentProfileUser = nil
+local CurrentProfileSourcePage = "Detail"
+local CurrentProfileScripts = {}
+local ProfileLoading = false
+local ShowProfile
 
 local CurrentPageName = "Code"
 local CurrentQuery = ""
@@ -2016,8 +2232,9 @@ local function ShowPage(name)
 	CodePage.Visible = name == "Code"
 	ExplorePage.Visible = name == "Explore"
 	DetailPage.Visible = name == "Detail"
+	ProfilePage.Visible = name == "Profile"
 	ConsolePage.Visible = name == "Console"
-	SetSideActive(name == "Detail" and "Explore" or name)
+	SetSideActive((name == "Detail" or name == "Profile") and "Explore" or name)
 	if name == "Code" then
 		task.defer(CodeEditor.Refresh)
 	elseif name == "Detail" then
@@ -2189,9 +2406,18 @@ local function AddImageFieldCandidates(add, value)
 	if type(value) ~= "string" or value == "" then
 		return
 	end
-	local custom = TryExternalImage(value)
-	if custom ~= "" then
-		add(custom)
+	if value:match("^https?://") then
+		add(value)
+		local cached = ImageCache[value]
+		if type(cached) == "string" and cached ~= "" then
+			add(cached)
+		end
+		local id = ExtractAnyRobloxId(value)
+		if id then
+			AddGameThumbSet(add, id)
+			AddPlaceThumbSet(add, id)
+			AddAssetThumbSet(add, id)
+		end
 		return
 	end
 	if value:match("^rbxthumb://") or value:match("^rbxasset://") or value:match("^rbxassetid://") or value:match("^http://www%.roblox%.com/asset/%?id=%d+") or value:match("^https://www%.roblox%.com/asset/%?id=%d+") then
@@ -2332,42 +2558,96 @@ local function ScriptImage(item)
 	return candidates[1] or ""
 end
 
-local function SetScriptImage(label, item)
-	local candidates = ScriptImageCandidates(item)
+local function SetCandidateImage(label, candidates, fallbackTransparency)
+	fallbackTransparency = fallbackTransparency == nil and 1 or fallbackTransparency
+	local token = tostring(os.clock()) .. tostring(math.random(1000, 9999))
+	label:SetAttribute("ImageLoadToken", token)
 	label.ImageTransparency = 0
-	if not candidates[1] then
-		label.Image = ""
-		label.ImageTransparency = 1
-		return
-	end
-	local function tryCandidate(candidate)
-		label.ImageTransparency = 0
-		label.Image = candidate
-		pcall(function()
-			ContentProvider:PreloadAsync({label})
-		end)
+	local function validLoaded()
 		local ok, size = pcall(function()
 			return label.ContentImageSize
 		end)
 		return ok and size and (size.X or 0) > 2 and (size.Y or 0) > 2
 	end
-	if tryCandidate(candidates[1]) then
+	local function apply(candidate)
+		if type(candidate) ~= "string" or candidate == "" or label:GetAttribute("ImageLoadToken") ~= token then
+			return false
+		end
+		label.ImageTransparency = 0
+		label.Image = candidate
+		pcall(function()
+			ContentProvider:PreloadAsync({label})
+		end)
+		return validLoaded()
+	end
+	if type(candidates) ~= "table" or not candidates[1] then
+		label.Image = ""
+		label.ImageTransparency = fallbackTransparency
 		return
+	end
+	if apply(candidates[1]) then
+		return
+	end
+	for _, candidate in ipairs(candidates) do
+		if type(candidate) == "string" and candidate:match("^https?://") then
+			ResolveExternalImageAsync(candidate, function(asset)
+				if label.Parent and label:GetAttribute("ImageLoadToken") == token then
+					apply(asset)
+				end
+			end)
+		end
 	end
 	task.spawn(function()
 		for index = 2, #candidates do
-			if not label.Parent then
+			if not label.Parent or label:GetAttribute("ImageLoadToken") ~= token then
 				return
 			end
-			if tryCandidate(candidates[index]) then
+			if apply(candidates[index]) then
 				return
 			end
-			task.wait(0.6)
+			task.wait(0.14)
 		end
-		if label.Parent and label.Image == "" then
-			label.ImageTransparency = 1
+		if label.Parent and label:GetAttribute("ImageLoadToken") == token and not validLoaded() then
+			label.Image = ""
+			label.ImageTransparency = fallbackTransparency
 		end
 	end)
+end
+
+local function UserAvatarCandidates(user)
+	local candidates = {}
+	local used = {}
+	local function add(value)
+		if type(value) == "string" and value ~= "" and not used[value] then
+			used[value] = true
+			table.insert(candidates, value)
+		end
+	end
+	if type(user) ~= "table" then
+		return candidates
+	end
+	local values = {
+		user.image,
+		user.avatar,
+		user.avatarUrl,
+		user.avatarURL,
+		user.imageUrl,
+		user.imageURL,
+		user.profileImage,
+		user.profileImageUrl
+	}
+	for _, value in ipairs(values) do
+		AddImageFieldCandidates(add, value)
+	end
+	return candidates
+end
+
+local function SetUserAvatar(label, user)
+	SetCandidateImage(label, UserAvatarCandidates(user), 1)
+end
+
+local function SetScriptImage(label, item)
+	SetCandidateImage(label, ScriptImageCandidates(item), 1)
 end
 
 local function ClearResults()
@@ -2665,6 +2945,199 @@ function FetchRawScript(item)
 	return false, ""
 end
 
+local function UserNameFromItem(item)
+	if type(item) ~= "table" then
+		return "Unknown"
+	end
+	local user = item.user or item.creator or {}
+	return tostring(user.username or user.name or item.username or "Unknown")
+end
+
+local function BuildProfileMeta(user)
+	if type(user) ~= "table" then
+		return ""
+	end
+	local parts = {}
+	if type(user.discord) == "table" then
+		local discordName = user.discord.username or user.discord.name or user.discord.id
+		if discordName then
+			table.insert(parts, "Discord: " .. tostring(discordName))
+		end
+	elseif type(user.discord) == "string" and user.discord ~= "" then
+		table.insert(parts, "Discord: " .. user.discord)
+	end
+	if type(user.socials) == "table" then
+		for key, value in pairs(user.socials) do
+			if type(value) == "string" and value ~= "" then
+				table.insert(parts, tostring(key) .. ": " .. value)
+			end
+		end
+	end
+	if user.lastActive then
+		table.insert(parts, "Last active: " .. tostring(user.lastActive))
+	end
+	return table.concat(parts, "   •   ")
+end
+
+local function BuildProfileBadges(user, scripts)
+	local badges = {}
+	if type(user) == "table" then
+		if user.verified then
+			table.insert(badges, "Verified")
+		end
+		if user.admin then
+			table.insert(badges, "Admin")
+		end
+		if user.displayEmail then
+			table.insert(badges, "Public email enabled")
+		end
+	end
+	if type(scripts) == "table" then
+		table.insert(badges, tostring(#scripts) .. " loaded scripts")
+	end
+	return table.concat(badges, "   •   ")
+end
+
+local function ClearProfileScripts()
+	for _, child in ipairs(ProfileScriptsList:GetChildren()) do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+end
+
+local function MakeProfileScriptRow(item, order)
+	local row = Instance.new("TextButton")
+	row.Name = "ProfileScriptRow" .. tostring(order)
+	row.Size = UDim2.new(1, -6, 0, 92)
+	row.BackgroundColor3 = Theme.BG2
+	row.BorderSizePixel = 0
+	row.Text = ""
+	row.AutoButtonColor = false
+	row.LayoutOrder = order
+	row.ClipsDescendants = true
+	row.ZIndex = 7
+	row.Parent = ProfileScriptsList
+	Corner(row, 12)
+	Stroke(row, Theme.Stroke, 0.35, 1)
+
+	local img = Instance.new("ImageLabel")
+	img.Position = UDim2.fromOffset(12, 12)
+	img.Size = UDim2.fromOffset(104, 68)
+	img.BackgroundColor3 = Theme.BG3
+	img.BorderSizePixel = 0
+	img.ScaleType = Enum.ScaleType.Crop
+	img.ImageTransparency = 1
+	img.ZIndex = 8
+	img.Parent = row
+	Corner(img, 10)
+	SetScriptImage(img, item)
+
+	local title = Label(row, ScriptTitle(item), 14, Theme.Text, Enum.Font.GothamBold)
+	title.Position = UDim2.fromOffset(132, 12)
+	title.Size = UDim2.new(1, -150, 0, 24)
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.ZIndex = 8
+
+	local desc = Label(row, tostring(item.description or "No description provided."), 11, Theme.Muted, Enum.Font.GothamMedium)
+	desc.Position = UDim2.fromOffset(132, 38)
+	desc.Size = UDim2.new(1, -150, 0, 20)
+	desc.TextTruncate = Enum.TextTruncate.AtEnd
+	desc.ZIndex = 8
+
+	local meta = Label(row, ScriptMetaText(item), 11, Theme.Muted, Enum.Font.GothamMedium)
+	meta.Position = UDim2.fromOffset(132, 62)
+	meta.Size = UDim2.new(1, -150, 0, 18)
+	meta.TextTruncate = Enum.TextTruncate.AtEnd
+	meta.ZIndex = 8
+
+	row.MouseEnter:Connect(function()
+		Tween(row, { BackgroundColor3 = Theme.BG3 }, 0.12)
+	end)
+	row.MouseLeave:Connect(function()
+		Tween(row, { BackgroundColor3 = Theme.BG2 }, 0.12)
+	end)
+	row.MouseButton1Click:Connect(function()
+		SelectedScript = item
+		SelectedSource = ""
+		ShowDetail(item)
+	end)
+end
+
+local function RenderProfileScripts(scripts)
+	ClearProfileScripts()
+	if type(scripts) ~= "table" or #scripts == 0 then
+		ProfileScriptsStatus.Text = "No public scripts loaded for this creator."
+		ProfileScriptsList.Size = UDim2.new(1, -16, 0, 90)
+		ProfileCanvas.Size = UDim2.new(1, -36, 0, 460)
+		ProfileScroll.CanvasSize = UDim2.fromOffset(0, 460)
+		return
+	end
+	ProfileScriptsStatus.Text = tostring(#scripts) .. " public scripts loaded"
+	for i, item in ipairs(scripts) do
+		MakeProfileScriptRow(item, i)
+	end
+	task.defer(function()
+		local height = ProfileScriptsLayout.AbsoluteContentSize.Y + 24
+		ProfileScriptsList.Size = UDim2.new(1, -16, 0, height)
+		local canvasHeight = math.max(620, 318 + height + 36)
+		ProfileCanvas.Size = UDim2.new(1, -36, 0, canvasHeight)
+		ProfileScroll.CanvasSize = UDim2.fromOffset(0, canvasHeight)
+	end)
+end
+
+local function FetchProfileScripts(username)
+	username = Trim(username or "")
+	if username == "" then
+		return {}, 1, 1
+	end
+	local ok, body = HttpGetWithHeaders("https://rscripts.net/api/v2/scripts?page=1&orderBy=date&sort=desc&notPaid=true", {Username = username})
+	if not ok then
+		return {}, 1, 1
+	end
+	local decodedOk, data = JsonDecode(body)
+	if not decodedOk then
+		return {}, 1, 1
+	end
+	return NormalizeScriptList(data)
+end
+
+ShowProfile = function(user, fallbackName, sourcePage)
+	if type(user) ~= "table" then
+		user = {}
+	end
+	CurrentProfileUser = user
+	CurrentProfileSourcePage = sourcePage or CurrentPageName or "Detail"
+	local username = tostring(user.username or user.name or fallbackName or "Unknown")
+	ProfileName.Text = "@" .. username
+	ProfileBio.Text = tostring(user.bio or "No bio provided.")
+	ProfileMeta.Text = BuildProfileMeta(user)
+	ProfileBadges.Text = BuildProfileBadges(user, nil)
+	SetUserAvatar(ProfileAvatar, user)
+	ProfileScriptsStatus.Text = "Loading scripts by @" .. username .. "..."
+	ClearProfileScripts()
+	ShowPage("Profile")
+	if username == "Unknown" or username == "" then
+		ProfileScriptsStatus.Text = "No profile username available."
+		return
+	end
+	if ProfileLoading then
+		return
+	end
+	ProfileLoading = true
+	task.spawn(function()
+		local scripts = FetchProfileScripts(username)
+		if CurrentProfileUser ~= user then
+			ProfileLoading = false
+			return
+		end
+		CurrentProfileScripts = scripts
+		ProfileBadges.Text = BuildProfileBadges(user, scripts)
+		RenderProfileScripts(scripts)
+		ProfileLoading = false
+	end)
+end
+
 function ShowDetail(item)
 	DetailCanvas.Size = UDim2.new(1, -30, 0, 940)
 	DetailScroll.CanvasSize = UDim2.fromOffset(0, 940)
@@ -2674,9 +3147,7 @@ function ShowDetail(item)
 	DetailMeta.Text = DetailMetaText(item)
 	DetailDescription.Text = tostring(item.description or "No description provided.")
 	local user = item.user or {}
-	local avatarImage = TryExternalImage(FirstString(user.image, user.avatar, user.avatarUrl, user.imageUrl))
-	AuthorAvatar.Image = avatarImage ~= "" and avatarImage or ""
-	AuthorAvatar.ImageTransparency = avatarImage ~= "" and 0 or 1
+	SetUserAvatar(AuthorAvatar, user)
 	AuthorInfo.Text = (user.verified and "✓ " or "") .. "@" .. author
 	DetailCode:SetText("Loading script source...")
 	ConsoleLog("info", "Opened script detail:", ScriptTitle(item))
@@ -2727,6 +3198,20 @@ end)
 
 BackButton.MouseButton1Click:Connect(function()
 	ShowPage("Explore")
+end)
+
+AuthorProfileButton.MouseButton1Click:Connect(function()
+	if SelectedScript then
+		ShowProfile(SelectedScript.user or {}, ScriptAuthor(SelectedScript), "Detail")
+	end
+end)
+
+ProfileBack.MouseButton1Click:Connect(function()
+	if CurrentProfileSourcePage == "Detail" and SelectedScript then
+		ShowPage("Detail")
+	else
+		ShowPage("Explore")
+	end
 end)
 
 SearchButton.MouseButton1Click:Connect(function()
