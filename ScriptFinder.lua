@@ -193,10 +193,16 @@ pcall(function()
 	end
 end)
 
+local SearchEndpoint = "https://scriptblox.com/api/script/search"
+local FetchEndpoint = "https://scriptblox.com/api/script/fetch"
+local DetailsEndpoint = "https://scriptblox.com/api/script/"
+local RawEndpoint = "https://scriptblox.com/api/script/raw/"
 local RscriptsEndpoint = "https://rscripts.net/api/v2/scripts"
 local RscriptsDetailsEndpoint = "https://rscripts.net/api/v2/script"
+local SiteURL = "https://scriptblox.com"
 local RscriptsSiteURL = "https://rscripts.net"
-local ImageFolder = "RscriptsFinderImages"
+local ImageFolder = "ScriptFinderImages"
+local ScriptBloxLogoURL = "rbxthumb://type=Asset&id=84945399616047&w=150&h=150"
 local RscriptsLogoURL = "rbxthumb://type=Asset&id=108648055077644&w=150&h=150"
 local FavoritesFile = AutoRerunFolder .. "/Favorites.json"
 
@@ -247,7 +253,8 @@ local ui = {
 	status = nil,
 	filterSummary = nil,
 	scriptsInfo = nil,
-	providerLogo = nil,
+	sourceScriptBloxButton = nil,
+	sourceRscriptsButton = nil,
 	viewBadges = {},
 	selectedImage = nil,
 	selectedAuthorImage = nil,
@@ -1490,7 +1497,7 @@ local function makeFavoriteEntry(scriptData)
 		Id = tostring(id),
 		Title = getScriptTitle(scriptData),
 		Game = getGameName(scriptData),
-		Source = "rscripts",
+		Source = scriptData._source or state.source or "rscripts",
 		Image = getScriptImage(scriptData),
 		PlaceId = placeId,
 		Universal = universal,
@@ -1647,12 +1654,17 @@ end
 
 
 
-local function getSourceName()
+local function getSourceName(source)
+	source = tostring(source or state.source or "rscripts")
+	if source == "scriptblox" then
+		return "ScriptBlox"
+	end
+
 	return "Rscripts"
 end
 
 local function isRscripts()
-	return true
+	return state.source == "rscripts"
 end
 
 local function mapSortForRscripts(value)
@@ -1734,7 +1746,7 @@ local function normalizeRscriptsList(list)
 end
 
 local function buildSearchHeaders()
-	if trim(state.owner or "") ~= "" then
+	if isRscripts() and trim(state.owner or "") ~= "" then
 		return {
 			Username = trim(state.owner)
 		}
@@ -1792,7 +1804,37 @@ local function fetchDetails(scriptData)
 		return scriptData
 	end
 
-	local ok, body = requestGet(RscriptsDetailsEndpoint .. "?id=" .. encode(identifier))
+	if scriptData and scriptData._source == "rscripts" then
+		local ok, body = requestGet(RscriptsDetailsEndpoint .. "?id=" .. encode(identifier))
+		if not ok then
+			return scriptData
+		end
+
+		local decodedOk, decoded = pcall(function()
+			return HttpService:JSONDecode(body)
+		end)
+
+		if not decodedOk or type(decoded) ~= "table" then
+			return scriptData
+		end
+
+		local item = nil
+		if type(decoded.script) == "table" then
+			item = decoded.script[1] or decoded.script
+		elseif type(decoded.success) == "table" then
+			item = decoded.success[1] or decoded.success
+		end
+
+		local normalized = normalizeRscriptsScript(item)
+		if normalized then
+			normalized._source = "rscripts"
+			return mergeTables(scriptData, normalized)
+		end
+
+		return scriptData
+	end
+
+	local ok, body = requestGet(DetailsEndpoint .. encode(identifier))
 	if not ok then
 		return scriptData
 	end
@@ -1805,17 +1847,9 @@ local function fetchDetails(scriptData)
 		return scriptData
 	end
 
-	local item = nil
 	if type(decoded.script) == "table" then
-		item = decoded.script[1] or decoded.script
-	elseif type(decoded.success) == "table" then
-		item = decoded.success[1] or decoded.success
-	end
-
-	local normalized = normalizeRscriptsScript(item)
-	if normalized then
-		normalized._source = "rscripts"
-		return mergeTables(scriptData, normalized)
+		decoded.script._source = "scriptblox"
+		return mergeTables(scriptData, decoded.script)
 	end
 
 	return scriptData
@@ -1847,8 +1881,65 @@ local function buildRscriptsUrl(searchTerm, page)
 	return url
 end
 
+local function buildScriptBloxUrl(searchTerm, page)
+	searchTerm = trim(searchTerm or state.query or "")
+	local hasQuery = searchTerm ~= ""
+	local url = hasQuery and SearchEndpoint or FetchEndpoint
+
+	if hasQuery then
+		url = url .. "?q=" .. encode(searchTerm)
+	else
+		url = url .. "?page=" .. encode(page or state.page)
+	end
+
+	if hasQuery then
+		url = url .. "&page=" .. encode(page or state.page)
+	end
+
+	url = url .. "&max=" .. encode(state.max)
+	url = url .. "&sortBy=" .. encode(state.sortBy ~= "" and state.sortBy or "updatedAt")
+	url = url .. "&order=" .. encode(state.order ~= "" and state.order or "desc")
+	url = url .. "&mode=free"
+
+	if tostring(state.placeId or "") ~= "" then
+		url = url .. "&placeId=" .. encode(state.placeId)
+	end
+
+	if tostring(state.owner or "") ~= "" then
+		url = url .. "&owner=" .. encode(state.owner)
+	end
+
+	if hasQuery then
+		url = url .. "&strict=false"
+	end
+
+	if state.unpatchedOnly then
+		url = url .. "&patched=0"
+	end
+
+	if state.noKeyOnly then
+		url = url .. "&key=0"
+	end
+
+	if state.verifiedOnly then
+		url = url .. "&verified=1"
+	end
+
+	if state.universalOnly then
+		url = url .. "&universal=1"
+	end
+
+	return url
+end
+
 local function buildSearchUrl()
-	local url = buildRscriptsUrl(buildRscriptsSearchTerm(), state.page)
+	local url
+	if isRscripts() then
+		url = buildRscriptsUrl(buildRscriptsSearchTerm(), state.page)
+	else
+		url = buildScriptBloxUrl(state.query, state.page)
+	end
+
 	state.lastUrl = url
 	return url
 end
@@ -2096,15 +2187,26 @@ local function fetchRawSelected()
 		return codeText
 	end
 
-	local rawUrl = state.selected.rawScript
-	if not rawUrl or tostring(rawUrl) == "" then
-		setStatus("Raw script link is unavailable.")
+	local identifier = getScriptIdentifier(state.selected)
+	if not identifier then
+		setStatus("Missing script identifier.")
 		return nil
 	end
 
 	setStatus("Fetching raw script...")
 
-	local ok, body = requestGet(rawUrl)
+	local rawUrl = nil
+	if state.selected._source == "rscripts" then
+		rawUrl = state.selected.rawScript
+	end
+
+	local ok, body
+	if rawUrl and tostring(rawUrl) ~= "" then
+		ok, body = requestGet(rawUrl)
+	else
+		ok, body = requestGet(RawEndpoint .. encode(identifier))
+	end
+
 	if not ok or type(body) ~= "string" then
 		setStatus("Failed to fetch raw script.")
 		return nil
@@ -2440,7 +2542,8 @@ local function updateSelected()
 		"Key: " .. boolToText(scriptData.key),
 		"Patched: " .. boolToText(scriptData.isPatched),
 		"Universal: " .. boolToText(scriptData.isUniversal),
-		"Type: " .. tostring(scriptData.scriptType or "free")
+		"Type: " .. tostring(scriptData.scriptType or "free"),
+		"Source: " .. getSourceName(scriptData._source or state.source)
 	}
 
 	if dateLine ~= "" then
@@ -2490,8 +2593,15 @@ selectScript = function(scriptData)
 	state.selected = fetchDetails(scriptData)
 
 	if not (type(state.selected.script) == "string" and state.selected.script ~= "") then
-		if state.selected.rawScript and tostring(state.selected.rawScript) ~= "" then
+		local identifier = getScriptIdentifier(state.selected)
+
+		if state.selected._source == "rscripts" and state.selected.rawScript and tostring(state.selected.rawScript) ~= "" then
 			local ok, body = requestGet(state.selected.rawScript)
+			if ok and type(body) == "string" and body ~= "" then
+				state.selected.script = extractScriptText(body)
+			end
+		elseif identifier then
+			local ok, body = requestGet(RawEndpoint .. encode(identifier))
 			if ok and type(body) == "string" and body ~= "" then
 				state.selected.script = extractScriptText(body)
 			end
@@ -2885,18 +2995,20 @@ end
 
 
 
-local function createProviderLogo(parent)
+local function createSourceCircle(parent, source, xOffset, labelText, logoUrl)
+	local active = state.source == source
+
 	local button = Instance.new("TextButton")
-	button.Name = "RscriptsProviderLogo"
+	button.Name = source .. "SourceButton"
 	button.Text = ""
-	button.BackgroundColor3 = color("PrimarySoft", Color3.fromRGB(30, 58, 105))
+	button.BackgroundColor3 = active and color("PrimarySoft", Color3.fromRGB(30, 58, 105)) or color("CardAlt", Color3.fromRGB(30, 41, 59))
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
-	button.Position = UDim2.new(1, -62, 0, 6)
+	button.Position = UDim2.new(1, xOffset, 0, 6)
 	button.Size = UDim2.fromOffset(46, 46)
 	button.Parent = parent
 	addCorner(button, 8)
-	addStroke(button, color("Primary", Color3.fromRGB(67, 135, 244)), 0.08, 1)
+	addStroke(button, active and color("Primary", Color3.fromRGB(67, 135, 244)) or color("Border", Color3.fromRGB(51, 65, 85)), active and 0.08 or 0.28, 1)
 
 	local img = Instance.new("ImageLabel")
 	img.Name = "Logo"
@@ -2905,13 +3017,40 @@ local function createProviderLogo(parent)
 	img.BorderSizePixel = 0
 	img.Position = UDim2.fromOffset(5, 5)
 	img.Size = UDim2.fromOffset(36, 36)
-	img.Image = RscriptsLogoURL
+	img.Image = logoUrl
 	img.ImageTransparency = 0
 	img.ScaleType = Enum.ScaleType.Fit
 	img.Parent = button
 	addCorner(img, 7)
 
-	ui.providerLogo = button
+	local scale = addScaleAnimation(button, 1)
+	button.MouseEnter:Connect(function()
+		playTween(scale, 0.12, {Scale = 1.05})
+	end)
+
+	button.MouseLeave:Connect(function()
+		playTween(scale, 0.12, {Scale = 1})
+	end)
+
+	if source == "scriptblox" then
+		ui.sourceScriptBloxButton = button
+	else
+		ui.sourceRscriptsButton = button
+	end
+
+	button.MouseButton1Click:Connect(function()
+		if state.source == source then
+			return
+		end
+
+		state.source = source
+		state.page = 1
+		state.results = {}
+		state.selected = nil
+		updateLiveSnapshot({})
+		setStatus("Switched to " .. getSourceName(source) .. ".")
+		searchScripts()
+	end)
 
 	return button
 end
@@ -2922,11 +3061,26 @@ local function parseProviderResponse(decoded)
 		return nil, 0, tostring(decoded.message or decoded.error)
 	end
 
-	if type(decoded.scripts) ~= "table" then
+	if isRscripts() then
+		if type(decoded.scripts) ~= "table" then
+			return {}, 0, nil
+		end
+
+		return normalizeRscriptsList(decoded.scripts), decoded.info and tonumber(decoded.info.maxPages) or 0, nil
+	end
+
+	if not decoded.result or type(decoded.result.scripts) ~= "table" then
 		return {}, 0, nil
 	end
 
-	return normalizeRscriptsList(decoded.scripts), decoded.info and tonumber(decoded.info.maxPages) or 0, nil
+	local results = decoded.result.scripts
+	for _, item in ipairs(results) do
+		if type(item) == "table" then
+			item._source = "scriptblox"
+		end
+	end
+
+	return results, tonumber(decoded.result.totalPages) or 0, nil
 end
 
 
@@ -3017,7 +3171,7 @@ local function collectActiveGameResults(initialResults, initialTotalPages)
 	end
 
 	local terms = {}
-	local mainTerm = trim(buildRscriptsSearchTerm())
+	local mainTerm = trim(isRscripts() and buildRscriptsSearchTerm() or state.query)
 	local placeName = getActivePlaceName()
 	local placeId = trim(state.placeId or "")
 
@@ -3044,7 +3198,7 @@ local function collectActiveGameResults(initialResults, initialTotalPages)
 	for _, term in ipairs(terms) do
 		for page = 1, maxPagesToScan do
 			if not (term == mainTerm and page == state.page) then
-				local extraResults = fetchProviderUrl(buildRscriptsUrl(term, page))
+				local extraResults = fetchProviderUrl(isRscripts() and buildRscriptsUrl(term, page) or buildScriptBloxUrl(term, page))
 				if type(extraResults) == "table" and addList(extraResults) then
 					return collected, 1
 				end
@@ -3380,7 +3534,8 @@ renderScripts = function()
 		Size = UDim2.new(1, -320, 0, 18)
 	})
 
-	createProviderLogo(top)
+	createSourceCircle(top, "scriptblox", -114, "SB", ScriptBloxLogoURL)
+	createSourceCircle(top, "rscripts", -60, "R", RscriptsLogoURL)
 
 	createButton(top, "Previous", UDim2.new(1, -224, 0, 66), UDim2.fromOffset(104, 28), function()
 		if state.page <= 1 then
@@ -3610,7 +3765,7 @@ end
 
 Window = Google:CreateWindow({
 	Title = "Script Finder",
-	Subtitle = "Powered by Rscripts.net",
+	Subtitle = "Powered by ScriptBlox.com and Rscripts.net",
 	Icon = "search",
 	Size = UDim2.fromOffset(740, 530),
 	MobileSize = UDim2.fromOffset(430, 610),
@@ -3993,7 +4148,11 @@ createButton(selectedTop, "Copy Page", UDim2.fromOffset(286, 168), UDim2.fromOff
 
 	local identifier = getScriptIdentifier(state.selected)
 	if identifier then
-		copyText(RscriptsSiteURL .. "/script/" .. identifier)
+		if state.selected._source == "rscripts" then
+			copyText(RscriptsSiteURL .. "/script/" .. identifier)
+		else
+			copyText(SiteURL .. "/script/" .. identifier)
+		end
 	else
 		setStatus("Missing script page.")
 	end
