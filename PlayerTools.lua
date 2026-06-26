@@ -112,6 +112,9 @@ local GrappleSettings = {
 	BodyVelocity = nil,
 	BodyGyro = nil,
 	VisualConnection = nil,
+	AnimationConnection = nil,
+	AnimateScript = nil,
+	OriginalAnimateDisabled = nil,
 	VisualFolder = nil,
 	Segments = {},
 	OriginalAutoRotate = nil,
@@ -1692,6 +1695,77 @@ local function getCharacterGrappleJointRole(joint)
 	return nil
 end
 
+local function clearCharacterGrappleAnimationLock()
+	disconnect(GrappleSettings.AnimationConnection)
+	GrappleSettings.AnimationConnection = nil
+
+	local animateScript = GrappleSettings.AnimateScript
+
+	if animateScript
+		and animateScript.Parent
+		and GrappleSettings.OriginalAnimateDisabled ~= nil then
+		pcall(function()
+			animateScript.Disabled = GrappleSettings.OriginalAnimateDisabled
+		end)
+	end
+
+	GrappleSettings.AnimateScript = nil
+	GrappleSettings.OriginalAnimateDisabled = nil
+end
+
+local function stopCharacterGrappleTrack(track)
+	if track then
+		pcall(function()
+			track:Stop(0)
+		end)
+	end
+end
+
+local function lockCharacterGrappleAnimations(character, humanoid)
+	clearCharacterGrappleAnimationLock()
+
+	if not character
+		or not character.Parent
+		or not humanoid
+		or not humanoid.Parent then
+		return
+	end
+
+	local animateScript = character:FindFirstChild("Animate")
+
+	if animateScript and animateScript:IsA("LocalScript") then
+		GrappleSettings.AnimateScript = animateScript
+		GrappleSettings.OriginalAnimateDisabled = animateScript.Disabled
+		animateScript.Disabled = true
+	end
+
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+
+	if not animator then
+		local candidate = humanoid:FindFirstChild("Animator")
+
+		if candidate and candidate:IsA("Animator") then
+			animator = candidate
+		end
+	end
+
+	if not animator then
+		return
+	end
+
+	for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+		stopCharacterGrappleTrack(track)
+	end
+
+	GrappleSettings.AnimationConnection = animator.AnimationPlayed:Connect(function(track)
+		if running
+			and GrappleSettings.Active
+			and GrappleSettings.Humanoid == humanoid then
+			task.defer(stopCharacterGrappleTrack, track)
+		end
+	end)
+end
+
 local function restoreCharacterGrapplePose()
 	for joint, state in pairs(GrappleSettings.JointTransforms) do
 		if joint and joint.Parent and state then
@@ -1765,6 +1839,7 @@ clearCharacterGrapple = function()
 
 	disconnectCharacterGrappleVisual()
 	restoreCharacterGrapplePose()
+	clearCharacterGrappleAnimationLock()
 
 	local root = GrappleSettings.Root
 	local humanoid = GrappleSettings.Humanoid
@@ -2058,9 +2133,6 @@ local function updateCharacterGrapplePose(deltaTime)
 	deltaTime = math.max(tonumber(deltaTime) or (1 / 60), 0)
 	GrappleSettings.AnimationTime += deltaTime
 
-	local unitDirection = direction.Unit
-	local relativeDirection = root.CFrame:VectorToObjectSpace(unitDirection)
-	local upwardPull = math.clamp(relativeDirection.Y, -0.75, 0.75)
 	local speedRatio = math.clamp(
 		GrappleSettings.CurrentSpeed / math.max(GrappleSettings.Speed, 1),
 		0,
@@ -2073,74 +2145,72 @@ local function updateCharacterGrapplePose(deltaTime)
 		1
 	)
 	local shotEase = shotProgress * shotProgress * (3 - 2 * shotProgress)
-	local cycle = GrappleSettings.AnimationTime * (4.5 + speedRatio * 3.5)
-	local legSwing = math.sin(cycle) * math.rad(3) * speedRatio
-	local poseBlend = 1 - math.exp(-20 * deltaTime)
+	local cycle = GrappleSettings.AnimationTime * (4 + speedRatio * 3)
+	local legMotion = math.sin(cycle) * math.rad(2.5) * speedRatio
+	local poseBlend = 1 - math.exp(-24 * deltaTime)
 	local isR6 = GrappleSettings.RigType == Enum.HumanoidRigType.R6
-	local torsoPitch = math.rad(-8) + upwardPull * math.rad(13)
 
 	for joint, state in pairs(GrappleSettings.JointTransforms) do
 		if joint and joint.Parent and state and state.C0 then
 			local offset = nil
 
 			if state.Role == "rightshoulder" then
+				local armForward = math.rad(35 + 58 * shotEase)
+
 				if isR6 then
 					offset = CFrame.Angles(
-						math.rad(-6) + upwardPull * math.rad(8),
-						math.rad(-8),
-						math.rad(22 + 82 * shotEase)
+						armForward,
+						math.rad(-12),
+						math.rad(17)
 					)
 				else
 					offset = CFrame.Angles(
-						math.rad(-38) - upwardPull * math.rad(16),
-						math.rad(-12),
-						math.rad(36)
+						armForward,
+						math.rad(-16),
+						math.rad(18)
 					)
 				end
 			elseif state.Role == "rightelbow" then
-				offset = CFrame.Angles(0, 0, math.rad(-22) * shotEase)
+				offset = CFrame.Angles(math.rad(-6), 0, math.rad(-8))
 			elseif state.Role == "leftshoulder" then
-				if isR6 then
-					offset = CFrame.Angles(
-						math.rad(12) - upwardPull * math.rad(5),
-						math.rad(10),
-						math.rad(-28)
-					)
-				else
-					offset = CFrame.Angles(
-						math.rad(28),
-						math.rad(8),
-						math.rad(-30)
-					)
-				end
+				offset = CFrame.Angles(
+					math.rad(-27),
+					math.rad(12),
+					math.rad(-25)
+				)
 			elseif state.Role == "leftelbow" then
-				offset = CFrame.Angles(0, 0, math.rad(30))
+				offset = CFrame.Angles(math.rad(18), 0, math.rad(10))
 			elseif state.Role == "righthip" then
 				offset = CFrame.Angles(
-					math.rad(-28) + upwardPull * math.rad(8),
+					math.rad(-24),
 					math.rad(2),
-					math.rad(4) + legSwing
+					math.rad(2) + legMotion
 				)
 			elseif state.Role == "lefthip" then
 				offset = CFrame.Angles(
-					math.rad(-28) + upwardPull * math.rad(8),
+					math.rad(-24),
 					math.rad(-2),
-					math.rad(-4) - legSwing
+					math.rad(-2) - legMotion
 				)
 			elseif state.Role == "rightknee" then
-				offset = CFrame.Angles(math.rad(18), 0, 0)
+				offset = CFrame.Angles(math.rad(16), 0, 0)
 			elseif state.Role == "leftknee" then
-				offset = CFrame.Angles(math.rad(18), 0, 0)
+				offset = CFrame.Angles(math.rad(16), 0, 0)
 			elseif state.Role == "waist" or state.Role == "root" then
-				offset = CFrame.Angles(torsoPitch, 0, math.rad(-3))
+				offset = CFrame.Angles(math.rad(-12), 0, math.rad(-3))
 			elseif state.Role == "neck" then
-				offset = CFrame.Angles(math.rad(6) - upwardPull * math.rad(8), 0, math.rad(3))
+				offset = CFrame.Angles(math.rad(5), 0, math.rad(3))
 			end
 
 			if offset then
 				pcall(function()
-					joint.C0 = joint.C0:Lerp(state.C0 * offset, poseBlend)
-					joint.Transform = CFrame.identity
+					joint.C0 = state.C0
+					joint.Transform = joint.Transform:Lerp(offset, poseBlend)
+				end)
+			else
+				pcall(function()
+					joint.C0 = state.C0
+					joint.Transform = joint.Transform:Lerp(CFrame.identity, poseBlend)
 				end)
 			end
 		end
@@ -2276,8 +2346,9 @@ local function beginCharacterGrapple()
 	humanoid.PlatformStand = true
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
-	humanoid:ChangeState(Enum.HumanoidStateType.Physics)
 	captureCharacterGrapplePose(character, humanoid)
+	lockCharacterGrappleAnimations(character, humanoid)
+	humanoid:ChangeState(Enum.HumanoidStateType.Physics)
 
 	GrappleSettings.VisualConnection = RunService.Heartbeat:Connect(function(deltaTime)
 		if not isCharacterGrappleValid() then
@@ -2299,7 +2370,7 @@ local function beginCharacterGrapple()
 
 	RunService:BindToRenderStep(
 		GRAPPLE_BIND_NAME,
-		Enum.RenderPriority.Character.Value + 3,
+		Enum.RenderPriority.Last.Value,
 		updateCharacterGrappleFrame
 	)
 end
