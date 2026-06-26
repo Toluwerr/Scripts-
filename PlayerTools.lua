@@ -136,6 +136,7 @@ local VehicleTeleportSettings = {
 
 local MapViewerSettings = {
 	Enabled = false,
+	MouseUnlocked = false,
 	Viewport = nil,
 	Camera = nil,
 	WorldModel = nil,
@@ -151,6 +152,10 @@ local MapViewerSettings = {
 	WorldCamera = nil,
 	WorldCameraType = nil,
 	WorldCameraSubject = nil
+}
+
+local InterfaceSettings = {
+	Hidden = false
 }
 
 local stopVehicleFlyRuntime
@@ -2327,6 +2332,18 @@ local function sinkMapMovement()
 	return Enum.ContextActionResult.Sink
 end
 
+local function setMapMouseUnlocked(value)
+	if not MapViewerSettings.Enabled then
+		return
+	end
+
+	MapViewerSettings.MouseUnlocked = value and true or false
+	UserInputService.MouseBehavior = MapViewerSettings.MouseUnlocked
+		and Enum.MouseBehavior.Default
+		or Enum.MouseBehavior.LockCenter
+	UserInputService.MouseIconEnabled = MapViewerSettings.MouseUnlocked
+end
+
 stopMapViewerRuntime = function()
 	pcall(function()
 		RunService:UnbindFromRenderStep(MAP_VIEWER_BIND_NAME)
@@ -2356,6 +2373,7 @@ stopMapViewerRuntime = function()
 		UserInputService.MouseIconEnabled = MapViewerSettings.MouseIconEnabled
 	end
 
+	MapViewerSettings.MouseUnlocked = false
 	MapViewerSettings.MouseBehavior = nil
 	MapViewerSettings.MouseIconEnabled = nil
 	MapViewerSettings.WorldCamera = nil
@@ -2382,8 +2400,8 @@ local function startMapViewerRuntime()
 
 	MapViewerSettings.MouseBehavior = UserInputService.MouseBehavior
 	MapViewerSettings.MouseIconEnabled = UserInputService.MouseIconEnabled
-	UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-	UserInputService.MouseIconEnabled = false
+	MapViewerSettings.MouseUnlocked = false
+	setMapMouseUnlocked(false)
 
 	ContextActionService:BindActionAtPriority(
 		MAP_BLOCK_ACTION_NAME,
@@ -2400,7 +2418,8 @@ local function startMapViewerRuntime()
 		Enum.KeyCode.Right,
 		Enum.KeyCode.Space,
 		Enum.KeyCode.LeftControl,
-		Enum.KeyCode.RightControl
+		Enum.KeyCode.RightControl,
+		Enum.KeyCode.P
 	)
 
 	pcall(function()
@@ -2578,6 +2597,20 @@ local mapViewerToggle = MapSection:AddToggle({
 	end
 })
 mapViewerToggle.Instance.LayoutOrder = 1
+
+local mapHint = Instance.new("TextLabel")
+mapHint.Name = "MapComment"
+mapHint.Size = UDim2.new(1, 0, 0, 18)
+mapHint.LayoutOrder = 2
+mapHint.BackgroundTransparency = 1
+mapHint.BorderSizePixel = 0
+mapHint.Font = Enum.Font.GothamMedium
+mapHint.Text = "P toggles mouse cursor"
+mapHint.TextColor3 = Google.Theme.Muted
+mapHint.TextSize = 12
+mapHint.TextXAlignment = Enum.TextXAlignment.Left
+mapHint.TextYAlignment = Enum.TextYAlignment.Center
+mapHint.Parent = MapSection.Content
 
 local MainSection = ESPTab:AddSection({
 	Name = "Player ESP",
@@ -2865,6 +2898,9 @@ local function applyPickerTheme()
 	pickerTitle.TextColor3 = Google.Theme.Text
 	Google.SetIconColor(paletteIcon, Google.Theme.Primary)
 	colorReadout.TextColor3 = Google.Theme.Muted
+	mapViewerCard.BackgroundColor3 = Google.Theme.CardAlt
+	mapViewport.BackgroundColor3 = Google.Theme.CardAlt
+	mapHint.TextColor3 = Google.Theme.Muted
 	colorPreviewStroke.Color = Google.Theme.Border
 	colorSquareStroke.Color = Google.Theme.Border
 	hueBarStroke.Color = Google.Theme.Border
@@ -3213,7 +3249,28 @@ track(UserInputService.JumpRequest:Connect(function()
 	end
 end))
 
+local function setInterfaceHidden(value)
+	InterfaceSettings.Hidden = value and true or false
+
+	if Window.Gui and Window.Gui:IsA("LayerCollector") then
+		Window.Gui.Enabled = not InterfaceSettings.Hidden
+	elseif Window.Instance and Window.Instance:IsA("GuiObject") then
+		Window.Instance.Visible = not InterfaceSettings.Hidden
+	end
+end
+
 track(UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+	if input.KeyCode == Enum.KeyCode.K
+		and not UserInputService:GetFocusedTextBox() then
+		setInterfaceHidden(not InterfaceSettings.Hidden)
+		return
+	end
+
+	if MapViewerSettings.Enabled and input.KeyCode == Enum.KeyCode.P then
+		setMapMouseUnlocked(not MapViewerSettings.MouseUnlocked)
+		return
+	end
+
 	if MapViewerSettings.Enabled and input.KeyCode == Enum.KeyCode.Escape then
 		setMapViewerEnabled(false)
 		return
@@ -3241,6 +3298,7 @@ end))
 
 track(UserInputService.InputChanged:Connect(function(input)
 	if MapViewerSettings.Enabled
+		and not MapViewerSettings.MouseUnlocked
 		and input.UserInputType == Enum.UserInputType.MouseMovement then
 		MapViewerSettings.Yaw -= input.Delta.X * 0.003
 		MapViewerSettings.Pitch = math.clamp(
