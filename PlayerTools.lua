@@ -144,7 +144,9 @@ local VehicleWallDriveSettings = {
 	BodyVelocity = nil,
 	BodyGyro = nil,
 	SurfaceNormal = nil,
-	CurrentForward = nil
+	CurrentForward = nil,
+	CurrentUp = nil,
+	LastContactTime = 0
 }
 
 local VehicleTeleportSettings = {
@@ -788,6 +790,8 @@ local function clearVehicleWallDrive()
 	VehicleWallDriveSettings.BodyGyro = nil
 	VehicleWallDriveSettings.SurfaceNormal = nil
 	VehicleWallDriveSettings.CurrentForward = nil
+	VehicleWallDriveSettings.CurrentUp = nil
+	VehicleWallDriveSettings.LastContactTime = 0
 end
 
 local function getVehicleWallRayParams()
@@ -809,30 +813,59 @@ local function getVehicleWallRayParams()
 	return params
 end
 
-local function getVehicleWallSurface(root)
-	local params = getVehicleWallRayParams()
-	local up = root.CFrame.UpVector
-	local forward = root.CFrame.LookVector
-	local probe = math.max(root.Size.Magnitude * 0.65, 10)
-	local start = root.Position + up * math.min(root.Size.Y * 0.2, 2)
-	local forwardHit = Workspace:Raycast(start, forward * probe, params)
+local function castVehicleWallSurface(root, direction, params, distance)
+	if direction.Magnitude < 0.001 then
+		return nil
+	end
 
-	if forwardHit and forwardHit.Instance and forwardHit.Instance:IsA("BasePart") then
-		if forwardHit.Normal.Y < 0.72 then
-			return forwardHit
+	local right = root.CFrame.RightVector
+	local up = root.CFrame.UpVector
+	local sideOffset = math.max(root.Size.X * 0.32, 1)
+	local heightOffset = math.max(root.Size.Y * 0.2, 0.5)
+	local origins = {
+		root.Position,
+		root.Position + right * sideOffset,
+		root.Position - right * sideOffset,
+		root.Position + up * heightOffset
+	}
+
+	for _, origin in ipairs(origins) do
+		local hit = Workspace:Raycast(origin, direction.Unit * distance, params)
+
+		if hit and hit.Instance and hit.Instance:IsA("BasePart") then
+			return hit
 		end
 	end
 
+	return nil
+end
+
+local function getVehicleWallSurface(root)
+	local params = getVehicleWallRayParams()
+	local probe = math.max(root.Size.Magnitude * 0.9, 14)
+
 	if VehicleWallDriveSettings.Active then
-		local surfaceHit = Workspace:Raycast(
-			root.Position,
-			-up * math.max(root.Size.Y * 0.85 + 5, 10),
-			params
+		local contactHit = castVehicleWallSurface(
+			root,
+			-root.CFrame.UpVector,
+			params,
+			math.max(root.Size.Y + 8, 12)
 		)
 
-		if surfaceHit and surfaceHit.Instance and surfaceHit.Instance:IsA("BasePart") then
-			return surfaceHit
+		if contactHit then
+			return contactHit
 		end
+	end
+
+	local forwardHit = castVehicleWallSurface(
+		root,
+		root.CFrame.LookVector,
+		params,
+		probe
+	)
+
+	if forwardHit and forwardHit.Normal.Y < 0.6 then
+		return forwardHit
 	end
 
 	return nil
@@ -842,16 +875,16 @@ local function getVehicleWallForward(root, normal)
 	local forward = root.CFrame.LookVector
 	forward -= normal * forward:Dot(normal)
 
-	if forward.Magnitude < 0.08 then
-		forward = root.CFrame.UpVector
+	if forward.Magnitude < 0.15 then
+		forward = Vector3.yAxis
 		forward -= normal * forward:Dot(normal)
 	end
 
-	if forward.Magnitude < 0.08 then
-		forward = Vector3.yAxis:Cross(normal)
+	if forward.Magnitude < 0.15 then
+		forward = root.CFrame.RightVector:Cross(normal)
 	end
 
-	if forward.Magnitude < 0.08 then
+	if forward.Magnitude < 0.15 then
 		forward = Vector3.xAxis:Cross(normal)
 	end
 
@@ -873,15 +906,15 @@ local function ensureVehicleWallDriveMovers(root, seat)
 	local bodyVelocity = Instance.new("BodyVelocity")
 	bodyVelocity.Name = "__PlayerToolsVehicleWallDriveVelocity"
 	bodyVelocity.MaxForce = Vector3.new(1e9, 1e9, 1e9)
-	bodyVelocity.P = 18000
+	bodyVelocity.P = 7200
 	bodyVelocity.Velocity = Vector3.zero
 	bodyVelocity.Parent = root
 
 	local bodyGyro = Instance.new("BodyGyro")
 	bodyGyro.Name = "__PlayerToolsVehicleWallDriveGyro"
 	bodyGyro.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
-	bodyGyro.P = 50000
-	bodyGyro.D = 2400
+	bodyGyro.P = 18000
+	bodyGyro.D = 1100
 	bodyGyro.CFrame = root.CFrame
 	bodyGyro.Parent = root
 
@@ -897,6 +930,13 @@ local function updateVehicleWallDrive(root, seat, deltaTime)
 		return false
 	end
 
+	local throttle = getVehicleThrottle(seat)
+
+	if throttle == 0 then
+		clearVehicleWallDrive()
+		return false
+	end
+
 	local surfaceHit = getVehicleWallSurface(root)
 
 	if not surfaceHit then
@@ -906,7 +946,7 @@ local function updateVehicleWallDrive(root, seat, deltaTime)
 
 	local normal = surfaceHit.Normal
 
-	if normal.Y >= 0.72 and not VehicleWallDriveSettings.Active then
+	if normal.Y >= 0.6 and not VehicleWallDriveSettings.Active then
 		return false
 	end
 
@@ -923,7 +963,8 @@ local function updateVehicleWallDrive(root, seat, deltaTime)
 		return false
 	end
 
-	local forward = getVehicleWallForward(root, normal)
+	local targetUp = normal
+	local targetForward = getVehicleWallForward(root, targetUp)
 	local steer = getVehicleSteer(seat)
 	local steeringStrength = math.clamp(
 		tonumber(VehicleSettings.SteeringStrength) or 8,
@@ -932,36 +973,66 @@ local function updateVehicleWallDrive(root, seat, deltaTime)
 	)
 
 	if math.abs(steer) > 0.001 then
-		local angle = -steer * math.max(steeringStrength, 5) * 0.1 * deltaTime
-		forward = CFrame.fromAxisAngle(normal, angle):VectorToWorldSpace(forward).Unit
+		local turnRate = math.rad(35 + steeringStrength * 2.2)
+		targetForward = CFrame.fromAxisAngle(
+			targetUp,
+			-steer * turnRate * math.max(deltaTime, 0)
+		):VectorToWorldSpace(targetForward).Unit
 	end
 
-	local alpha = 1 - math.exp(-14 * math.max(deltaTime, 0))
+	local alpha = 1 - math.exp(-9 * math.max(deltaTime, 0))
+
+	if VehicleWallDriveSettings.CurrentUp then
+		local blendedUp = VehicleWallDriveSettings.CurrentUp:Lerp(targetUp, alpha)
+
+		if blendedUp.Magnitude > 0.001 then
+			VehicleWallDriveSettings.CurrentUp = blendedUp.Unit
+		else
+			VehicleWallDriveSettings.CurrentUp = targetUp
+		end
+	else
+		VehicleWallDriveSettings.CurrentUp = targetUp
+	end
+
+	targetForward -= VehicleWallDriveSettings.CurrentUp
+		* targetForward:Dot(VehicleWallDriveSettings.CurrentUp)
+
+	if targetForward.Magnitude < 0.08 then
+		targetForward = getVehicleWallForward(root, VehicleWallDriveSettings.CurrentUp)
+	end
+
+	targetForward = targetForward.Unit
 
 	if VehicleWallDriveSettings.CurrentForward then
-		VehicleWallDriveSettings.CurrentForward = VehicleWallDriveSettings.CurrentForward:Lerp(
-			forward,
+		local blendedForward = VehicleWallDriveSettings.CurrentForward:Lerp(
+			targetForward,
 			alpha
-		).Unit
+		)
+		blendedForward -= VehicleWallDriveSettings.CurrentUp
+			* blendedForward:Dot(VehicleWallDriveSettings.CurrentUp)
+
+		if blendedForward.Magnitude > 0.001 then
+			VehicleWallDriveSettings.CurrentForward = blendedForward.Unit
+		else
+			VehicleWallDriveSettings.CurrentForward = targetForward
+		end
 	else
-		VehicleWallDriveSettings.CurrentForward = forward
+		VehicleWallDriveSettings.CurrentForward = targetForward
 	end
 
-	local targetCFrame = CFrame.lookAt(
+	bodyGyro.CFrame = CFrame.lookAt(
 		root.Position,
 		root.Position + VehicleWallDriveSettings.CurrentForward,
-		normal
+		VehicleWallDriveSettings.CurrentUp
 	)
 
-	bodyGyro.CFrame = targetCFrame
-
-	local throttle = getVehicleThrottle(seat)
 	local speed = math.clamp(tonumber(VehicleSettings.Speed) or 60, 0, 500)
-	local surfaceVelocity = VehicleWallDriveSettings.CurrentForward * (throttle * speed)
-	local gripVelocity = -normal * 5
+	local driveVelocity = VehicleWallDriveSettings.CurrentForward * (throttle * speed)
+	local adhesion = -normal * math.clamp(speed * 0.025, 1.25, 3)
 
-	bodyVelocity.Velocity = surfaceVelocity + gripVelocity
+	bodyVelocity.Velocity = driveVelocity + adhesion
 	VehicleWallDriveSettings.SurfaceNormal = normal
+	VehicleWallDriveSettings.LastContactTime = os.clock()
 	VehicleWallDriveSettings.Active = true
 
 	return true
