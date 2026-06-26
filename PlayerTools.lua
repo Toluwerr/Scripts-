@@ -93,9 +93,9 @@ local GrappleSettings = {
 	Enabled = false,
 	Holding = false,
 	Active = false,
-	Speed = 145,
-	Acceleration = 150,
-	Deceleration = 230,
+	Speed = 125,
+	Acceleration = 90,
+	Deceleration = 155,
 	CurrentSpeed = 0,
 	CurrentVelocity = Vector3.zero,
 	InitialDistance = 0,
@@ -1913,7 +1913,7 @@ local function updateCharacterGrapplePhysics(deltaTime)
 
 	local pullVector = targetAttachment.WorldPosition - rootAttachment.WorldPosition
 	local distance = pullVector.Magnitude
-	local endDistance = 2.1
+	local endDistance = 2.35
 
 	if distance <= endDistance then
 		GrappleSettings.CurrentSpeed = moveGrappleSpeed(
@@ -1921,18 +1921,22 @@ local function updateCharacterGrapplePhysics(deltaTime)
 			0,
 			GrappleSettings.Deceleration * deltaTime
 		)
+
+		local stopAlpha = 1 - math.exp(-14 * deltaTime)
 		GrappleSettings.CurrentVelocity = GrappleSettings.CurrentVelocity:Lerp(
 			Vector3.zero,
-			1 - math.exp(-18 * deltaTime)
+			stopAlpha
 		)
+
 		bodyVelocity.Velocity = GrappleSettings.CurrentVelocity
+		root.AssemblyLinearVelocity = GrappleSettings.CurrentVelocity
 		return
 	end
 
 	local direction = pullVector.Unit
-	local maxSpeed = math.clamp(tonumber(GrappleSettings.Speed) or 145, 35, 240)
-	local acceleration = math.clamp(tonumber(GrappleSettings.Acceleration) or 150, 25, 500)
-	local deceleration = math.clamp(tonumber(GrappleSettings.Deceleration) or 230, 25, 600)
+	local maxSpeed = math.clamp(tonumber(GrappleSettings.Speed) or 125, 35, 240)
+	local acceleration = math.clamp(tonumber(GrappleSettings.Acceleration) or 90, 20, 350)
+	local deceleration = math.clamp(tonumber(GrappleSettings.Deceleration) or 155, 30, 450)
 	local remainingDistance = math.max(distance - endDistance, 0)
 	local brakingSpeed = math.sqrt(2 * deceleration * remainingDistance)
 	local targetSpeed = math.min(maxSpeed, brakingSpeed)
@@ -1948,14 +1952,15 @@ local function updateCharacterGrapplePhysics(deltaTime)
 		speedStep
 	)
 
+	local velocityFollow = 1 - math.exp(-11 * deltaTime)
 	local targetVelocity = direction * GrappleSettings.CurrentSpeed
-	local steeringAlpha = 1 - math.exp(-20 * deltaTime)
 	GrappleSettings.CurrentVelocity = GrappleSettings.CurrentVelocity:Lerp(
 		targetVelocity,
-		steeringAlpha
+		velocityFollow
 	)
 
 	bodyVelocity.Velocity = GrappleSettings.CurrentVelocity
+	root.AssemblyLinearVelocity = GrappleSettings.CurrentVelocity
 
 	if GrappleSettings.InitialDistance <= 0 then
 		GrappleSettings.InitialDistance = distance
@@ -2032,46 +2037,63 @@ local function updateCharacterGrapplePose(deltaTime)
 
 	local unitDirection = direction.Unit
 	local relativeDirection = root.CFrame:VectorToObjectSpace(unitDirection)
-	local upwardPull = math.clamp(relativeDirection.Y, -0.7, 0.7)
+	local upwardPull = math.clamp(relativeDirection.Y, -0.75, 0.75)
 	local speedRatio = math.clamp(
 		GrappleSettings.CurrentSpeed / math.max(GrappleSettings.Speed, 1),
 		0,
 		1
 	)
-	local cycle = GrappleSettings.AnimationTime * (8 + speedRatio * 7)
-	local armSwing = math.sin(cycle) * math.rad(6) * speedRatio
-	local legSwing = math.sin(cycle + math.pi) * math.rad(10) * speedRatio
-	local lean = math.rad(-16) + upwardPull * math.rad(18)
+	local shotProgress = math.clamp(
+		(os.clock() - GrappleSettings.ShotStartedAt)
+			/ math.max(GrappleSettings.ShotDuration * 0.82, 0.01),
+		0,
+		1
+	)
+	local shotEase = shotProgress * shotProgress * (3 - 2 * shotProgress)
+	local cycle = GrappleSettings.AnimationTime * (5 + speedRatio * 4)
+	local legMotion = math.sin(cycle) * math.rad(5) * speedRatio
+	local torsoLean = math.rad(-10) + upwardPull * math.rad(15)
+	local poseBlend = 1 - math.exp(-18 * deltaTime)
 
 	for joint, state in pairs(GrappleSettings.JointTransforms) do
 		if joint and joint.Parent and state and state.C0 then
 			local offset = nil
 
 			if state.Role == "rightshoulder" then
+				local webArm = math.rad(-18 - 78 * shotEase)
+
 				offset = CFrame.Angles(
-					math.rad(-102) + upwardPull * math.rad(22) + armSwing,
-					math.rad(-7),
-					math.rad(26)
+					math.rad(-4) + upwardPull * math.rad(9),
+					math.rad(-10),
+					webArm
 				)
 			elseif state.Role == "leftshoulder" then
 				offset = CFrame.Angles(
-					math.rad(38) - upwardPull * math.rad(10) - armSwing * 0.55,
-					math.rad(5),
-					math.rad(-32)
+					math.rad(8) - upwardPull * math.rad(6),
+					math.rad(10),
+					math.rad(30) + math.sin(cycle) * math.rad(3)
 				)
 			elseif state.Role == "righthip" then
-				offset = CFrame.Angles(math.rad(30) - upwardPull * math.rad(12) + legSwing, 0, math.rad(8))
+				offset = CFrame.Angles(
+					math.rad(4),
+					0,
+					math.rad(25) + legMotion
+				)
 			elseif state.Role == "lefthip" then
-				offset = CFrame.Angles(math.rad(-12) - upwardPull * math.rad(10) - legSwing, 0, math.rad(-8))
+				offset = CFrame.Angles(
+					math.rad(-4),
+					0,
+					math.rad(-19) - legMotion
+				)
 			elseif state.Role == "waist" or state.Role == "root" then
-				offset = CFrame.Angles(lean - math.rad(9), 0, 0)
+				offset = CFrame.Angles(torsoLean, 0, math.rad(-5))
 			elseif state.Role == "neck" then
-				offset = CFrame.Angles(math.rad(12) - upwardPull * math.rad(12), 0, 0)
+				offset = CFrame.Angles(math.rad(7) - upwardPull * math.rad(8), 0, math.rad(4))
 			end
 
 			if offset then
 				pcall(function()
-					joint.C0 = state.C0 * offset
+					joint.C0 = joint.C0:Lerp(state.C0 * offset, poseBlend)
 					joint.Transform = CFrame.identity
 				end)
 			end
@@ -2169,7 +2191,7 @@ local function beginCharacterGrapple()
 		math.max(root.AssemblyMass * 10000, 160000),
 		math.max(root.AssemblyMass * 10000, 160000)
 	)
-	bodyVelocity.P = 4500
+	bodyVelocity.P = 1250
 	bodyVelocity.Velocity = Vector3.zero
 	bodyVelocity.Parent = root
 
@@ -2199,6 +2221,8 @@ local function beginCharacterGrapple()
 
 	humanoid.AutoRotate = false
 	humanoid.PlatformStand = true
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
 	humanoid:ChangeState(Enum.HumanoidStateType.Physics)
 	captureCharacterGrapplePose(character)
 
