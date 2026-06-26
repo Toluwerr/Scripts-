@@ -45,10 +45,13 @@ local MovementSettings = {
 	Enabled = false,
 	Speed = 16,
 	InfiniteJump = false,
+	Noclip = false,
 	Humanoid = nil,
 	OriginalSpeed = nil,
 	Updating = false,
-	WatchConnection = nil
+	WatchConnection = nil,
+	NoclipConnection = nil,
+	CollisionStates = setmetatable({}, {__mode = "k"})
 }
 
 local AimlockSettings = {
@@ -568,6 +571,61 @@ local function watchSpeed()
 			and humanoid.WalkSpeed ~= MovementSettings.Speed then
 			task.defer(applySpeed)
 		end
+	end)
+end
+
+local function applyNoclip()
+	if not running or not MovementSettings.Noclip then
+		return
+	end
+
+	local character = LocalPlayer.Character
+
+	if not character or not character.Parent then
+		return
+	end
+
+	for _, object in ipairs(character:GetDescendants()) do
+		if object:IsA("BasePart") then
+			if MovementSettings.CollisionStates[object] == nil then
+				MovementSettings.CollisionStates[object] = object.CanCollide
+			end
+
+			if object.CanCollide then
+				object.CanCollide = false
+			end
+		end
+	end
+end
+
+local function clearNoclip()
+	disconnect(MovementSettings.NoclipConnection)
+	MovementSettings.NoclipConnection = nil
+
+	for part, originalCanCollide in pairs(MovementSettings.CollisionStates) do
+		if part and part.Parent then
+			pcall(function()
+				part.CanCollide = originalCanCollide
+			end)
+		end
+	end
+
+	MovementSettings.CollisionStates = setmetatable({}, {__mode = "k"})
+end
+
+local function setNoclipEnabled(value)
+	MovementSettings.Noclip = value and true or false
+
+	clearNoclip()
+
+	if not MovementSettings.Noclip then
+		return
+	end
+
+	applyNoclip()
+
+	MovementSettings.NoclipConnection = RunService.Stepped:Connect(function()
+		applyNoclip()
 	end)
 end
 
@@ -1233,6 +1291,10 @@ local function bindMovementCharacter(character)
 
 	MovementSettings.Humanoid = humanoid
 	bindVehicleHumanoid(humanoid)
+
+	if MovementSettings.Noclip then
+		applyNoclip()
+	end
 
 	if MovementSettings.Enabled then
 		MovementSettings.OriginalSpeed = humanoid.WalkSpeed
@@ -1983,6 +2045,8 @@ local function cleanup()
 	running = false
 	Settings.Enabled = false
 	AimlockSettings.Enabled = false
+	MovementSettings.Noclip = false
+	clearNoclip()
 	FlingSettings.Enabled = false
 	FlingSettings.WorkerToken += 1
 	disableAntiFling()
@@ -2498,6 +2562,15 @@ local infiniteJumpToggle = MovementSection:AddToggle({
 	end
 })
 infiniteJumpToggle.Instance.LayoutOrder = 4
+
+local noclipToggle = MovementSection:AddToggle({
+	Name = "Noclip",
+	Default = false,
+	Callback = function(value)
+		setNoclipEnabled(value)
+	end
+})
+noclipToggle.Instance.LayoutOrder = 5
 
 local FlySection = MovementTab:AddSection({
 	Name = "Fly",
