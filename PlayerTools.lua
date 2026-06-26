@@ -140,7 +140,8 @@ local VehicleTeleportSettings = {
 	Enabled = false,
 	Cooldown = 0.12,
 	LastTeleport = 0,
-	ReinforceDuration = 1.1,
+	ReinforceDuration = 1.5,
+	NearbyRadius = 70,
 	ReinforceConnection = nil,
 	ReinforceToken = 0,
 	ReinforceRoot = nil,
@@ -1263,34 +1264,155 @@ local function getVehicleTeleportTarget(screenPosition)
 	return result and result.Position or nil
 end
 
+local function hasHumanoidAncestor(instance)
+	local current = instance
+
+	while current and current ~= Workspace do
+		if current:IsA("Model") and current:FindFirstChildOfClass("Humanoid") then
+			return true
+		end
+
+		current = current.Parent
+	end
+
+	return false
+end
+
+local function countModelBaseParts(model, limit)
+	local count = 0
+
+	for _, object in ipairs(model:GetDescendants()) do
+		if object:IsA("BasePart") then
+			count += 1
+
+			if limit and count > limit then
+				return count
+			end
+		end
+	end
+
+	return count
+end
+
+local function collectVehicleTeleportModels(root, model)
+	local models = {}
+	local seen = {}
+
+	local function addModel(candidate)
+		if candidate
+			and candidate:IsA("Model")
+			and candidate.Parent
+			and not seen[candidate]
+			and not hasHumanoidAncestor(candidate) then
+			seen[candidate] = true
+			table.insert(models, candidate)
+		end
+	end
+
+	local current = root
+
+	while current and current ~= Workspace do
+		if current:IsA("Model") then
+			local partCount = countModelBaseParts(current, 450)
+
+			if partCount <= 450 then
+				addModel(current)
+			elseif #models > 0 then
+				break
+			end
+		end
+
+		current = current.Parent
+	end
+
+	if model and model.Parent then
+		addModel(model)
+	end
+
+	return models
+end
+
 local function collectVehicleTeleportParts(root, model)
 	local parts = {}
 	local seen = {}
+	local queue = {}
+	local nearbyRadius = math.clamp(
+		tonumber(VehicleTeleportSettings.NearbyRadius) or 70,
+		25,
+		150
+	)
 
 	local function addPart(part)
 		if part
 			and part:IsA("BasePart")
 			and part.Parent
-			and not seen[part] then
+			and not seen[part]
+			and not hasHumanoidAncestor(part) then
 			seen[part] = true
 			table.insert(parts, part)
+			table.insert(queue, part)
 		end
 	end
 
 	addPart(root)
 
-	pcall(function()
-		for _, part in ipairs(root:GetConnectedParts(true)) do
-			addPart(part)
-		end
-	end)
-
-	if model and model.Parent then
-		for _, object in ipairs(model:GetDescendants()) do
+	for _, vehicleModel in ipairs(collectVehicleTeleportModels(root, model)) do
+		for _, object in ipairs(vehicleModel:GetDescendants()) do
 			if object:IsA("BasePart") then
 				addPart(object)
 			end
 		end
+	end
+
+	local queueIndex = 1
+
+	while queueIndex <= #queue do
+		local part = queue[queueIndex]
+		queueIndex += 1
+
+		pcall(function()
+			for _, connected in ipairs(part:GetConnectedParts(true)) do
+				addPart(connected)
+			end
+		end)
+	end
+
+	local overlap = OverlapParams.new()
+	overlap.FilterType = Enum.RaycastFilterType.Exclude
+	overlap.FilterDescendantsInstances = LocalPlayer.Character and {LocalPlayer.Character} or {}
+	overlap.MaxParts = 0
+
+	local nearbyParts = {}
+
+	pcall(function()
+		nearbyParts = Workspace:GetPartBoundsInRadius(
+			root.Position,
+			nearbyRadius,
+			overlap
+		)
+	end)
+
+	for _, part in ipairs(nearbyParts) do
+		if part
+			and part:IsA("BasePart")
+			and not part.Anchored
+			and not hasHumanoidAncestor(part)
+			and (part.Position - root.Position).Magnitude <= nearbyRadius then
+			addPart(part)
+		end
+	end
+
+	queueIndex = 1
+
+	while queueIndex <= #queue do
+		local part = queue[queueIndex]
+		queueIndex += 1
+
+		pcall(function()
+			for _, connected in ipairs(part:GetConnectedParts(true)) do
+				addPart(connected)
+			end
+		end)
 	end
 
 	return parts
@@ -1313,18 +1435,45 @@ local function applyVehicleTeleportState(root, desiredRoot, parts, offsets)
 		return
 	end
 
+	local movingParts = {}
+	local targetCFrames = {}
+
 	for _, part in ipairs(parts) do
 		local offset = offsets[part]
 
 		if part
 			and part.Parent
 			and offset then
+			table.insert(movingParts, part)
+			table.insert(targetCFrames, desiredRoot * offset)
+		end
+	end
+
+	local moved = false
+
+	if #movingParts > 0 then
+		moved = pcall(function()
+			Workspace:BulkMoveTo(
+				movingParts,
+				targetCFrames,
+				Enum.BulkMoveMode.FireCFrameChanged
+			)
+		end)
+	end
+
+	if not moved then
+		for index, part in ipairs(movingParts) do
 			pcall(function()
-				part.CFrame = desiredRoot * offset
-				part.AssemblyLinearVelocity = Vector3.zero
-				part.AssemblyAngularVelocity = Vector3.zero
+				part.CFrame = targetCFrames[index]
 			end)
 		end
+	end
+
+	for _, part in ipairs(movingParts) do
+		pcall(function()
+			part.AssemblyLinearVelocity = Vector3.zero
+			part.AssemblyAngularVelocity = Vector3.zero
+		end)
 	end
 
 	pcall(function()
