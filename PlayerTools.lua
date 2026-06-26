@@ -58,6 +58,8 @@ local AimlockSettings = {
 	Enabled = false,
 	TeamCheck = true,
 	Holding = false,
+	CursorRadius = 180,
+	MaxDistance = 2500,
 	TargetPlayer = nil,
 	TargetCharacter = nil,
 	TargetHumanoid = nil,
@@ -237,61 +239,94 @@ local function clearAimTarget()
 	updateAimStatus()
 end
 
-local function getPlayerFromInstance(instance)
-	local current = instance
+local function getAimCursorDistance(camera, screenPosition, character)
+	local closestDistance = nil
+	local candidateNames = {
+		"Head",
+		"UpperTorso",
+		"Torso",
+		"HumanoidRootPart",
+		"LowerTorso"
+	}
 
-	while current and current ~= Workspace do
-		if current:IsA("Model") then
-			local player = Players:GetPlayerFromCharacter(current)
-			if player then
-				return player, current
+	for _, name in ipairs(candidateNames) do
+		local part = character:FindFirstChild(name)
+
+		if part and part:IsA("BasePart") then
+			local projected, onScreen = camera:WorldToViewportPoint(part.Position)
+
+			if onScreen and projected.Z > 0 then
+				local distance = (
+					Vector2.new(projected.X, projected.Y)
+					- screenPosition
+				).Magnitude
+
+				if not closestDistance or distance < closestDistance then
+					closestDistance = distance
+				end
 			end
 		end
-
-		current = current.Parent
 	end
 
-	return nil, nil
+	return closestDistance
 end
 
 local function getPlayerUnderPointer()
-	local hit = Mouse.Target
+	local camera = Workspace.CurrentCamera
+	local localRoot = getRoot(LocalPlayer.Character)
 
-	if not hit then
-		local camera = Workspace.CurrentCamera
-		if camera then
-			local mouseLocation = UserInputService:GetMouseLocation()
-			local ray = camera:ViewportPointToRay(mouseLocation.X, mouseLocation.Y)
-			local params = RaycastParams.new()
-			params.FilterType = Enum.RaycastFilterType.Exclude
-			params.IgnoreWater = true
-			params.FilterDescendantsInstances = {LocalPlayer.Character}
+	if not camera then
+		return nil
+	end
 
-			local result = Workspace:Raycast(ray.Origin, ray.Direction * 5000, params)
-			hit = result and result.Instance or nil
+	local mouseLocation = UserInputService:GetMouseLocation()
+	local screenPosition = Vector2.new(mouseLocation.X, mouseLocation.Y)
+	local closestPlayer = nil
+	local closestCharacter = nil
+	local closestHumanoid = nil
+	local closestTargetPart = nil
+	local closestDistance = AimlockSettings.CursorRadius
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer and not isAimTeammate(player) then
+			local character = player.Character
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			local targetPart = character and (
+				character:FindFirstChild("Head")
+				or getRoot(character)
+			)
+			local root = character and getRoot(character)
+
+			if humanoid
+				and humanoid.Health > 0
+				and targetPart
+				and targetPart:IsA("BasePart")
+				and root
+				and root:IsA("BasePart") then
+				local worldDistance = localRoot
+					and (root.Position - localRoot.Position).Magnitude
+					or (root.Position - camera.CFrame.Position).Magnitude
+
+				if worldDistance <= AimlockSettings.MaxDistance then
+					local cursorDistance = getAimCursorDistance(
+						camera,
+						screenPosition,
+						character
+					)
+
+					if cursorDistance and cursorDistance <= closestDistance then
+						closestPlayer = player
+						closestCharacter = character
+						closestHumanoid = humanoid
+						closestTargetPart = targetPart
+						closestDistance = cursorDistance
+					end
+				end
+			end
 		end
 	end
 
-	local player, character = getPlayerFromInstance(hit)
-
-	if not player
-		or player == LocalPlayer
-		or isAimTeammate(player)
-		or not character then
-		return nil
-	end
-
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	local targetPart = character:FindFirstChild("Head") or getRoot(character)
-
-	if not humanoid
-		or humanoid.Health <= 0
-		or not targetPart
-		or not targetPart:IsA("BasePart") then
-		return nil
-	end
-
-	return player, character, humanoid, targetPart
+	return closestPlayer, closestCharacter, closestHumanoid, closestTargetPart
 end
 
 local function beginAimlock()
