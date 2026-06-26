@@ -98,10 +98,9 @@ local GrappleSettings = {
 	Deceleration = 155,
 	CurrentSpeed = 0,
 	CurrentVelocity = Vector3.zero,
-	TrajectoryLift = 0,
-	LastLookPitch = nil,
-	MaxTrajectoryLift = 110,
-	TrajectoryLiftDecay = 46,
+	TrajectoryPitchThreshold = -0.95,
+	TrajectoryForwardSpeed = 108,
+	TrajectoryUpwardSpeed = 118,
 	InitialDistance = 0,
 	AnimationTime = 0,
 	ShotStartedAt = 0,
@@ -1896,8 +1895,6 @@ clearCharacterGrapple = function(launchVelocity)
 	GrappleSettings.Active = false
 	GrappleSettings.CurrentSpeed = 0
 	GrappleSettings.CurrentVelocity = Vector3.zero
-	GrappleSettings.TrajectoryLift = 0
-	GrappleSettings.LastLookPitch = nil
 	GrappleSettings.InitialDistance = 0
 	GrappleSettings.AnimationTime = 0
 	GrappleSettings.ShotStartedAt = 0
@@ -2014,36 +2011,16 @@ local function moveGrappleSpeed(current, target, maxDelta)
 	return math.max(current - maxDelta, target)
 end
 
-local function getCharacterGrappleLookPitch()
+local function updateCharacterGrappleTrajectory()
 	local camera = Workspace.CurrentCamera
 
 	if not camera then
-		return nil
-	end
-
-	return math.asin(math.clamp(camera.CFrame.LookVector.Y, -1, 1))
-end
-
-local function updateCharacterGrappleTrajectory(deltaTime)
-	local pitch = getCharacterGrappleLookPitch()
-
-	if not pitch then
 		return false
 	end
 
-	local previousPitch = GrappleSettings.LastLookPitch
-	GrappleSettings.LastLookPitch = pitch
+	local lookVector = camera.CFrame.LookVector
 
-	if previousPitch == nil then
-		return false
-	end
-
-	local lookDownRate = math.max(
-		(previousPitch - pitch) / math.max(deltaTime, 1 / 240),
-		0
-	)
-
-	if lookDownRate < 0.02 then
+	if lookVector.Y > GrappleSettings.TrajectoryPitchThreshold then
 		return false
 	end
 
@@ -2053,39 +2030,31 @@ local function updateCharacterGrappleTrajectory(deltaTime)
 		return false
 	end
 
-	local currentVelocity = GrappleSettings.CurrentVelocity
-	local horizontalVelocity = Vector3.new(
-		currentVelocity.X,
-		0,
-		currentVelocity.Z
-	)
+	local forward = Vector3.new(lookVector.X, 0, lookVector.Z)
 
-	if horizontalVelocity.Magnitude < 10 then
-		local forward = Vector3.new(
+	if forward.Magnitude < 0.08 then
+		forward = Vector3.new(
 			root.CFrame.LookVector.X,
 			0,
 			root.CFrame.LookVector.Z
 		)
-
-		if forward.Magnitude > 0.01 then
-			horizontalVelocity = forward.Unit * math.max(
-				GrappleSettings.CurrentSpeed * 0.55,
-				28
-			)
-		end
 	end
 
-	local upwardBoost = math.clamp(
-		62 + lookDownRate * 48,
-		62,
-		165
+	if forward.Magnitude < 0.01 then
+		return false
+	end
+
+	forward = forward.Unit
+
+	local currentHorizontal = Vector3.new(
+		GrappleSettings.CurrentVelocity.X,
+		0,
+		GrappleSettings.CurrentVelocity.Z
 	)
-	local horizontalCarry = horizontalVelocity * math.clamp(
-		0.95 + lookDownRate * 0.06,
-		0.95,
-		1.22
-	)
-	local launchVelocity = horizontalCarry + Vector3.new(0, upwardBoost, 0)
+	local carry = math.clamp(currentHorizontal.Magnitude * 0.25, 0, 32)
+	local forwardSpeed = GrappleSettings.TrajectoryForwardSpeed + carry
+	local upwardSpeed = GrappleSettings.TrajectoryUpwardSpeed
+	local launchVelocity = forward * forwardSpeed + Vector3.new(0, upwardSpeed, 0)
 
 	GrappleSettings.Holding = false
 	clearCharacterGrapple(launchVelocity)
@@ -2112,7 +2081,7 @@ local function updateCharacterGrapplePhysics(deltaTime)
 
 	deltaTime = math.max(tonumber(deltaTime) or (1 / 60), 0)
 
-	if updateCharacterGrappleTrajectory(deltaTime) then
+	if updateCharacterGrappleTrajectory() then
 		return
 	end
 
@@ -2532,8 +2501,6 @@ local function beginCharacterGrapple()
 	GrappleSettings.OriginalPlatformStand = humanoid.PlatformStand
 	GrappleSettings.CurrentSpeed = 0
 	GrappleSettings.CurrentVelocity = Vector3.zero
-	GrappleSettings.TrajectoryLift = 0
-	GrappleSettings.LastLookPitch = getCharacterGrappleLookPitch()
 	GrappleSettings.InitialDistance = (hitPosition - root.Position).Magnitude
 	GrappleSettings.AnimationTime = 0
 	GrappleSettings.ShotStartedAt = os.clock()
