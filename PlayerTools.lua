@@ -2,13 +2,10 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
-local ContextActionService = game:GetService("ContextActionService")
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
 local VEHICLE_FLY_BIND_NAME = "__PlayerToolsVehicleFly"
-local MAP_VIEWER_BIND_NAME = "__PlayerToolsMapViewer"
-local MAP_BLOCK_ACTION_NAME = "__PlayerToolsMapBlockMovement"
 
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
@@ -136,33 +133,12 @@ local VehicleTeleportSettings = {
 	LastTeleport = 0
 }
 
-local MapViewerSettings = {
-	Enabled = false,
-	MouseUnlocked = false,
-	Viewport = nil,
-	Camera = nil,
-	WorldModel = nil,
-	RenderModel = nil,
-	BoundsMin = nil,
-	BoundsMax = nil,
-	Position = nil,
-	Yaw = 0,
-	Pitch = 0,
-	MoveSpeed = 100,
-	MouseBehavior = nil,
-	MouseIconEnabled = nil,
-	WorldCamera = nil,
-	WorldCameraType = nil,
-	WorldCameraSubject = nil
-}
-
 local InterfaceSettings = {
 	Hidden = false
 }
 
 local stopVehicleFlyRuntime
 local restartVehicleFly
-local stopMapViewerRuntime
 
 local HIGHLIGHT_NAME = "__ProjectESPHighlight"
 local TAG_NAME = "__ProjectESPLabel"
@@ -1999,497 +1975,6 @@ local function setFlingEnabled(value)
 	end)
 end
 
-local MapIgnoredNames = {
-	character = true,
-	characters = true,
-	player = true,
-	players = true,
-	npc = true,
-	npcs = true,
-	vehicle = true,
-	vehicles = true,
-	car = true,
-	cars = true,
-	tool = true,
-	tools = true,
-	effect = true,
-	effects = true,
-	camera = true,
-	cameras = true,
-	debris = true,
-	sound = true,
-	sounds = true,
-	audio = true
-}
-
-local MapRootNames = {
-	map = true,
-	world = true,
-	environment = true,
-	level = true,
-	terrain = true,
-	city = true,
-	island = true,
-	stage = true,
-	arena = true
-}
-
-local function isMapIgnoredAncestor(instance)
-	local current = instance
-
-	while current and current ~= Workspace do
-		if MapIgnoredNames[string.lower(current.Name)] then
-			return true
-		end
-
-		if current:IsA("Model") and current:FindFirstChildOfClass("Humanoid") then
-			return true
-		end
-
-		current = current.Parent
-	end
-
-	return false
-end
-
-local function isMapPartCandidate(part)
-	if not part
-		or not part:IsA("BasePart")
-		or not part.Anchored
-		or part:IsA("Seat")
-		or part:IsA("VehicleSeat")
-		or not part:IsDescendantOf(Workspace) then
-		return false
-	end
-
-	if LocalPlayer.Character and part:IsDescendantOf(LocalPlayer.Character) then
-		return false
-	end
-
-	return not isMapIgnoredAncestor(part.Parent)
-end
-
-local function countMapParts(root)
-	local count = 0
-
-	for _, object in ipairs(root:GetDescendants()) do
-		if isMapPartCandidate(object) then
-			count += 1
-		end
-	end
-
-	return count
-end
-
-local function findMapRoot()
-	local bestRoot = nil
-	local bestScore = 0
-
-	for _, candidate in ipairs(Workspace:GetChildren()) do
-		if (candidate:IsA("Model") or candidate:IsA("Folder"))
-			and not isMapIgnoredAncestor(candidate)
-			and candidate ~= LocalPlayer.Character then
-			local count = countMapParts(candidate)
-
-			if count > 0 then
-				local name = string.lower(candidate.Name)
-				local score = count
-
-				if MapRootNames[name] then
-					score += 1000000
-				elseif string.find(name, "map", 1, true)
-					or string.find(name, "world", 1, true)
-					or string.find(name, "environment", 1, true)
-					or string.find(name, "level", 1, true) then
-					score += 100000
-				end
-
-				if score > bestScore then
-					bestRoot = candidate
-					bestScore = score
-				end
-			end
-		end
-	end
-
-	return bestRoot
-end
-
-local function collectMapParts()
-	local root = findMapRoot()
-	local scanRoot = root or Workspace
-	local parts = {}
-
-	for _, object in ipairs(scanRoot:GetDescendants()) do
-		if isMapPartCandidate(object) then
-			table.insert(parts, object)
-		end
-	end
-
-	return parts
-end
-
-local function expandMapBounds(minimum, maximum, part)
-	local half = part.Size * 0.5
-	local cframe = part.CFrame
-	local right = cframe.RightVector
-	local up = cframe.UpVector
-	local forward = cframe.LookVector
-	local extents = Vector3.new(
-		math.abs(right.X) * half.X + math.abs(up.X) * half.Y + math.abs(forward.X) * half.Z,
-		math.abs(right.Y) * half.X + math.abs(up.Y) * half.Y + math.abs(forward.Y) * half.Z,
-		math.abs(right.Z) * half.X + math.abs(up.Z) * half.Y + math.abs(forward.Z) * half.Z
-	)
-	local low = part.Position - extents
-	local high = part.Position + extents
-
-	if not minimum then
-		return low, high
-	end
-
-	return Vector3.new(
-		math.min(minimum.X, low.X),
-		math.min(minimum.Y, low.Y),
-		math.min(minimum.Z, low.Z)
-	), Vector3.new(
-		math.max(maximum.X, high.X),
-		math.max(maximum.Y, high.Y),
-		math.max(maximum.Z, high.Z)
-	)
-end
-
-local function cloneMapPart(source)
-	local clone = nil
-
-	pcall(function()
-		clone = source:Clone()
-	end)
-
-	if not clone or not clone:IsA("BasePart") then
-		clone = Instance.new("Part")
-		clone.Size = source.Size
-		clone.CFrame = source.CFrame
-		clone.Color = source.Color
-		clone.Material = source.Material
-		clone.Transparency = source.Transparency
-		clone.Reflectance = source.Reflectance
-
-		if source:IsA("Part") then
-			clone.Shape = source.Shape
-		end
-	end
-
-	for _, object in ipairs(clone:GetDescendants()) do
-		if object:IsA("Script")
-			or object:IsA("LocalScript")
-			or object:IsA("ModuleScript")
-			or object:IsA("JointInstance")
-			or object:IsA("Constraint")
-			or object:IsA("Attachment")
-			or object:IsA("BodyMover") then
-			object:Destroy()
-		end
-	end
-
-	clone.Anchored = true
-	clone.CanCollide = false
-	clone.CanTouch = false
-	clone.CanQuery = false
-	clone.Massless = true
-	clone.AssemblyLinearVelocity = Vector3.zero
-	clone.AssemblyAngularVelocity = Vector3.zero
-
-	return clone
-end
-
-local function destroyMapPreview()
-	if MapViewerSettings.WorldModel then
-		pcall(function()
-			MapViewerSettings.WorldModel:Destroy()
-		end)
-	end
-
-	MapViewerSettings.WorldModel = nil
-	MapViewerSettings.RenderModel = nil
-	MapViewerSettings.BoundsMin = nil
-	MapViewerSettings.BoundsMax = nil
-	MapViewerSettings.Position = nil
-end
-
-local function setMapCameraFromBounds()
-	local camera = MapViewerSettings.Camera
-	local minimum = MapViewerSettings.BoundsMin
-	local maximum = MapViewerSettings.BoundsMax
-
-	if not camera or not minimum or not maximum then
-		return false
-	end
-
-	local center = (minimum + maximum) * 0.5
-	local size = maximum - minimum
-	local largestAxis = math.max(size.X, size.Y, size.Z, 50)
-	local distance = math.max(largestAxis * 1.15, 80)
-	local position = center + Vector3.new(distance * 0.65, distance * 0.5, distance * 0.65)
-	local cframe = CFrame.lookAt(position, center)
-
-	MapViewerSettings.Position = position
-	MapViewerSettings.Pitch = math.asin(math.clamp(cframe.LookVector.Y, -1, 1))
-	MapViewerSettings.Yaw = math.atan2(-cframe.LookVector.X, -cframe.LookVector.Z)
-	MapViewerSettings.MoveSpeed = math.clamp(largestAxis * 0.14, 45, 2000)
-	camera.CFrame = cframe
-
-	return true
-end
-
-local function buildMapPreview()
-	local viewport = MapViewerSettings.Viewport
-	local camera = MapViewerSettings.Camera
-
-	if not viewport or not viewport.Parent or not camera then
-		return false
-	end
-
-	destroyMapPreview()
-
-	local sourceParts = collectMapParts()
-
-	if #sourceParts == 0 then
-		return false
-	end
-
-	local worldModel = Instance.new("WorldModel")
-	worldModel.Name = "__PlayerToolsMapWorld"
-	worldModel.Parent = viewport
-
-	local renderModel = Instance.new("Model")
-	renderModel.Name = "__PlayerToolsMapRender"
-	renderModel.Parent = worldModel
-
-	local minimum = nil
-	local maximum = nil
-	local rendered = 0
-
-	for index, source in ipairs(sourceParts) do
-		if source and source.Parent then
-			local clone = cloneMapPart(source)
-
-			if clone then
-				clone.Parent = renderModel
-				minimum, maximum = expandMapBounds(minimum, maximum, source)
-				rendered += 1
-			end
-		end
-
-		if index % 125 == 0 then
-			task.wait()
-		end
-	end
-
-	if rendered == 0 or not minimum or not maximum then
-		worldModel:Destroy()
-		return false
-	end
-
-	MapViewerSettings.WorldModel = worldModel
-	MapViewerSettings.RenderModel = renderModel
-	MapViewerSettings.BoundsMin = minimum
-	MapViewerSettings.BoundsMax = maximum
-	viewport.CurrentCamera = camera
-
-	return setMapCameraFromBounds()
-end
-
-local function getMapMovementDirection()
-	local camera = MapViewerSettings.Camera
-
-	if not camera then
-		return Vector3.zero
-	end
-
-	local direction = Vector3.zero
-	local look = camera.CFrame.LookVector
-	local right = camera.CFrame.RightVector
-
-	if UserInputService:IsKeyDown(Enum.KeyCode.W)
-		or UserInputService:IsKeyDown(Enum.KeyCode.Up) then
-		direction += look
-	end
-
-	if UserInputService:IsKeyDown(Enum.KeyCode.S)
-		or UserInputService:IsKeyDown(Enum.KeyCode.Down) then
-		direction -= look
-	end
-
-	if UserInputService:IsKeyDown(Enum.KeyCode.D)
-		or UserInputService:IsKeyDown(Enum.KeyCode.Right) then
-		direction += right
-	end
-
-	if UserInputService:IsKeyDown(Enum.KeyCode.A)
-		or UserInputService:IsKeyDown(Enum.KeyCode.Left) then
-		direction -= right
-	end
-
-	if direction.Magnitude > 0.001 then
-		return direction.Unit
-	end
-
-	return Vector3.zero
-end
-
-local function updateMapViewer(deltaTime)
-	if not running
-		or not MapViewerSettings.Enabled
-		or not MapViewerSettings.Camera
-		or not MapViewerSettings.Position then
-		return
-	end
-
-	local humanoid = MovementSettings.Humanoid
-
-	if humanoid and humanoid.Parent then
-		humanoid:Move(Vector3.zero, false)
-	end
-
-	local direction = getMapMovementDirection()
-
-	if direction.Magnitude > 0 then
-		MapViewerSettings.Position += direction
-			* MapViewerSettings.MoveSpeed
-			* math.max(tonumber(deltaTime) or 0, 0)
-	end
-
-	MapViewerSettings.Camera.CFrame = CFrame.new(MapViewerSettings.Position)
-		* CFrame.fromOrientation(MapViewerSettings.Pitch, MapViewerSettings.Yaw, 0)
-end
-
-local function sinkMapMovement()
-	return Enum.ContextActionResult.Sink
-end
-
-local function setMapMouseUnlocked(value)
-	if not MapViewerSettings.Enabled then
-		return
-	end
-
-	MapViewerSettings.MouseUnlocked = value and true or false
-	UserInputService.MouseBehavior = MapViewerSettings.MouseUnlocked
-		and Enum.MouseBehavior.Default
-		or Enum.MouseBehavior.LockCenter
-	UserInputService.MouseIconEnabled = MapViewerSettings.MouseUnlocked
-end
-
-stopMapViewerRuntime = function()
-	pcall(function()
-		RunService:UnbindFromRenderStep(MAP_VIEWER_BIND_NAME)
-	end)
-
-	pcall(function()
-		ContextActionService:UnbindAction(MAP_BLOCK_ACTION_NAME)
-	end)
-
-	if MapViewerSettings.WorldCamera
-		and MapViewerSettings.WorldCamera.Parent
-		and MapViewerSettings.WorldCameraType then
-		pcall(function()
-			MapViewerSettings.WorldCamera.CameraType = MapViewerSettings.WorldCameraType
-
-			if MapViewerSettings.WorldCameraSubject then
-				MapViewerSettings.WorldCamera.CameraSubject = MapViewerSettings.WorldCameraSubject
-			end
-		end)
-	end
-
-	if MapViewerSettings.MouseBehavior then
-		UserInputService.MouseBehavior = MapViewerSettings.MouseBehavior
-	end
-
-	if MapViewerSettings.MouseIconEnabled ~= nil then
-		UserInputService.MouseIconEnabled = MapViewerSettings.MouseIconEnabled
-	end
-
-	MapViewerSettings.MouseUnlocked = false
-	MapViewerSettings.MouseBehavior = nil
-	MapViewerSettings.MouseIconEnabled = nil
-	MapViewerSettings.WorldCamera = nil
-	MapViewerSettings.WorldCameraType = nil
-	MapViewerSettings.WorldCameraSubject = nil
-end
-
-local function startMapViewerRuntime()
-	if not MapViewerSettings.RenderModel
-		or not MapViewerSettings.RenderModel.Parent then
-		if not buildMapPreview() then
-			return false
-		end
-	end
-
-	local worldCamera = Workspace.CurrentCamera
-
-	if worldCamera then
-		MapViewerSettings.WorldCamera = worldCamera
-		MapViewerSettings.WorldCameraType = worldCamera.CameraType
-		MapViewerSettings.WorldCameraSubject = worldCamera.CameraSubject
-		worldCamera.CameraType = Enum.CameraType.Scriptable
-	end
-
-	MapViewerSettings.MouseBehavior = UserInputService.MouseBehavior
-	MapViewerSettings.MouseIconEnabled = UserInputService.MouseIconEnabled
-	MapViewerSettings.MouseUnlocked = false
-	setMapMouseUnlocked(false)
-
-	ContextActionService:BindActionAtPriority(
-		MAP_BLOCK_ACTION_NAME,
-		sinkMapMovement,
-		false,
-		Enum.ContextActionPriority.High.Value + 100,
-		Enum.KeyCode.W,
-		Enum.KeyCode.A,
-		Enum.KeyCode.S,
-		Enum.KeyCode.D,
-		Enum.KeyCode.Up,
-		Enum.KeyCode.Down,
-		Enum.KeyCode.Left,
-		Enum.KeyCode.Right,
-		Enum.KeyCode.Space,
-		Enum.KeyCode.LeftControl,
-		Enum.KeyCode.RightControl,
-		Enum.KeyCode.P
-	)
-
-	pcall(function()
-		RunService:UnbindFromRenderStep(MAP_VIEWER_BIND_NAME)
-	end)
-
-	RunService:BindToRenderStep(
-		MAP_VIEWER_BIND_NAME,
-		Enum.RenderPriority.Camera.Value + 4,
-		updateMapViewer
-	)
-
-	return true
-end
-
-local function setMapViewerEnabled(value)
-	local enabled = value and true or false
-
-	if MapViewerSettings.Enabled == enabled then
-		return
-	end
-
-	MapViewerSettings.Enabled = enabled
-
-	if not enabled then
-		stopMapViewerRuntime()
-		return
-	end
-
-	if not startMapViewerRuntime() then
-		MapViewerSettings.Enabled = false
-		stopMapViewerRuntime()
-	end
-end
-
 local function cleanup()
 	if not running then
 		return
@@ -2506,9 +1991,6 @@ local function cleanup()
 	VehicleFlySettings.Enabled = false
 	stopVehicleFlyRuntime()
 	VehicleTeleportSettings.Enabled = false
-	MapViewerSettings.Enabled = false
-	stopMapViewerRuntime()
-	destroyMapPreview()
 	clearVehicleFlipAssist()
 	AimlockSettings.Holding = false
 	AimlockSettings.TargetPlayer = nil
@@ -2526,10 +2008,6 @@ local function cleanup()
 
 	pcall(function()
 		RunService:UnbindFromRenderStep(VEHICLE_FLY_BIND_NAME)
-	end)
-
-	pcall(function()
-		RunService:UnbindFromRenderStep(MAP_VIEWER_BIND_NAME)
 	end)
 
 	clearSpeedWatcher()
@@ -2583,69 +2061,6 @@ local VehicleMovementTab = Window:AddTab({
 	Name = "Vehicle Movment",
 	Icon = "settings"
 })
-
-local MapTab = Window:AddTab({
-	Name = "Map",
-	Icon = "image"
-})
-
-local MapSection = MapTab:AddSection({
-	Name = "3D Map"
-})
-
-local mapViewerCard = Instance.new("Frame")
-mapViewerCard.Name = "MapViewer"
-mapViewerCard.Size = UDim2.new(1, 0, 0, 286)
-mapViewerCard.LayoutOrder = -10
-mapViewerCard.BackgroundColor3 = Google.Theme.CardAlt
-mapViewerCard.BorderSizePixel = 0
-mapViewerCard.ClipsDescendants = true
-mapViewerCard.Parent = MapSection.Content
-addCorner(mapViewerCard, 10)
-addStroke(mapViewerCard, Google.Theme.Border, 0.2)
-
-local mapViewport = Instance.new("ViewportFrame")
-mapViewport.Name = "MapViewport"
-mapViewport.Size = UDim2.new(1, -16, 1, -16)
-mapViewport.Position = UDim2.fromOffset(8, 8)
-mapViewport.BackgroundColor3 = Google.Theme.CardAlt
-mapViewport.BorderSizePixel = 0
-mapViewport.Ambient = Color3.fromRGB(170, 170, 170)
-mapViewport.LightColor = Color3.fromRGB(255, 255, 255)
-mapViewport.LightDirection = Vector3.new(-1, -1, -0.5)
-mapViewport.Parent = mapViewerCard
-addCorner(mapViewport, 8)
-
-local mapCamera = Instance.new("Camera")
-mapCamera.Name = "MapCamera"
-mapCamera.FieldOfView = 70
-mapCamera.Parent = mapViewport
-mapViewport.CurrentCamera = mapCamera
-MapViewerSettings.Viewport = mapViewport
-MapViewerSettings.Camera = mapCamera
-
-local mapViewerToggle = MapSection:AddToggle({
-	Name = "Enable Map View",
-	Default = false,
-	Callback = function(value)
-		setMapViewerEnabled(value)
-	end
-})
-mapViewerToggle.Instance.LayoutOrder = 1
-
-local mapHint = Instance.new("TextLabel")
-mapHint.Name = "MapComment"
-mapHint.Size = UDim2.new(1, 0, 0, 18)
-mapHint.LayoutOrder = 2
-mapHint.BackgroundTransparency = 1
-mapHint.BorderSizePixel = 0
-mapHint.Font = Enum.Font.GothamMedium
-mapHint.Text = "P toggles mouse cursor"
-mapHint.TextColor3 = Google.Theme.Muted
-mapHint.TextSize = 12
-mapHint.TextXAlignment = Enum.TextXAlignment.Left
-mapHint.TextYAlignment = Enum.TextYAlignment.Center
-mapHint.Parent = MapSection.Content
 
 local MainSection = ESPTab:AddSection({
 	Name = "Player ESP",
@@ -2933,9 +2348,6 @@ local function applyPickerTheme()
 	pickerTitle.TextColor3 = Google.Theme.Text
 	Google.SetIconColor(paletteIcon, Google.Theme.Primary)
 	colorReadout.TextColor3 = Google.Theme.Muted
-	mapViewerCard.BackgroundColor3 = Google.Theme.CardAlt
-	mapViewport.BackgroundColor3 = Google.Theme.CardAlt
-	mapHint.TextColor3 = Google.Theme.Muted
 	colorPreviewStroke.Color = Google.Theme.Border
 	colorSquareStroke.Color = Google.Theme.Border
 	hueBarStroke.Color = Google.Theme.Border
@@ -3301,16 +2713,6 @@ track(UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
 		return
 	end
 
-	if MapViewerSettings.Enabled and input.KeyCode == Enum.KeyCode.P then
-		setMapMouseUnlocked(not MapViewerSettings.MouseUnlocked)
-		return
-	end
-
-	if MapViewerSettings.Enabled and input.KeyCode == Enum.KeyCode.Escape then
-		setMapViewerEnabled(false)
-		return
-	end
-
 	if gameProcessedEvent or UserInputService:GetFocusedTextBox() then
 		return
 	end
@@ -3331,18 +2733,6 @@ track(UserInputService.InputEnded:Connect(function(input)
 	end
 end))
 
-track(UserInputService.InputChanged:Connect(function(input)
-	if MapViewerSettings.Enabled
-		and not MapViewerSettings.MouseUnlocked
-		and input.UserInputType == Enum.UserInputType.MouseMovement then
-		MapViewerSettings.Yaw -= input.Delta.X * 0.003
-		MapViewerSettings.Pitch = math.clamp(
-			MapViewerSettings.Pitch - input.Delta.Y * 0.003,
-			-math.rad(85),
-			math.rad(85)
-		)
-	end
-end))
 
 track(Mouse.Button1Down:Connect(function()
 	if not running
@@ -3418,7 +2808,6 @@ local function queueLayoutRefresh()
 			VehicleFlySection:Refresh()
 			VehicleJumpSection:Refresh()
 			VehicleTeleportSection:Refresh()
-			MapSection:Refresh()
 		end
 	end)
 end
