@@ -139,7 +139,14 @@ local VehicleJumpSettings = {
 local VehicleTeleportSettings = {
 	Enabled = false,
 	Cooldown = 0.12,
-	LastTeleport = 0
+	LastTeleport = 0,
+	ReinforceDuration = 1.1,
+	ReinforceConnection = nil,
+	ReinforceToken = 0,
+	ReinforceRoot = nil,
+	ReinforceSeat = nil,
+	ReinforceParts = nil,
+	ReinforceOffsets = nil
 }
 
 local InterfaceSettings = {
@@ -739,11 +746,22 @@ local function getVehicleUprightCFrame(root, seat)
 	return CFrame.lookAt(root.Position, root.Position + heading, Vector3.yAxis)
 end
 
+local function clearVehicleTeleportReinforcement()
+	VehicleTeleportSettings.ReinforceToken += 1
+	disconnect(VehicleTeleportSettings.ReinforceConnection)
+	VehicleTeleportSettings.ReinforceConnection = nil
+	VehicleTeleportSettings.ReinforceRoot = nil
+	VehicleTeleportSettings.ReinforceSeat = nil
+	VehicleTeleportSettings.ReinforceParts = nil
+	VehicleTeleportSettings.ReinforceOffsets = nil
+end
+
 local function restoreVehicleSpeed()
 	clearVehicleSpeedWatch()
 	clearVehicleBoost()
 	clearVehicleJumpStabilizer()
 	clearVehicleFlipAssist()
+	clearVehicleTeleportReinforcement()
 
 	if stopVehicleFlyRuntime then
 		stopVehicleFlyRuntime()
@@ -1245,6 +1263,114 @@ local function getVehicleTeleportTarget(screenPosition)
 	return result and result.Position or nil
 end
 
+local function collectVehicleTeleportParts(root, model)
+	local parts = {}
+	local seen = {}
+
+	local function addPart(part)
+		if part
+			and part:IsA("BasePart")
+			and part.Parent
+			and not seen[part] then
+			seen[part] = true
+			table.insert(parts, part)
+		end
+	end
+
+	addPart(root)
+
+	pcall(function()
+		for _, part in ipairs(root:GetConnectedParts(true)) do
+			addPart(part)
+		end
+	end)
+
+	if model and model.Parent then
+		for _, object in ipairs(model:GetDescendants()) do
+			if object:IsA("BasePart") then
+				addPart(object)
+			end
+		end
+	end
+
+	return parts
+end
+
+local function captureVehicleTeleportOffsets(root, parts)
+	local offsets = {}
+
+	for _, part in ipairs(parts) do
+		if part and part.Parent then
+			offsets[part] = root.CFrame:ToObjectSpace(part.CFrame)
+		end
+	end
+
+	return offsets
+end
+
+local function applyVehicleTeleportState(root, desiredRoot, parts, offsets)
+	if not root or not root.Parent then
+		return
+	end
+
+	for _, part in ipairs(parts) do
+		local offset = offsets[part]
+
+		if part
+			and part.Parent
+			and offset then
+			pcall(function()
+				part.CFrame = desiredRoot * offset
+				part.AssemblyLinearVelocity = Vector3.zero
+				part.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end
+	end
+
+	pcall(function()
+		root.CFrame = desiredRoot
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+	end)
+end
+
+local function startVehicleTeleportReinforcement(root, seat, desiredRoot, parts, offsets)
+	clearVehicleTeleportReinforcement()
+
+	VehicleTeleportSettings.ReinforceRoot = root
+	VehicleTeleportSettings.ReinforceSeat = seat
+	VehicleTeleportSettings.ReinforceParts = parts
+	VehicleTeleportSettings.ReinforceOffsets = offsets
+
+	local token = VehicleTeleportSettings.ReinforceToken
+	local expiresAt = os.clock() + VehicleTeleportSettings.ReinforceDuration
+
+	VehicleTeleportSettings.ReinforceConnection = RunService.Heartbeat:Connect(function()
+		local humanoid = MovementSettings.Humanoid
+
+		if not running
+			or not VehicleTeleportSettings.Enabled
+			or token ~= VehicleTeleportSettings.ReinforceToken
+			or os.clock() >= expiresAt
+			or not root
+			or not root.Parent
+			or not seat
+			or not seat.Parent
+			or not humanoid
+			or not humanoid.Parent
+			or VehicleSettings.CurrentRoot ~= root
+			or VehicleSettings.CurrentSeat ~= seat
+			or seat.Occupant ~= humanoid then
+			clearVehicleTeleportReinforcement()
+			return
+		end
+
+		applyVehicleTeleportState(root, desiredRoot, parts, offsets)
+	end)
+
+	applyVehicleTeleportState(root, desiredRoot, parts, offsets)
+end
+
 local function teleportVehicleToMouse(screenPosition)
 	if not canVehicleTeleport() then
 		return
@@ -1280,17 +1406,20 @@ local function teleportVehicleToMouse(screenPosition)
 	local upright = getVehicleUprightCFrame(root, seat)
 	local desiredRoot = CFrame.new(destination + Vector3.yAxis * lift)
 		* (upright - upright.Position)
+	local parts = collectVehicleTeleportParts(root, model)
+	local offsets = captureVehicleTeleportOffsets(root, parts)
 
 	clearVehicleFlipAssist()
-
-	root.CFrame = desiredRoot
-	root.AssemblyLinearVelocity = Vector3.zero
-	root.AssemblyAngularVelocity = Vector3.zero
+	startVehicleTeleportReinforcement(root, seat, desiredRoot, parts, offsets)
 	VehicleTeleportSettings.LastTeleport = now
 end
 
 local function setVehicleTeleportEnabled(value)
 	VehicleTeleportSettings.Enabled = value and true or false
+
+	if not VehicleTeleportSettings.Enabled then
+		clearVehicleTeleportReinforcement()
+	end
 end
 
 local function startVehicleBoost()
@@ -2147,6 +2276,7 @@ local function cleanup()
 	VehicleFlySettings.Enabled = false
 	stopVehicleFlyRuntime()
 	VehicleTeleportSettings.Enabled = false
+	clearVehicleTeleportReinforcement()
 	clearVehicleFlipAssist()
 	AimlockSettings.Holding = false
 	AimlockSettings.TargetPlayer = nil
