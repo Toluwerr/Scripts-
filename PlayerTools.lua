@@ -6,6 +6,7 @@ local Workspace = game:GetService("Workspace")
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
 local VEHICLE_FLY_BIND_NAME = "__PlayerToolsVehicleFly"
+local GRAPPLE_BIND_NAME = "__PlayerToolsGrapple"
 
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
@@ -88,6 +89,25 @@ local FlySettings = {
 	OriginalAnimateDisabled = nil
 }
 
+local GrappleSettings = {
+	Enabled = false,
+	Holding = false,
+	Active = false,
+	Root = nil,
+	Humanoid = nil,
+	Target = nil,
+	RootAttachment = nil,
+	TargetAttachment = nil,
+	AlignPosition = nil,
+	BodyGyro = nil,
+	VisualConnection = nil,
+	VisualFolder = nil,
+	Segments = {},
+	OriginalAutoRotate = nil,
+	OriginalPlatformStand = nil,
+	JointTransforms = {}
+}
+
 local VehicleSettings = {
 	Speed = 60,
 	SteeringStrength = 8,
@@ -133,6 +153,7 @@ local VehicleTeleportSettings = {
 
 local stopVehicleFlyRuntime
 local restartVehicleFly
+local clearCharacterGrapple
 
 local HIGHLIGHT_NAME = "__ProjectESPHighlight"
 local TAG_NAME = "__ProjectESPLabel"
@@ -1175,6 +1196,10 @@ local function bindVehicleHumanoid(humanoid)
 end
 
 local function bindMovementCharacter(character)
+	if clearCharacterGrapple then
+		clearCharacterGrapple()
+	end
+
 	clearSpeedWatcher()
 	MovementSettings.Humanoid = nil
 	MovementSettings.OriginalSpeed = nil
@@ -1560,12 +1585,440 @@ local function setFlyEnabled(value)
 
 	FlySettings.Enabled = enabled
 
+	if enabled and clearCharacterGrapple then
+		GrappleSettings.Holding = false
+		clearCharacterGrapple()
+	end
+
 	if not enabled then
 		stopFlyRuntime()
 		return
 	end
 
 	startFlyForCharacter(LocalPlayer.Character)
+end
+
+local function disconnectCharacterGrappleVisual()
+	disconnect(GrappleSettings.VisualConnection)
+	GrappleSettings.VisualConnection = nil
+end
+
+local function clearCharacterGrappleSegments()
+	for _, segment in ipairs(GrappleSettings.Segments) do
+		pcall(function()
+			segment:Destroy()
+		end)
+	end
+
+	table.clear(GrappleSettings.Segments)
+
+	if GrappleSettings.VisualFolder then
+		pcall(function()
+			GrappleSettings.VisualFolder:Destroy()
+		end)
+	end
+
+	GrappleSettings.VisualFolder = nil
+end
+
+local function restoreCharacterGrapplePose()
+	for joint, transform in pairs(GrappleSettings.JointTransforms) do
+		if joint and joint.Parent then
+			pcall(function()
+				joint.Transform = transform
+			end)
+		end
+	end
+
+	table.clear(GrappleSettings.JointTransforms)
+end
+
+local function captureCharacterGrapplePose(character)
+	table.clear(GrappleSettings.JointTransforms)
+
+	for _, object in ipairs(character:GetDescendants()) do
+		if object:IsA("Motor6D") then
+			GrappleSettings.JointTransforms[object] = object.Transform
+		end
+	end
+end
+
+local function destroyCharacterGrappleObjects()
+	if GrappleSettings.AlignPosition then
+		pcall(function()
+			GrappleSettings.AlignPosition:Destroy()
+		end)
+	end
+
+	if GrappleSettings.BodyGyro then
+		pcall(function()
+			GrappleSettings.BodyGyro:Destroy()
+		end)
+	end
+
+	if GrappleSettings.RootAttachment then
+		pcall(function()
+			GrappleSettings.RootAttachment:Destroy()
+		end)
+	end
+
+	if GrappleSettings.TargetAttachment then
+		pcall(function()
+			GrappleSettings.TargetAttachment:Destroy()
+		end)
+	end
+
+	GrappleSettings.AlignPosition = nil
+	GrappleSettings.BodyGyro = nil
+	GrappleSettings.RootAttachment = nil
+	GrappleSettings.TargetAttachment = nil
+end
+
+clearCharacterGrapple = function()
+	pcall(function()
+		RunService:UnbindFromRenderStep(GRAPPLE_BIND_NAME)
+	end)
+
+	disconnectCharacterGrappleVisual()
+	restoreCharacterGrapplePose()
+
+	local root = GrappleSettings.Root
+	local humanoid = GrappleSettings.Humanoid
+	local carriedVelocity = root and root.Parent and root.AssemblyLinearVelocity or Vector3.zero
+
+	destroyCharacterGrappleObjects()
+	clearCharacterGrappleSegments()
+
+	if root and root.Parent then
+		root.AssemblyLinearVelocity = carriedVelocity * 0.25
+		root.AssemblyAngularVelocity = Vector3.zero
+	end
+
+	if humanoid and humanoid.Parent then
+		if GrappleSettings.OriginalAutoRotate ~= nil then
+			humanoid.AutoRotate = GrappleSettings.OriginalAutoRotate
+		end
+
+		if GrappleSettings.OriginalPlatformStand ~= nil then
+			humanoid.PlatformStand = GrappleSettings.OriginalPlatformStand
+		end
+
+		if humanoid.Health > 0 then
+			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end
+	end
+
+	GrappleSettings.Active = false
+	GrappleSettings.Root = nil
+	GrappleSettings.Humanoid = nil
+	GrappleSettings.Target = nil
+	GrappleSettings.OriginalAutoRotate = nil
+	GrappleSettings.OriginalPlatformStand = nil
+end
+
+local function isCharacterGrappleValid()
+	local root = GrappleSettings.Root
+	local humanoid = GrappleSettings.Humanoid
+	local target = GrappleSettings.Target
+	local targetAttachment = GrappleSettings.TargetAttachment
+
+	return running
+		and GrappleSettings.Enabled
+		and GrappleSettings.Holding
+		and GrappleSettings.Active
+		and not FlySettings.Enabled
+		and root
+		and root.Parent
+		and humanoid
+		and humanoid.Parent
+		and humanoid.Health > 0
+		and humanoid:GetState() ~= Enum.HumanoidStateType.Seated
+		and target
+		and target.Parent
+		and targetAttachment
+		and targetAttachment.Parent
+end
+
+local function getCharacterGrappleTarget()
+	local character = LocalPlayer.Character
+	local root = getRoot(character)
+	local target = Mouse.Target
+	local hitPosition = Mouse.Hit and Mouse.Hit.Position or nil
+
+	if not target or not target:IsA("BasePart") or not hitPosition then
+		local camera = Workspace.CurrentCamera
+
+		if not camera then
+			return nil, nil
+		end
+
+		local pointer = UserInputService:GetMouseLocation()
+		local ray = camera:ViewportPointToRay(pointer.X, pointer.Y)
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = {character}
+		params.IgnoreWater = false
+
+		local result = Workspace:Raycast(ray.Origin, ray.Direction * 5000, params)
+
+		if not result or not result.Instance or not result.Instance:IsA("BasePart") then
+			return nil, nil
+		end
+
+		target = result.Instance
+		hitPosition = result.Position
+	end
+
+	if not root
+		or not root.Parent
+		or (character and target:IsDescendantOf(character))
+		or target.AssemblyRootPart == root.AssemblyRootPart then
+		return nil, nil
+	end
+
+	return target, hitPosition
+end
+
+local function ensureCharacterGrappleSegments(count)
+	local folder = GrappleSettings.VisualFolder
+
+	if not folder or not folder.Parent then
+		folder = Instance.new("Folder")
+		folder.Name = "__PlayerToolsGrappleSegments"
+		folder.Parent = Workspace
+		GrappleSettings.VisualFolder = folder
+	end
+
+	while #GrappleSettings.Segments < count do
+		local segment = Instance.new("Part")
+		segment.Name = "__PlayerToolsGrappleSegment"
+		segment.Anchored = true
+		segment.CanCollide = false
+		segment.CanQuery = false
+		segment.CanTouch = false
+		segment.CastShadow = false
+		segment.Material = Enum.Material.SmoothPlastic
+		segment.Color = Color3.fromRGB(235, 235, 235)
+		segment.Shape = Enum.PartType.Cylinder
+		segment.Parent = folder
+		table.insert(GrappleSettings.Segments, segment)
+	end
+
+	while #GrappleSettings.Segments > count do
+		local segment = table.remove(GrappleSettings.Segments)
+
+		pcall(function()
+			segment:Destroy()
+		end)
+	end
+end
+
+local function updateCharacterGrappleSegments()
+	if not isCharacterGrappleValid() then
+		return
+	end
+
+	local root = GrappleSettings.Root
+	local targetAttachment = GrappleSettings.TargetAttachment
+	local startPosition = root.Position + Vector3.new(0, 0.55, 0)
+	local endPosition = targetAttachment.WorldPosition
+	local distance = (endPosition - startPosition).Magnitude
+
+	if distance < 0.05 then
+		clearCharacterGrappleSegments()
+		return
+	end
+
+	local count = math.clamp(math.ceil(distance / 3.5), 5, 36)
+	ensureCharacterGrappleSegments(count)
+
+	local direction = (endPosition - startPosition).Unit
+	local gap = 0.3
+	local segmentLength = math.max((distance / count) - gap, 0.16)
+
+	for index, segment in ipairs(GrappleSettings.Segments) do
+		local middle = startPosition + direction * ((index - 0.5) / count * distance)
+		segment.Size = Vector3.new(0.12, segmentLength, 0.12)
+		segment.CFrame = CFrame.lookAt(middle, middle + direction) * CFrame.Angles(math.rad(90), 0, 0)
+		segment.Transparency = 0.08 + (index % 2) * 0.08
+	end
+end
+
+local function updateCharacterGrapplePose()
+	if not isCharacterGrappleValid() then
+		clearCharacterGrapple()
+		return
+	end
+
+	local root = GrappleSettings.Root
+	local targetPosition = GrappleSettings.TargetAttachment.WorldPosition
+	local direction = targetPosition - root.Position
+
+	if direction.Magnitude < 0.01 then
+		return
+	end
+
+	local unitDirection = direction.Unit
+	local relativeDirection = root.CFrame:VectorToObjectSpace(unitDirection)
+	local pitch = math.clamp(relativeDirection.Y, -0.65, 0.65)
+	local swing = math.sin(os.clock() * 14) * math.rad(7)
+
+	for joint in pairs(GrappleSettings.JointTransforms) do
+		if joint and joint.Parent then
+			local name = joint.Name:gsub("%s+", ""):lower()
+			local transform = nil
+
+			if name == "rightshoulder" then
+				transform = CFrame.Angles(math.rad(-68) + pitch * 0.45 + swing, 0, math.rad(18))
+			elseif name == "leftshoulder" then
+				transform = CFrame.Angles(math.rad(-68) + pitch * 0.45 - swing, 0, math.rad(-18))
+			elseif name == "right hip" or name == "righthip" then
+				transform = CFrame.Angles(math.rad(24) - pitch * 0.3 - swing * 0.55, 0, 0)
+			elseif name == "left hip" or name == "lefthip" then
+				transform = CFrame.Angles(math.rad(24) - pitch * 0.3 + swing * 0.55, 0, 0)
+			elseif name == "rootjoint" or name == "root" or name == "waist" then
+				transform = CFrame.Angles(math.rad(-14) + pitch * 0.65, 0, 0)
+			end
+
+			if transform then
+				pcall(function()
+					joint.Transform = transform
+				end)
+			end
+		end
+	end
+end
+
+local function updateCharacterGrappleOrientation()
+	if not isCharacterGrappleValid() then
+		return
+	end
+
+	local root = GrappleSettings.Root
+	local bodyGyro = GrappleSettings.BodyGyro
+	local targetAttachment = GrappleSettings.TargetAttachment
+
+	if not bodyGyro or not bodyGyro.Parent then
+		return
+	end
+
+	local targetPosition = targetAttachment.WorldPosition
+	local lookDirection = targetPosition - root.Position
+
+	if lookDirection.Magnitude > 0.01 then
+		bodyGyro.CFrame = CFrame.lookAt(root.Position, targetPosition, Vector3.yAxis)
+	end
+end
+
+local function updateCharacterGrappleFrame()
+	updateCharacterGrappleOrientation()
+	updateCharacterGrapplePose()
+end
+
+local function beginCharacterGrapple()
+	if not running
+		or not GrappleSettings.Enabled
+		or not GrappleSettings.Holding
+		or FlySettings.Enabled then
+		return
+	end
+
+	local character = LocalPlayer.Character
+	local humanoid = MovementSettings.Humanoid
+	local root = getRoot(character)
+
+	if not humanoid
+		or not humanoid.Parent
+		or not root
+		or not root.Parent
+		or humanoid.Health <= 0
+		or humanoid:GetState() == Enum.HumanoidStateType.Seated then
+		return
+	end
+
+	local target, hitPosition = getCharacterGrappleTarget()
+
+	if not target or not hitPosition then
+		return
+	end
+
+	clearCharacterGrapple()
+
+	local rootAttachment = Instance.new("Attachment")
+	rootAttachment.Name = "__PlayerToolsGrappleRoot"
+	rootAttachment.Position = Vector3.new(0, 0.55, 0)
+	rootAttachment.Parent = root
+
+	local targetAttachment = Instance.new("Attachment")
+	targetAttachment.Name = "__PlayerToolsGrappleTarget"
+	targetAttachment.Position = target.CFrame:PointToObjectSpace(hitPosition)
+	targetAttachment.Parent = target
+
+	local alignPosition = Instance.new("AlignPosition")
+	alignPosition.Name = "__PlayerToolsGrapplePull"
+	alignPosition.Attachment0 = rootAttachment
+	alignPosition.Attachment1 = targetAttachment
+	alignPosition.ApplyAtCenterOfMass = true
+	alignPosition.ReactionForceEnabled = false
+	alignPosition.RigidityEnabled = false
+	alignPosition.MaxForce = math.max(root.AssemblyMass * 15000, 180000)
+	alignPosition.MaxVelocity = 140
+	alignPosition.Responsiveness = 40
+	alignPosition.Parent = root
+
+	local bodyGyro = Instance.new("BodyGyro")
+	bodyGyro.Name = "__PlayerToolsGrappleOrientation"
+	bodyGyro.MaxTorque = Vector3.new(1e7, 1e7, 1e7)
+	bodyGyro.P = 32000
+	bodyGyro.D = 1800
+	bodyGyro.Parent = root
+
+	GrappleSettings.Active = true
+	GrappleSettings.Root = root
+	GrappleSettings.Humanoid = humanoid
+	GrappleSettings.Target = target
+	GrappleSettings.RootAttachment = rootAttachment
+	GrappleSettings.TargetAttachment = targetAttachment
+	GrappleSettings.AlignPosition = alignPosition
+	GrappleSettings.BodyGyro = bodyGyro
+	GrappleSettings.OriginalAutoRotate = humanoid.AutoRotate
+	GrappleSettings.OriginalPlatformStand = humanoid.PlatformStand
+
+	humanoid.AutoRotate = false
+	humanoid.PlatformStand = true
+	humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+	captureCharacterGrapplePose(character)
+
+	GrappleSettings.VisualConnection = RunService.Heartbeat:Connect(function()
+		if not isCharacterGrappleValid() then
+			clearCharacterGrapple()
+			return
+		end
+
+		updateCharacterGrappleSegments()
+	end)
+
+	updateCharacterGrappleSegments()
+	updateCharacterGrappleFrame()
+
+	pcall(function()
+		RunService:UnbindFromRenderStep(GRAPPLE_BIND_NAME)
+	end)
+
+	RunService:BindToRenderStep(
+		GRAPPLE_BIND_NAME,
+		Enum.RenderPriority.Character.Value + 3,
+		updateCharacterGrappleFrame
+	)
+end
+
+local function setCharacterGrappleEnabled(value)
+	GrappleSettings.Enabled = value and true or false
+
+	if not GrappleSettings.Enabled then
+		GrappleSettings.Holding = false
+		clearCharacterGrapple()
+	end
 end
 
 local function destroyVehicleFlyBodyMovers()
@@ -1949,6 +2402,9 @@ local function cleanup()
 	disableAntiFling()
 	FlySettings.Enabled = false
 	stopFlyRuntime()
+	GrappleSettings.Enabled = false
+	GrappleSettings.Holding = false
+	clearCharacterGrapple()
 	VehicleFlySettings.Enabled = false
 	stopVehicleFlyRuntime()
 	VehicleTeleportSettings.Enabled = false
@@ -1965,6 +2421,10 @@ local function cleanup()
 
 	pcall(function()
 		RunService:UnbindFromRenderStep(FLY_BIND_NAME)
+	end)
+
+	pcall(function()
+		RunService:UnbindFromRenderStep(GRAPPLE_BIND_NAME)
 	end)
 
 	pcall(function()
@@ -2484,6 +2944,19 @@ local flySpeedSlider = FlySection:AddSlider({
 })
 flySpeedSlider.Instance.LayoutOrder = 2
 
+local GrappleSection = MovementTab:AddSection({
+	Name = "Grapple",
+})
+
+local grappleToggle = GrappleSection:AddToggle({
+	Name = "Enable Grapple",
+	Default = false,
+	Callback = function(value)
+		setCharacterGrappleEnabled(value)
+	end
+})
+grappleToggle.Instance.LayoutOrder = 1
+
 local AimlockSection = MovementTab:AddSection({
 	Name = "Aimlock",
 })
@@ -2667,12 +3140,24 @@ track(UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
 		return
 	end
 
+	if input.KeyCode == Enum.KeyCode.T then
+		GrappleSettings.Holding = true
+		beginCharacterGrapple()
+		return
+	end
+
 	if input.UserInputType == Enum.UserInputType.MouseButton2 then
 		beginAimlock()
 	end
 end))
 
 track(UserInputService.InputEnded:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.T then
+		GrappleSettings.Holding = false
+		clearCharacterGrapple()
+		return
+	end
+
 	if input.UserInputType == Enum.UserInputType.MouseButton2 then
 		endAimlock()
 	end
@@ -2746,6 +3231,7 @@ local function queueLayoutRefresh()
 			StyleSection:Refresh()
 			MovementSection:Refresh()
 			FlySection:Refresh()
+			GrappleSection:Refresh()
 			AimlockSection:Refresh()
 			FlingSection:Refresh()
 			VehicleSection:Refresh()
