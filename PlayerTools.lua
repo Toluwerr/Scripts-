@@ -2211,7 +2211,6 @@ local function updateCharacterGrapplePose(deltaTime)
 	deltaTime = math.max(tonumber(deltaTime) or (1 / 60), 0)
 	GrappleSettings.AnimationTime += deltaTime
 
-	local pullDirection = direction.Unit
 	local speedRatio = math.clamp(
 		GrappleSettings.CurrentSpeed / math.max(GrappleSettings.Speed, 1),
 		0,
@@ -2224,58 +2223,49 @@ local function updateCharacterGrapplePose(deltaTime)
 		1
 	)
 	local shotEase = shotProgress * shotProgress * (3 - 2 * shotProgress)
-	local cycle = GrappleSettings.AnimationTime * (5 + speedRatio * 4)
-	local legMotion = math.sin(cycle) * math.rad(3.5) * speedRatio
-	local poseBlend = 1 - math.exp(-22 * deltaTime)
-	local relativeDirection = root.CFrame:VectorToObjectSpace(pullDirection)
-	local upwardPull = math.clamp(relativeDirection.Y, -0.75, 0.75)
-	local balanceTarget = root.Position
-		- pullDirection * (2.4 + speedRatio * 0.8)
-		- root.CFrame.RightVector * 1.25
-		+ Vector3.new(0, 0.65, 0)
+	local cycle = GrappleSettings.AnimationTime * (4.5 + speedRatio * 3)
+	local legMotion = math.sin(cycle) * math.rad(2) * speedRatio
+	local poseBlend = 1 - math.exp(-18 * deltaTime)
 
 	for joint, state in pairs(GrappleSettings.JointTransforms) do
 		if joint and joint.Parent and state and state.C0 then
 			if state.Role == "rightshoulder"
-				and applyCharacterGrappleArmTarget(joint, state, targetPosition, 8) then
+				and applyCharacterGrappleArmTarget(joint, state, targetPosition, 6) then
 				continue
 			end
 
 			if state.Role == "leftshoulder"
-				and applyCharacterGrappleArmTarget(joint, state, balanceTarget, -20) then
+				or state.Role == "leftelbow"
+				or state.Role == "rightelbow" then
+				pcall(function()
+					joint.C0 = state.C0
+					joint.Transform = CFrame.identity
+				end)
 				continue
 			end
 
 			local offset = nil
 
-			if state.Role == "rightelbow" then
-				offset = CFrame.Angles(math.rad(-16), math.rad(6), math.rad(-10))
-			elseif state.Role == "leftelbow" then
-				offset = CFrame.Angles(math.rad(24), 0, math.rad(18))
-			elseif state.Role == "righthip" then
+			if state.Role == "righthip" then
 				offset = CFrame.Angles(
-					math.rad(-30) + upwardPull * math.rad(9),
-					math.rad(4),
-					math.rad(9) + legMotion
+					math.rad(-13),
+					math.rad(2),
+					math.rad(2) + legMotion
 				)
 			elseif state.Role == "lefthip" then
 				offset = CFrame.Angles(
-					math.rad(-30) + upwardPull * math.rad(9),
-					math.rad(-4),
-					math.rad(-9) - legMotion
+					math.rad(-13),
+					math.rad(-2),
+					math.rad(-2) - legMotion
 				)
 			elseif state.Role == "rightknee" then
-				offset = CFrame.Angles(math.rad(22), 0, 0)
+				offset = CFrame.Angles(math.rad(10), 0, 0)
 			elseif state.Role == "leftknee" then
-				offset = CFrame.Angles(math.rad(22), 0, 0)
+				offset = CFrame.Angles(math.rad(10), 0, 0)
 			elseif state.Role == "waist" or state.Role == "root" then
-				offset = CFrame.Angles(
-					math.rad(-17) + upwardPull * math.rad(12),
-					0,
-					math.rad(-5)
-				)
+				offset = CFrame.Angles(math.rad(-7) * speedRatio, 0, math.rad(-2))
 			elseif state.Role == "neck" then
-				offset = CFrame.Angles(math.rad(8) - upwardPull * math.rad(8), 0, math.rad(5))
+				offset = CFrame.Angles(math.rad(3), 0, 0)
 			end
 
 			if offset then
@@ -2307,28 +2297,32 @@ local function updateCharacterGrappleOrientation()
 	end
 
 	local targetPosition = targetAttachment.WorldPosition
-	local lookDirection = targetPosition - root.Position
+	local flatDirection = Vector3.new(
+		targetPosition.X - root.Position.X,
+		0,
+		targetPosition.Z - root.Position.Z
+	)
 
-	if lookDirection.Magnitude > 0.01 then
-		local direction = lookDirection.Unit
-		local upVector = Vector3.yAxis
-
-		if math.abs(direction:Dot(upVector)) > 0.92 then
-			upVector = root.CFrame.RightVector
-		end
-
-		local speedRatio = math.clamp(
-			GrappleSettings.CurrentSpeed / math.max(GrappleSettings.Speed, 1),
-			0,
-			1
-		)
-		local targetCFrame = CFrame.lookAt(root.Position, targetPosition, upVector)
-		bodyGyro.CFrame = targetCFrame * CFrame.Angles(
-			math.rad(-11) * speedRatio,
-			0,
-			math.rad(-5) * speedRatio
-		)
+	if flatDirection.Magnitude < 0.05 then
+		return
 	end
+
+	local speedRatio = math.clamp(
+		GrappleSettings.CurrentSpeed / math.max(GrappleSettings.Speed, 1),
+		0,
+		1
+	)
+	local targetCFrame = CFrame.lookAt(
+		root.Position,
+		root.Position + flatDirection.Unit,
+		Vector3.yAxis
+	)
+
+	bodyGyro.CFrame = targetCFrame * CFrame.Angles(
+		math.rad(-7) * speedRatio,
+		0,
+		math.rad(-2) * speedRatio
+	)
 end
 
 local function updateCharacterGrappleFrame(deltaTime)
