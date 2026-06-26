@@ -93,18 +93,22 @@ local GrappleSettings = {
 	Enabled = false,
 	Holding = false,
 	Active = false,
-	Speed = 135,
-	Acceleration = 6.5,
-	Deceleration = 11,
+	Speed = 145,
+	Acceleration = 150,
+	Deceleration = 230,
 	CurrentSpeed = 0,
+	CurrentVelocity = Vector3.zero,
 	InitialDistance = 0,
 	AnimationTime = 0,
+	ShotStartedAt = 0,
+	ShotDuration = 0.18,
 	Root = nil,
 	Humanoid = nil,
 	Target = nil,
 	RootAttachment = nil,
+	HandAttachment = nil,
 	TargetAttachment = nil,
-	AlignPosition = nil,
+	BodyVelocity = nil,
 	BodyGyro = nil,
 	VisualConnection = nil,
 	VisualFolder = nil,
@@ -1695,9 +1699,9 @@ local function captureCharacterGrapplePose(character)
 end
 
 local function destroyCharacterGrappleObjects()
-	if GrappleSettings.AlignPosition then
+	if GrappleSettings.BodyVelocity then
 		pcall(function()
-			GrappleSettings.AlignPosition:Destroy()
+			GrappleSettings.BodyVelocity:Destroy()
 		end)
 	end
 
@@ -1713,15 +1717,22 @@ local function destroyCharacterGrappleObjects()
 		end)
 	end
 
+	if GrappleSettings.HandAttachment then
+		pcall(function()
+			GrappleSettings.HandAttachment:Destroy()
+		end)
+	end
+
 	if GrappleSettings.TargetAttachment then
 		pcall(function()
 			GrappleSettings.TargetAttachment:Destroy()
 		end)
 	end
 
-	GrappleSettings.AlignPosition = nil
+	GrappleSettings.BodyVelocity = nil
 	GrappleSettings.BodyGyro = nil
 	GrappleSettings.RootAttachment = nil
+	GrappleSettings.HandAttachment = nil
 	GrappleSettings.TargetAttachment = nil
 end
 
@@ -1735,13 +1746,17 @@ clearCharacterGrapple = function()
 
 	local root = GrappleSettings.Root
 	local humanoid = GrappleSettings.Humanoid
-	local carriedVelocity = root and root.Parent and root.AssemblyLinearVelocity or Vector3.zero
+	local carriedVelocity = GrappleSettings.CurrentVelocity
+
+	if carriedVelocity.Magnitude <= 0.01 and root and root.Parent then
+		carriedVelocity = root.AssemblyLinearVelocity
+	end
 
 	destroyCharacterGrappleObjects()
 	clearCharacterGrappleSegments()
 
 	if root and root.Parent then
-		root.AssemblyLinearVelocity = carriedVelocity * 0.25
+		root.AssemblyLinearVelocity = carriedVelocity * 0.42
 		root.AssemblyAngularVelocity = Vector3.zero
 	end
 
@@ -1761,8 +1776,10 @@ clearCharacterGrapple = function()
 
 	GrappleSettings.Active = false
 	GrappleSettings.CurrentSpeed = 0
+	GrappleSettings.CurrentVelocity = Vector3.zero
 	GrappleSettings.InitialDistance = 0
 	GrappleSettings.AnimationTime = 0
+	GrappleSettings.ShotStartedAt = 0
 	GrappleSettings.Root = nil
 	GrappleSettings.Humanoid = nil
 	GrappleSettings.Target = nil
@@ -1867,43 +1884,78 @@ local function ensureCharacterGrappleSegments(count)
 	end
 end
 
+local function moveGrappleSpeed(current, target, maxDelta)
+	if current < target then
+		return math.min(current + maxDelta, target)
+	end
+
+	return math.max(current - maxDelta, target)
+end
+
 local function updateCharacterGrapplePhysics(deltaTime)
 	if not isCharacterGrappleValid() then
 		return
 	end
 
 	local root = GrappleSettings.Root
+	local rootAttachment = GrappleSettings.RootAttachment
 	local targetAttachment = GrappleSettings.TargetAttachment
-	local alignPosition = GrappleSettings.AlignPosition
+	local bodyVelocity = GrappleSettings.BodyVelocity
 
-	if not alignPosition or not alignPosition.Parent then
+	if not rootAttachment
+		or not rootAttachment.Parent
+		or not bodyVelocity
+		or not bodyVelocity.Parent then
 		return
 	end
 
 	deltaTime = math.max(tonumber(deltaTime) or (1 / 60), 0)
 
-	local distance = (targetAttachment.WorldPosition - root.Position).Magnitude
-	local maxSpeed = math.clamp(tonumber(GrappleSettings.Speed) or 135, 25, 220)
-	local brakingDistance = math.max(8, GrappleSettings.CurrentSpeed * 0.24)
-	local targetSpeed = math.clamp(distance * 2.4, 12, maxSpeed)
+	local pullVector = targetAttachment.WorldPosition - rootAttachment.WorldPosition
+	local distance = pullVector.Magnitude
+	local endDistance = 2.1
 
-	if distance <= brakingDistance then
-		targetSpeed = math.clamp(distance * 3.1, 5, maxSpeed)
+	if distance <= endDistance then
+		GrappleSettings.CurrentSpeed = moveGrappleSpeed(
+			GrappleSettings.CurrentSpeed,
+			0,
+			GrappleSettings.Deceleration * deltaTime
+		)
+		GrappleSettings.CurrentVelocity = GrappleSettings.CurrentVelocity:Lerp(
+			Vector3.zero,
+			1 - math.exp(-18 * deltaTime)
+		)
+		bodyVelocity.Velocity = GrappleSettings.CurrentVelocity
+		return
 	end
 
-	local response = targetSpeed > GrappleSettings.CurrentSpeed
-		and GrappleSettings.Acceleration
-		or GrappleSettings.Deceleration
-	local alpha = 1 - math.exp(-response * deltaTime)
+	local direction = pullVector.Unit
+	local maxSpeed = math.clamp(tonumber(GrappleSettings.Speed) or 145, 35, 240)
+	local acceleration = math.clamp(tonumber(GrappleSettings.Acceleration) or 150, 25, 500)
+	local deceleration = math.clamp(tonumber(GrappleSettings.Deceleration) or 230, 25, 600)
+	local remainingDistance = math.max(distance - endDistance, 0)
+	local brakingSpeed = math.sqrt(2 * deceleration * remainingDistance)
+	local targetSpeed = math.min(maxSpeed, brakingSpeed)
+	local speedStep = (
+		targetSpeed > GrappleSettings.CurrentSpeed
+		and acceleration
+		or deceleration
+	) * deltaTime
 
-	GrappleSettings.CurrentSpeed += (targetSpeed - GrappleSettings.CurrentSpeed) * alpha
+	GrappleSettings.CurrentSpeed = moveGrappleSpeed(
+		GrappleSettings.CurrentSpeed,
+		targetSpeed,
+		speedStep
+	)
 
-	alignPosition.MaxVelocity = math.max(6, GrappleSettings.CurrentSpeed)
-	alignPosition.Responsiveness = 7 + math.clamp(
-		GrappleSettings.CurrentSpeed / maxSpeed,
-		0,
-		1
-	) * 17
+	local targetVelocity = direction * GrappleSettings.CurrentSpeed
+	local steeringAlpha = 1 - math.exp(-20 * deltaTime)
+	GrappleSettings.CurrentVelocity = GrappleSettings.CurrentVelocity:Lerp(
+		targetVelocity,
+		steeringAlpha
+	)
+
+	bodyVelocity.Velocity = GrappleSettings.CurrentVelocity
 
 	if GrappleSettings.InitialDistance <= 0 then
 		GrappleSettings.InitialDistance = distance
@@ -1916,28 +1968,48 @@ local function updateCharacterGrappleSegments()
 	end
 
 	local root = GrappleSettings.Root
+	local handAttachment = GrappleSettings.HandAttachment
 	local targetAttachment = GrappleSettings.TargetAttachment
 	local startPosition = root.Position + Vector3.new(0, 0.55, 0)
-	local endPosition = targetAttachment.WorldPosition
-	local distance = (endPosition - startPosition).Magnitude
 
-	if distance < 0.05 then
+	if handAttachment and handAttachment.Parent then
+		startPosition = handAttachment.WorldPosition
+	end
+
+	local endPosition = targetAttachment.WorldPosition
+	local fullDistance = (endPosition - startPosition).Magnitude
+
+	if fullDistance < 0.05 then
 		clearCharacterGrappleSegments()
 		return
 	end
 
-	local count = math.clamp(math.ceil(distance / 3.5), 5, 36)
-	ensureCharacterGrappleSegments(count)
+	local shotProgress = math.clamp(
+		(os.clock() - GrappleSettings.ShotStartedAt)
+			/ math.max(GrappleSettings.ShotDuration, 0.01),
+		0,
+		1
+	)
+	local visibleDistance = math.max(fullDistance * shotProgress, 0)
+
+	if visibleDistance < 0.08 then
+		clearCharacterGrappleSegments()
+		return
+	end
 
 	local direction = (endPosition - startPosition).Unit
-	local gap = 0.3
-	local segmentLength = math.max((distance / count) - gap, 0.16)
+	local visibleEnd = startPosition + direction * visibleDistance
+	local count = math.clamp(math.ceil(visibleDistance / 2.7), 1, 42)
+	ensureCharacterGrappleSegments(count)
+
+	local gap = 0.22
+	local segmentLength = math.max((visibleDistance / count) - gap, 0.1)
 
 	for index, segment in ipairs(GrappleSettings.Segments) do
-		local middle = startPosition + direction * ((index - 0.5) / count * distance)
+		local middle = startPosition + direction * ((index - 0.5) / count * visibleDistance)
 		segment.Size = Vector3.new(0.12, segmentLength, 0.12)
-		segment.CFrame = CFrame.lookAt(middle, middle + direction) * CFrame.Angles(math.rad(90), 0, 0)
-		segment.Transparency = 0.08 + (index % 2) * 0.08
+		segment.CFrame = CFrame.lookAt(middle, visibleEnd) * CFrame.Angles(math.rad(90), 0, 0)
+		segment.Transparency = 0.04 + (index % 2) * 0.1
 	end
 end
 
@@ -1977,24 +2049,24 @@ local function updateCharacterGrapplePose(deltaTime)
 
 			if state.Role == "rightshoulder" then
 				offset = CFrame.Angles(
-					math.rad(-72) + upwardPull * math.rad(16) + armSwing,
-					0,
-					math.rad(19)
+					math.rad(-102) + upwardPull * math.rad(22) + armSwing,
+					math.rad(-7),
+					math.rad(26)
 				)
 			elseif state.Role == "leftshoulder" then
 				offset = CFrame.Angles(
-					math.rad(-72) + upwardPull * math.rad(16) - armSwing,
-					0,
-					math.rad(-19)
+					math.rad(38) - upwardPull * math.rad(10) - armSwing * 0.55,
+					math.rad(5),
+					math.rad(-32)
 				)
 			elseif state.Role == "righthip" then
-				offset = CFrame.Angles(math.rad(24) - upwardPull * math.rad(12) + legSwing, 0, 0)
+				offset = CFrame.Angles(math.rad(30) - upwardPull * math.rad(12) + legSwing, 0, math.rad(8))
 			elseif state.Role == "lefthip" then
-				offset = CFrame.Angles(math.rad(24) - upwardPull * math.rad(12) - legSwing, 0, 0)
+				offset = CFrame.Angles(math.rad(-12) - upwardPull * math.rad(10) - legSwing, 0, math.rad(-8))
 			elseif state.Role == "waist" or state.Role == "root" then
-				offset = CFrame.Angles(lean, 0, 0)
+				offset = CFrame.Angles(lean - math.rad(9), 0, 0)
 			elseif state.Role == "neck" then
-				offset = CFrame.Angles(math.rad(8) - upwardPull * math.rad(10), 0, 0)
+				offset = CFrame.Angles(math.rad(12) - upwardPull * math.rad(12), 0, 0)
 			end
 
 			if offset then
@@ -2067,22 +2139,39 @@ local function beginCharacterGrapple()
 	rootAttachment.Position = Vector3.new(0, 0.55, 0)
 	rootAttachment.Parent = root
 
+	local handPart = character:FindFirstChild("RightHand")
+		or character:FindFirstChild("Right Arm")
+		or root
+	local handAttachment = Instance.new("Attachment")
+	handAttachment.Name = "__PlayerToolsGrappleHand"
+
+	if handPart ~= root and handPart:IsA("BasePart") then
+		handAttachment.Position = Vector3.new(
+			0,
+			-handPart.Size.Y * 0.32,
+			-handPart.Size.Z * 0.42
+		)
+	else
+		handAttachment.Position = Vector3.new(0.55, 0.5, -0.4)
+	end
+
+	handAttachment.Parent = handPart
+
 	local targetAttachment = Instance.new("Attachment")
 	targetAttachment.Name = "__PlayerToolsGrappleTarget"
 	targetAttachment.Position = target.CFrame:PointToObjectSpace(hitPosition)
 	targetAttachment.Parent = target
 
-	local alignPosition = Instance.new("AlignPosition")
-	alignPosition.Name = "__PlayerToolsGrapplePull"
-	alignPosition.Attachment0 = rootAttachment
-	alignPosition.Attachment1 = targetAttachment
-	alignPosition.ApplyAtCenterOfMass = true
-	alignPosition.ReactionForceEnabled = false
-	alignPosition.RigidityEnabled = false
-	alignPosition.MaxForce = math.max(root.AssemblyMass * 15000, 180000)
-	alignPosition.MaxVelocity = 6
-	alignPosition.Responsiveness = 7
-	alignPosition.Parent = root
+	local bodyVelocity = Instance.new("BodyVelocity")
+	bodyVelocity.Name = "__PlayerToolsGrapplePull"
+	bodyVelocity.MaxForce = Vector3.new(
+		math.max(root.AssemblyMass * 10000, 160000),
+		math.max(root.AssemblyMass * 10000, 160000),
+		math.max(root.AssemblyMass * 10000, 160000)
+	)
+	bodyVelocity.P = 4500
+	bodyVelocity.Velocity = Vector3.zero
+	bodyVelocity.Parent = root
 
 	local bodyGyro = Instance.new("BodyGyro")
 	bodyGyro.Name = "__PlayerToolsGrappleOrientation"
@@ -2096,14 +2185,17 @@ local function beginCharacterGrapple()
 	GrappleSettings.Humanoid = humanoid
 	GrappleSettings.Target = target
 	GrappleSettings.RootAttachment = rootAttachment
+	GrappleSettings.HandAttachment = handAttachment
 	GrappleSettings.TargetAttachment = targetAttachment
-	GrappleSettings.AlignPosition = alignPosition
+	GrappleSettings.BodyVelocity = bodyVelocity
 	GrappleSettings.BodyGyro = bodyGyro
 	GrappleSettings.OriginalAutoRotate = humanoid.AutoRotate
 	GrappleSettings.OriginalPlatformStand = humanoid.PlatformStand
 	GrappleSettings.CurrentSpeed = 0
+	GrappleSettings.CurrentVelocity = Vector3.zero
 	GrappleSettings.InitialDistance = (hitPosition - root.Position).Magnitude
 	GrappleSettings.AnimationTime = 0
+	GrappleSettings.ShotStartedAt = os.clock()
 
 	humanoid.AutoRotate = false
 	humanoid.PlatformStand = true
