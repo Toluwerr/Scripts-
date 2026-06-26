@@ -116,6 +116,7 @@ local GrappleSettings = {
 	AnimateScript = nil,
 	OriginalAnimateDisabled = nil,
 	VisualFolder = nil,
+	AnchorMarker = nil,
 	Segments = {},
 	OriginalAutoRotate = nil,
 	OriginalPlatformStand = nil,
@@ -1626,6 +1627,12 @@ local function clearCharacterGrappleSegments()
 
 	table.clear(GrappleSettings.Segments)
 
+	if GrappleSettings.AnchorMarker then
+		pcall(function()
+			GrappleSettings.AnchorMarker:Destroy()
+		end)
+	end
+
 	if GrappleSettings.VisualFolder then
 		pcall(function()
 			GrappleSettings.VisualFolder:Destroy()
@@ -1633,6 +1640,7 @@ local function clearCharacterGrappleSegments()
 	end
 
 	GrappleSettings.VisualFolder = nil
+	GrappleSettings.AnchorMarker = nil
 end
 
 local function getCharacterGrappleJointRole(joint)
@@ -1973,8 +1981,8 @@ local function ensureCharacterGrappleSegments(count)
 		segment.CanQuery = false
 		segment.CanTouch = false
 		segment.CastShadow = false
-		segment.Material = Enum.Material.SmoothPlastic
-		segment.Color = Color3.fromRGB(235, 235, 235)
+		segment.Material = Enum.Material.ForceField
+		segment.Color = Color3.fromRGB(238, 244, 255)
 		segment.Shape = Enum.PartType.Cylinder
 		segment.Parent = folder
 		table.insert(GrappleSettings.Segments, segment)
@@ -2117,9 +2125,20 @@ local function updateCharacterGrappleSegments()
 
 	for index, segment in ipairs(GrappleSettings.Segments) do
 		local middle = startPosition + direction * ((index - 0.5) / count * visibleDistance)
-		segment.Size = Vector3.new(0.12, segmentLength, 0.12)
+		segment.Size = Vector3.new(0.105, segmentLength, 0.105)
 		segment.CFrame = CFrame.lookAt(middle, visibleEnd) * CFrame.Angles(math.rad(90), 0, 0)
-		segment.Transparency = 0.04 + (index % 2) * 0.1
+		segment.Transparency = 0.07 + (index % 2) * 0.12
+		segment.Color = index % 2 == 0
+			and Color3.fromRGB(214, 227, 255)
+			or Color3.fromRGB(250, 250, 255)
+	end
+
+	local marker = GrappleSettings.AnchorMarker
+
+	if marker and marker.Parent then
+		local pulse = 0.88 + math.sin(os.clock() * 13) * 0.12
+		marker.Size = Vector3.new(pulse, pulse, pulse) * 0.32
+		marker.CFrame = CFrame.new(endPosition)
 	end
 end
 
@@ -2133,7 +2152,7 @@ local function getCharacterGrappleDirectionUp(direction, fallback)
 	return upVector
 end
 
-local function applyCharacterGrappleRightArm(joint, state, targetPosition)
+local function applyCharacterGrappleArmTarget(joint, state, targetPosition, roll)
 	if not joint
 		or not joint.Parent
 		or not state
@@ -2163,7 +2182,7 @@ local function applyCharacterGrappleRightArm(joint, state, targetPosition)
 		centerPosition,
 		centerPosition + armDirection,
 		upVector
-	) * CFrame.Angles(math.rad(90), 0, 0)
+	) * CFrame.Angles(math.rad(90), 0, math.rad(roll or 0))
 
 	local desiredC0 = state.Part0.CFrame:ToObjectSpace(desiredPartCFrame) * state.C1
 
@@ -2192,6 +2211,7 @@ local function updateCharacterGrapplePose(deltaTime)
 	deltaTime = math.max(tonumber(deltaTime) or (1 / 60), 0)
 	GrappleSettings.AnimationTime += deltaTime
 
+	local pullDirection = direction.Unit
 	local speedRatio = math.clamp(
 		GrappleSettings.CurrentSpeed / math.max(GrappleSettings.Speed, 1),
 		0,
@@ -2204,49 +2224,58 @@ local function updateCharacterGrapplePose(deltaTime)
 		1
 	)
 	local shotEase = shotProgress * shotProgress * (3 - 2 * shotProgress)
-	local cycle = GrappleSettings.AnimationTime * (4 + speedRatio * 3)
-	local legMotion = math.sin(cycle) * math.rad(2.5) * speedRatio
-	local poseBlend = 1 - math.exp(-24 * deltaTime)
+	local cycle = GrappleSettings.AnimationTime * (5 + speedRatio * 4)
+	local legMotion = math.sin(cycle) * math.rad(3.5) * speedRatio
+	local poseBlend = 1 - math.exp(-22 * deltaTime)
+	local relativeDirection = root.CFrame:VectorToObjectSpace(pullDirection)
+	local upwardPull = math.clamp(relativeDirection.Y, -0.75, 0.75)
+	local balanceTarget = root.Position
+		- pullDirection * (2.4 + speedRatio * 0.8)
+		- root.CFrame.RightVector * 1.25
+		+ Vector3.new(0, 0.65, 0)
 
 	for joint, state in pairs(GrappleSettings.JointTransforms) do
 		if joint and joint.Parent and state and state.C0 then
 			if state.Role == "rightshoulder"
-				and applyCharacterGrappleRightArm(joint, state, targetPosition) then
+				and applyCharacterGrappleArmTarget(joint, state, targetPosition, 8) then
+				continue
+			end
+
+			if state.Role == "leftshoulder"
+				and applyCharacterGrappleArmTarget(joint, state, balanceTarget, -20) then
 				continue
 			end
 
 			local offset = nil
 
 			if state.Role == "rightelbow" then
-				offset = CFrame.Angles(math.rad(-8), 0, math.rad(-10))
-			elseif state.Role == "leftshoulder" then
-				offset = CFrame.Angles(
-					math.rad(-27),
-					math.rad(12),
-					math.rad(-25)
-				)
+				offset = CFrame.Angles(math.rad(-16), math.rad(6), math.rad(-10))
 			elseif state.Role == "leftelbow" then
-				offset = CFrame.Angles(math.rad(18), 0, math.rad(10))
+				offset = CFrame.Angles(math.rad(24), 0, math.rad(18))
 			elseif state.Role == "righthip" then
 				offset = CFrame.Angles(
-					math.rad(-24),
-					math.rad(2),
-					math.rad(2) + legMotion
+					math.rad(-30) + upwardPull * math.rad(9),
+					math.rad(4),
+					math.rad(9) + legMotion
 				)
 			elseif state.Role == "lefthip" then
 				offset = CFrame.Angles(
-					math.rad(-24),
-					math.rad(-2),
-					math.rad(-2) - legMotion
+					math.rad(-30) + upwardPull * math.rad(9),
+					math.rad(-4),
+					math.rad(-9) - legMotion
 				)
 			elseif state.Role == "rightknee" then
-				offset = CFrame.Angles(math.rad(16), 0, 0)
+				offset = CFrame.Angles(math.rad(22), 0, 0)
 			elseif state.Role == "leftknee" then
-				offset = CFrame.Angles(math.rad(16), 0, 0)
+				offset = CFrame.Angles(math.rad(22), 0, 0)
 			elseif state.Role == "waist" or state.Role == "root" then
-				offset = CFrame.Angles(math.rad(-12), 0, math.rad(-3))
+				offset = CFrame.Angles(
+					math.rad(-17) + upwardPull * math.rad(12),
+					0,
+					math.rad(-5)
+				)
 			elseif state.Role == "neck" then
-				offset = CFrame.Angles(math.rad(5), 0, math.rad(3))
+				offset = CFrame.Angles(math.rad(8) - upwardPull * math.rad(8), 0, math.rad(5))
 			end
 
 			if offset then
@@ -2288,7 +2317,17 @@ local function updateCharacterGrappleOrientation()
 			upVector = root.CFrame.RightVector
 		end
 
-		bodyGyro.CFrame = CFrame.lookAt(root.Position, targetPosition, upVector)
+		local speedRatio = math.clamp(
+			GrappleSettings.CurrentSpeed / math.max(GrappleSettings.Speed, 1),
+			0,
+			1
+		)
+		local targetCFrame = CFrame.lookAt(root.Position, targetPosition, upVector)
+		bodyGyro.CFrame = targetCFrame * CFrame.Angles(
+			math.rad(-11) * speedRatio,
+			0,
+			math.rad(-5) * speedRatio
+		)
 	end
 end
 
@@ -2354,6 +2393,21 @@ local function beginCharacterGrapple()
 	targetAttachment.Position = target.CFrame:PointToObjectSpace(hitPosition)
 	targetAttachment.Parent = target
 
+	local anchorMarker = Instance.new("Part")
+	anchorMarker.Name = "__PlayerToolsGrappleAnchor"
+	anchorMarker.Shape = Enum.PartType.Ball
+	anchorMarker.Anchored = true
+	anchorMarker.CanCollide = false
+	anchorMarker.CanQuery = false
+	anchorMarker.CanTouch = false
+	anchorMarker.CastShadow = false
+	anchorMarker.Material = Enum.Material.ForceField
+	anchorMarker.Color = Color3.fromRGB(238, 244, 255)
+	anchorMarker.Transparency = 0.12
+	anchorMarker.Size = Vector3.new(0.3, 0.3, 0.3)
+	anchorMarker.CFrame = CFrame.new(hitPosition)
+	anchorMarker.Parent = Workspace
+
 	local bodyVelocity = Instance.new("BodyVelocity")
 	bodyVelocity.Name = "__PlayerToolsGrapplePull"
 	bodyVelocity.MaxForce = Vector3.new(
@@ -2379,6 +2433,7 @@ local function beginCharacterGrapple()
 	GrappleSettings.RootAttachment = rootAttachment
 	GrappleSettings.HandAttachment = handAttachment
 	GrappleSettings.TargetAttachment = targetAttachment
+	GrappleSettings.AnchorMarker = anchorMarker
 	GrappleSettings.BodyVelocity = bodyVelocity
 	GrappleSettings.BodyGyro = bodyGyro
 	GrappleSettings.OriginalAutoRotate = humanoid.AutoRotate
