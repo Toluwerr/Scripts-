@@ -136,6 +136,17 @@ local VehicleJumpSettings = {
 	StabilizerToken = 0
 }
 
+local VehicleWallDriveSettings = {
+	Enabled = false,
+	Active = false,
+	Root = nil,
+	Seat = nil,
+	BodyVelocity = nil,
+	BodyGyro = nil,
+	SurfaceNormal = nil,
+	CurrentForward = nil
+}
+
 local VehicleTeleportSettings = {
 	Enabled = false,
 	Cooldown = 0.12,
@@ -757,12 +768,220 @@ local function clearVehicleTeleportReinforcement()
 	VehicleTeleportSettings.ReinforceOffsets = nil
 end
 
+local function clearVehicleWallDrive()
+	if VehicleWallDriveSettings.BodyVelocity then
+		pcall(function()
+			VehicleWallDriveSettings.BodyVelocity:Destroy()
+		end)
+	end
+
+	if VehicleWallDriveSettings.BodyGyro then
+		pcall(function()
+			VehicleWallDriveSettings.BodyGyro:Destroy()
+		end)
+	end
+
+	VehicleWallDriveSettings.Active = false
+	VehicleWallDriveSettings.Root = nil
+	VehicleWallDriveSettings.Seat = nil
+	VehicleWallDriveSettings.BodyVelocity = nil
+	VehicleWallDriveSettings.BodyGyro = nil
+	VehicleWallDriveSettings.SurfaceNormal = nil
+	VehicleWallDriveSettings.CurrentForward = nil
+end
+
+local function getVehicleWallRayParams()
+	local filter = {}
+
+	if LocalPlayer.Character then
+		table.insert(filter, LocalPlayer.Character)
+	end
+
+	if VehicleSettings.CurrentModel then
+		table.insert(filter, VehicleSettings.CurrentModel)
+	end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = filter
+	params.IgnoreWater = false
+
+	return params
+end
+
+local function getVehicleWallSurface(root)
+	local params = getVehicleWallRayParams()
+	local up = root.CFrame.UpVector
+	local forward = root.CFrame.LookVector
+	local probe = math.max(root.Size.Magnitude * 0.65, 10)
+	local start = root.Position + up * math.min(root.Size.Y * 0.2, 2)
+	local forwardHit = Workspace:Raycast(start, forward * probe, params)
+
+	if forwardHit and forwardHit.Instance and forwardHit.Instance:IsA("BasePart") then
+		if forwardHit.Normal.Y < 0.72 then
+			return forwardHit
+		end
+	end
+
+	if VehicleWallDriveSettings.Active then
+		local surfaceHit = Workspace:Raycast(
+			root.Position,
+			-up * math.max(root.Size.Y * 0.85 + 5, 10),
+			params
+		)
+
+		if surfaceHit and surfaceHit.Instance and surfaceHit.Instance:IsA("BasePart") then
+			return surfaceHit
+		end
+	end
+
+	return nil
+end
+
+local function getVehicleWallForward(root, normal)
+	local forward = root.CFrame.LookVector
+	forward -= normal * forward:Dot(normal)
+
+	if forward.Magnitude < 0.08 then
+		forward = root.CFrame.UpVector
+		forward -= normal * forward:Dot(normal)
+	end
+
+	if forward.Magnitude < 0.08 then
+		forward = Vector3.yAxis:Cross(normal)
+	end
+
+	if forward.Magnitude < 0.08 then
+		forward = Vector3.xAxis:Cross(normal)
+	end
+
+	return forward.Unit
+end
+
+local function ensureVehicleWallDriveMovers(root, seat)
+	if VehicleWallDriveSettings.Root == root
+		and VehicleWallDriveSettings.Seat == seat
+		and VehicleWallDriveSettings.BodyVelocity
+		and VehicleWallDriveSettings.BodyVelocity.Parent
+		and VehicleWallDriveSettings.BodyGyro
+		and VehicleWallDriveSettings.BodyGyro.Parent then
+		return
+	end
+
+	clearVehicleWallDrive()
+
+	local bodyVelocity = Instance.new("BodyVelocity")
+	bodyVelocity.Name = "__PlayerToolsVehicleWallDriveVelocity"
+	bodyVelocity.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+	bodyVelocity.P = 18000
+	bodyVelocity.Velocity = Vector3.zero
+	bodyVelocity.Parent = root
+
+	local bodyGyro = Instance.new("BodyGyro")
+	bodyGyro.Name = "__PlayerToolsVehicleWallDriveGyro"
+	bodyGyro.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+	bodyGyro.P = 50000
+	bodyGyro.D = 2400
+	bodyGyro.CFrame = root.CFrame
+	bodyGyro.Parent = root
+
+	VehicleWallDriveSettings.Root = root
+	VehicleWallDriveSettings.Seat = seat
+	VehicleWallDriveSettings.BodyVelocity = bodyVelocity
+	VehicleWallDriveSettings.BodyGyro = bodyGyro
+end
+
+local function updateVehicleWallDrive(root, seat, deltaTime)
+	if not VehicleWallDriveSettings.Enabled or VehicleFlySettings.Enabled then
+		clearVehicleWallDrive()
+		return false
+	end
+
+	local surfaceHit = getVehicleWallSurface(root)
+
+	if not surfaceHit then
+		clearVehicleWallDrive()
+		return false
+	end
+
+	local normal = surfaceHit.Normal
+
+	if normal.Y >= 0.72 and not VehicleWallDriveSettings.Active then
+		return false
+	end
+
+	ensureVehicleWallDriveMovers(root, seat)
+
+	local bodyVelocity = VehicleWallDriveSettings.BodyVelocity
+	local bodyGyro = VehicleWallDriveSettings.BodyGyro
+
+	if not bodyVelocity
+		or not bodyVelocity.Parent
+		or not bodyGyro
+		or not bodyGyro.Parent then
+		clearVehicleWallDrive()
+		return false
+	end
+
+	local forward = getVehicleWallForward(root, normal)
+	local steer = getVehicleSteer(seat)
+	local steeringStrength = math.clamp(
+		tonumber(VehicleSettings.SteeringStrength) or 8,
+		0,
+		50
+	)
+
+	if math.abs(steer) > 0.001 then
+		local angle = -steer * math.max(steeringStrength, 5) * 0.1 * deltaTime
+		forward = CFrame.fromAxisAngle(normal, angle):VectorToWorldSpace(forward).Unit
+	end
+
+	local alpha = 1 - math.exp(-14 * math.max(deltaTime, 0))
+
+	if VehicleWallDriveSettings.CurrentForward then
+		VehicleWallDriveSettings.CurrentForward = VehicleWallDriveSettings.CurrentForward:Lerp(
+			forward,
+			alpha
+		).Unit
+	else
+		VehicleWallDriveSettings.CurrentForward = forward
+	end
+
+	local targetCFrame = CFrame.lookAt(
+		root.Position,
+		root.Position + VehicleWallDriveSettings.CurrentForward,
+		normal
+	)
+
+	bodyGyro.CFrame = targetCFrame
+
+	local throttle = getVehicleThrottle(seat)
+	local speed = math.clamp(tonumber(VehicleSettings.Speed) or 60, 0, 500)
+	local surfaceVelocity = VehicleWallDriveSettings.CurrentForward * (throttle * speed)
+	local gripVelocity = -normal * 5
+
+	bodyVelocity.Velocity = surfaceVelocity + gripVelocity
+	VehicleWallDriveSettings.SurfaceNormal = normal
+	VehicleWallDriveSettings.Active = true
+
+	return true
+end
+
+local function setVehicleWallDriveEnabled(value)
+	VehicleWallDriveSettings.Enabled = value and true or false
+
+	if not VehicleWallDriveSettings.Enabled then
+		clearVehicleWallDrive()
+	end
+end
+
 local function restoreVehicleSpeed()
 	clearVehicleSpeedWatch()
 	clearVehicleBoost()
 	clearVehicleJumpStabilizer()
 	clearVehicleFlipAssist()
 	clearVehicleTeleportReinforcement()
+	clearVehicleWallDrive()
 
 	if stopVehicleFlyRuntime then
 		stopVehicleFlyRuntime()
@@ -877,7 +1096,7 @@ local function getVehicleSteer(seat)
 end
 
 local function stabilizeVehicle(root, seat, deltaTime)
-	if VehicleFlySettings.Enabled then
+	if VehicleFlySettings.Enabled or VehicleWallDriveSettings.Active then
 		clearVehicleFlipAssist()
 		return
 	end
@@ -975,55 +1194,67 @@ local function updateVehicleBoost(deltaTime)
 		or not isVehicleSeatPart(seat)
 		or seat.Occupant ~= humanoid then
 		clearVehicleFlipAssist()
+		clearVehicleWallDrive()
 		return
 	end
 
 	local delta = math.max(tonumber(deltaTime) or 0, 0)
+	local wallDriving = false
 
 	if not VehicleFlySettings.Enabled then
 		applyVehicleSeatSpeed()
 		applyVehicleSeatSteering()
 
-		local forward = Vector3.new(seat.CFrame.LookVector.X, 0, seat.CFrame.LookVector.Z)
+		wallDriving = updateVehicleWallDrive(root, seat, delta)
 
-		if forward.Magnitude > 0.001 then
-			forward = forward.Unit
+		if not wallDriving then
+			local forward = Vector3.new(seat.CFrame.LookVector.X, 0, seat.CFrame.LookVector.Z)
 
-			local throttle = getVehicleThrottle(seat)
-			local speed = math.clamp(tonumber(VehicleSettings.Speed) or 60, 0, 500)
-			local velocity = root.AssemblyLinearVelocity
-			local forwardSpeed = velocity:Dot(forward)
-			local targetSpeed = throttle * speed
-			local alpha = 1 - math.exp(-18 * delta)
-			local nextForwardSpeed = forwardSpeed + (targetSpeed - forwardSpeed) * alpha
-			local lateralVelocity = velocity - forward * forwardSpeed
+			if forward.Magnitude > 0.001 then
+				forward = forward.Unit
 
-			root.AssemblyLinearVelocity = lateralVelocity + forward * nextForwardSpeed
+				local throttle = getVehicleThrottle(seat)
+				local speed = math.clamp(tonumber(VehicleSettings.Speed) or 60, 0, 500)
+				local velocity = root.AssemblyLinearVelocity
+				local forwardSpeed = velocity:Dot(forward)
+				local targetSpeed = throttle * speed
+				local alpha = 1 - math.exp(-18 * delta)
+				local nextForwardSpeed = forwardSpeed + (targetSpeed - forwardSpeed) * alpha
+				local lateralVelocity = velocity - forward * forwardSpeed
 
-			local steer = getVehicleSteer(seat)
-			local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
-			local movementFactor = math.clamp(horizontalSpeed / math.max(speed, 1), 0, 1)
-			local targetYaw = -steer
-				* math.clamp(tonumber(VehicleSettings.SteeringStrength) or 8, 0, 50)
-				* movementFactor
-			local angularVelocity = root.AssemblyAngularVelocity
-			local steeringAlpha = 1 - math.exp(-14 * delta)
+				root.AssemblyLinearVelocity = lateralVelocity + forward * nextForwardSpeed
 
-			root.AssemblyAngularVelocity = Vector3.new(
-				angularVelocity.X,
-				angularVelocity.Y + (targetYaw - angularVelocity.Y) * steeringAlpha,
-				angularVelocity.Z
-			)
+				local steer = getVehicleSteer(seat)
+				local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+				local movementFactor = math.clamp(horizontalSpeed / math.max(speed, 1), 0, 1)
+				local targetYaw = -steer
+					* math.clamp(tonumber(VehicleSettings.SteeringStrength) or 8, 0, 50)
+					* movementFactor
+				local angularVelocity = root.AssemblyAngularVelocity
+				local steeringAlpha = 1 - math.exp(-14 * delta)
+
+				root.AssemblyAngularVelocity = Vector3.new(
+					angularVelocity.X,
+					angularVelocity.Y + (targetYaw - angularVelocity.Y) * steeringAlpha,
+					angularVelocity.Z
+				)
+			end
+		else
+			clearVehicleFlipAssist()
 		end
+	else
+		clearVehicleWallDrive()
 	end
 
 	local jumpStabilizer = VehicleJumpSettings.Stabilizer
 
-	if jumpStabilizer and jumpStabilizer.Parent then
+	if jumpStabilizer and jumpStabilizer.Parent and not wallDriving then
 		jumpStabilizer.CFrame = getVehicleUprightCFrame(root, seat)
 	end
 
-	stabilizeVehicle(root, seat, delta)
+	if not wallDriving then
+		stabilizeVehicle(root, seat, delta)
+	end
 end
 
 local function canVehicleJump()
@@ -1054,6 +1285,7 @@ local function jumpVehicle()
 	end
 
 	VehicleJumpSettings.LastJump = now
+	clearVehicleWallDrive()
 
 	local seat = VehicleSettings.CurrentSeat
 	local root = VehicleSettings.CurrentRoot
@@ -2242,6 +2474,10 @@ local function setVehicleFlyEnabled(value)
 
 	VehicleFlySettings.Enabled = enabled
 
+	if enabled then
+		clearVehicleWallDrive()
+	end
+
 	if not enabled then
 		stopVehicleFlyRuntime()
 		return
@@ -2424,6 +2660,8 @@ local function cleanup()
 	stopFlyRuntime()
 	VehicleFlySettings.Enabled = false
 	stopVehicleFlyRuntime()
+	VehicleWallDriveSettings.Enabled = false
+	clearVehicleWallDrive()
 	VehicleTeleportSettings.Enabled = false
 	clearVehicleTeleportReinforcement()
 	clearVehicleFlipAssist()
@@ -3096,6 +3334,19 @@ local vehicleFlySpeedSlider = VehicleFlySection:AddSlider({
 })
 vehicleFlySpeedSlider.Instance.LayoutOrder = 2
 
+local VehicleWallDriveSection = VehicleMovementTab:AddSection({
+	Name = "Wall Drive"
+})
+
+local vehicleWallDriveToggle = VehicleWallDriveSection:AddToggle({
+	Name = "Enable Wall Drive",
+	Default = false,
+	Callback = function(value)
+		setVehicleWallDriveEnabled(value)
+	end
+})
+vehicleWallDriveToggle.Instance.LayoutOrder = 1
+
 local VehicleJumpSection = VehicleMovementTab:AddSection({
 	Name = "Vehicle Jump"
 })
@@ -3269,6 +3520,7 @@ local function queueLayoutRefresh()
 			FlingSection:Refresh()
 			VehicleSection:Refresh()
 			VehicleFlySection:Refresh()
+			VehicleWallDriveSection:Refresh()
 			VehicleJumpSection:Refresh()
 			VehicleTeleportSection:Refresh()
 		end
