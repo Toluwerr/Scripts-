@@ -82,7 +82,10 @@ local FlySettings = {
 	CurrentVelocity = Vector3.zero,
 	CurrentOrientation = nil,
 	OriginalAutoRotate = nil,
-	OriginalPlatformStand = nil
+	OriginalPlatformStand = nil,
+	AnimationConnection = nil,
+	AnimateScript = nil,
+	OriginalAnimateDisabled = nil
 }
 
 local VehicleSettings = {
@@ -1231,6 +1234,77 @@ local function setSpeedEnabled(value)
 	end
 end
 
+local function clearFlyAnimationLock()
+	disconnect(FlySettings.AnimationConnection)
+	FlySettings.AnimationConnection = nil
+
+	local animateScript = FlySettings.AnimateScript
+
+	if animateScript
+		and animateScript.Parent
+		and FlySettings.OriginalAnimateDisabled ~= nil then
+		pcall(function()
+			animateScript.Disabled = FlySettings.OriginalAnimateDisabled
+		end)
+	end
+
+	FlySettings.AnimateScript = nil
+	FlySettings.OriginalAnimateDisabled = nil
+end
+
+local function stopFlyAnimationTrack(track)
+	if track then
+		pcall(function()
+			track:Stop(0)
+		end)
+	end
+end
+
+local function lockFlyAnimations(character, humanoid)
+	clearFlyAnimationLock()
+
+	if not character
+		or not character.Parent
+		or not humanoid
+		or not humanoid.Parent then
+		return
+	end
+
+	local animateScript = character:FindFirstChild("Animate")
+
+	if animateScript and animateScript:IsA("LocalScript") then
+		FlySettings.AnimateScript = animateScript
+		FlySettings.OriginalAnimateDisabled = animateScript.Disabled
+		animateScript.Disabled = true
+	end
+
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+
+	if not animator then
+		local candidate = humanoid:FindFirstChild("Animator")
+
+		if candidate and candidate:IsA("Animator") then
+			animator = candidate
+		end
+	end
+
+	if not animator then
+		return
+	end
+
+	for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+		stopFlyAnimationTrack(track)
+	end
+
+	FlySettings.AnimationConnection = animator.AnimationPlayed:Connect(function(track)
+		if running
+			and FlySettings.Enabled
+			and FlySettings.Humanoid == humanoid then
+			task.defer(stopFlyAnimationTrack, track)
+		end
+	end)
+end
+
 local function destroyFlyBodyMovers()
 	if FlySettings.BodyVelocity then
 		pcall(function()
@@ -1252,6 +1326,8 @@ local function stopFlyRuntime()
 	pcall(function()
 		RunService:UnbindFromRenderStep(FLY_BIND_NAME)
 	end)
+
+	clearFlyAnimationLock()
 
 	local root = FlySettings.Root
 	local humanoid = FlySettings.Humanoid
@@ -1357,6 +1433,14 @@ local function updateFly(deltaTime)
 
 	deltaTime = tonumber(deltaTime) or (1 / 60)
 
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+
+	if animator then
+		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+			stopFlyAnimationTrack(track)
+		end
+	end
+
 	local direction, _, strafeInput = getFlyInput(camera)
 	local targetVelocity = direction * FlySettings.Speed
 	local currentVelocity = FlySettings.CurrentVelocity
@@ -1429,6 +1513,7 @@ local function startFlyForCharacter(character)
 
 	humanoid.AutoRotate = false
 	humanoid.PlatformStand = true
+	lockFlyAnimations(character, humanoid)
 	humanoid:ChangeState(Enum.HumanoidStateType.Physics)
 
 	local camera = Workspace.CurrentCamera
