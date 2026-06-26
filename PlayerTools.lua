@@ -2211,6 +2211,8 @@ local function updateCharacterGrapplePose(deltaTime)
 	deltaTime = math.max(tonumber(deltaTime) or (1 / 60), 0)
 	GrappleSettings.AnimationTime += deltaTime
 
+	local pullDirection = direction.Unit
+	local relativeDirection = root.CFrame:VectorToObjectSpace(pullDirection)
 	local speedRatio = math.clamp(
 		GrappleSettings.CurrentSpeed / math.max(GrappleSettings.Speed, 1),
 		0,
@@ -2223,49 +2225,53 @@ local function updateCharacterGrapplePose(deltaTime)
 		1
 	)
 	local shotEase = shotProgress * shotProgress * (3 - 2 * shotProgress)
-	local cycle = GrappleSettings.AnimationTime * (4.5 + speedRatio * 3)
-	local legMotion = math.sin(cycle) * math.rad(2) * speedRatio
-	local poseBlend = 1 - math.exp(-18 * deltaTime)
+	local cycle = GrappleSettings.AnimationTime * (4.2 + speedRatio * 3.2)
+	local legMotion = math.sin(cycle) * math.rad(2.5) * speedRatio
+	local poseBlend = 1 - math.exp(-22 * deltaTime)
+	local upwardPull = math.clamp(relativeDirection.Y, -0.75, 0.75)
+	local torsoPitch = math.rad(-12) + upwardPull * math.rad(10)
+	local torsoRoll = math.rad(-7)
+	local torsoYaw = math.rad(6)
 
 	for joint, state in pairs(GrappleSettings.JointTransforms) do
 		if joint and joint.Parent and state and state.C0 then
 			if state.Role == "rightshoulder"
-				and applyCharacterGrappleArmTarget(joint, state, targetPosition, 6) then
-				continue
-			end
-
-			if state.Role == "leftshoulder"
-				or state.Role == "leftelbow"
-				or state.Role == "rightelbow" then
-				pcall(function()
-					joint.C0 = state.C0
-					joint.Transform = CFrame.identity
-				end)
+				and applyCharacterGrappleArmTarget(joint, state, targetPosition, 10) then
 				continue
 			end
 
 			local offset = nil
 
-			if state.Role == "righthip" then
+			if state.Role == "rightelbow" then
+				offset = CFrame.Angles(math.rad(-18), math.rad(4), math.rad(-8))
+			elseif state.Role == "leftshoulder" then
 				offset = CFrame.Angles(
-					math.rad(-13),
-					math.rad(2),
-					math.rad(2) + legMotion
+					math.rad(-38),
+					math.rad(14),
+					math.rad(-40)
+				)
+			elseif state.Role == "leftelbow" then
+				offset = CFrame.Angles(math.rad(34), 0, math.rad(12))
+			elseif state.Role == "righthip" then
+				offset = CFrame.Angles(
+					math.rad(-24) + upwardPull * math.rad(6),
+					math.rad(4),
+					math.rad(8) + legMotion
 				)
 			elseif state.Role == "lefthip" then
 				offset = CFrame.Angles(
-					math.rad(-13),
-					math.rad(-2),
-					math.rad(-2) - legMotion
+					math.rad(-14) + upwardPull * math.rad(4),
+					math.rad(-6),
+					math.rad(-10) - legMotion
 				)
 			elseif state.Role == "rightknee" then
-				offset = CFrame.Angles(math.rad(10), 0, 0)
+				offset = CFrame.Angles(math.rad(18), 0, 0)
 			elseif state.Role == "leftknee" then
-				offset = CFrame.Angles(math.rad(10), 0, 0)
+				offset = CFrame.Angles(math.rad(28), 0, 0)
 			elseif state.Role == "waist" or state.Role == "root" then
-				offset = CFrame.Angles(math.rad(-7) * speedRatio, 0, math.rad(-2))
+				offset = CFrame.Angles(torsoPitch, torsoYaw, torsoRoll)
 			elseif state.Role == "neck" then
-				offset = CFrame.Angles(math.rad(3), 0, 0)
+				offset = CFrame.Angles(math.rad(8), math.rad(6), math.rad(3))
 			end
 
 			if offset then
