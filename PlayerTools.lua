@@ -1851,7 +1851,7 @@ local function destroyCharacterGrappleObjects()
 	GrappleSettings.TargetAttachment = nil
 end
 
-clearCharacterGrapple = function()
+clearCharacterGrapple = function(launchVelocity)
 	pcall(function()
 		RunService:UnbindFromRenderStep(GRAPPLE_BIND_NAME)
 	end)
@@ -1862,7 +1862,8 @@ clearCharacterGrapple = function()
 
 	local root = GrappleSettings.Root
 	local humanoid = GrappleSettings.Humanoid
-	local carriedVelocity = GrappleSettings.CurrentVelocity
+	local isLaunch = launchVelocity ~= nil
+	local carriedVelocity = launchVelocity or GrappleSettings.CurrentVelocity
 
 	if carriedVelocity.Magnitude <= 0.01 and root and root.Parent then
 		carriedVelocity = root.AssemblyLinearVelocity
@@ -1870,11 +1871,6 @@ clearCharacterGrapple = function()
 
 	destroyCharacterGrappleObjects()
 	clearCharacterGrappleSegments()
-
-	if root and root.Parent then
-		root.AssemblyLinearVelocity = carriedVelocity * 0.42
-		root.AssemblyAngularVelocity = Vector3.zero
-	end
 
 	if humanoid and humanoid.Parent then
 		if GrappleSettings.OriginalAutoRotate ~= nil then
@@ -1888,6 +1884,13 @@ clearCharacterGrapple = function()
 		if humanoid.Health > 0 then
 			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
 		end
+	end
+
+	if root and root.Parent then
+		root.AssemblyLinearVelocity = isLaunch
+			and carriedVelocity
+			or carriedVelocity * 0.42
+		root.AssemblyAngularVelocity = Vector3.zero
 	end
 
 	GrappleSettings.Active = false
@@ -2025,14 +2028,14 @@ local function updateCharacterGrappleTrajectory(deltaTime)
 	local pitch = getCharacterGrappleLookPitch()
 
 	if not pitch then
-		return
+		return false
 	end
 
 	local previousPitch = GrappleSettings.LastLookPitch
 	GrappleSettings.LastLookPitch = pitch
 
 	if previousPitch == nil then
-		return
+		return false
 	end
 
 	local lookDownRate = math.max(
@@ -2040,20 +2043,54 @@ local function updateCharacterGrappleTrajectory(deltaTime)
 		0
 	)
 
-	if lookDownRate > 0.012 then
-		local liftGain = (8 + math.min(lookDownRate, 4) * 72) * deltaTime
-
-		GrappleSettings.TrajectoryLift = math.min(
-			GrappleSettings.MaxTrajectoryLift,
-			GrappleSettings.TrajectoryLift + liftGain
-		)
-	else
-		GrappleSettings.TrajectoryLift = moveGrappleSpeed(
-			GrappleSettings.TrajectoryLift,
-			0,
-			GrappleSettings.TrajectoryLiftDecay * deltaTime
-		)
+	if lookDownRate < 0.02 then
+		return false
 	end
+
+	local root = GrappleSettings.Root
+
+	if not root or not root.Parent then
+		return false
+	end
+
+	local currentVelocity = GrappleSettings.CurrentVelocity
+	local horizontalVelocity = Vector3.new(
+		currentVelocity.X,
+		0,
+		currentVelocity.Z
+	)
+
+	if horizontalVelocity.Magnitude < 10 then
+		local forward = Vector3.new(
+			root.CFrame.LookVector.X,
+			0,
+			root.CFrame.LookVector.Z
+		)
+
+		if forward.Magnitude > 0.01 then
+			horizontalVelocity = forward.Unit * math.max(
+				GrappleSettings.CurrentSpeed * 0.55,
+				28
+			)
+		end
+	end
+
+	local upwardBoost = math.clamp(
+		62 + lookDownRate * 48,
+		62,
+		165
+	)
+	local horizontalCarry = horizontalVelocity * math.clamp(
+		0.95 + lookDownRate * 0.06,
+		0.95,
+		1.22
+	)
+	local launchVelocity = horizontalCarry + Vector3.new(0, upwardBoost, 0)
+
+	GrappleSettings.Holding = false
+	clearCharacterGrapple(launchVelocity)
+
+	return true
 end
 
 local function updateCharacterGrapplePhysics(deltaTime)
@@ -2074,7 +2111,10 @@ local function updateCharacterGrapplePhysics(deltaTime)
 	end
 
 	deltaTime = math.max(tonumber(deltaTime) or (1 / 60), 0)
-	updateCharacterGrappleTrajectory(deltaTime)
+
+	if updateCharacterGrappleTrajectory(deltaTime) then
+		return
+	end
 
 	local pullVector = targetAttachment.WorldPosition - rootAttachment.WorldPosition
 	local distance = pullVector.Magnitude
@@ -2093,14 +2133,8 @@ local function updateCharacterGrapplePhysics(deltaTime)
 			stopAlpha
 		)
 
-		local endpointVelocity = GrappleSettings.CurrentVelocity + Vector3.new(
-			0,
-			GrappleSettings.TrajectoryLift,
-			0
-		)
-
-		bodyVelocity.Velocity = endpointVelocity
-		root.AssemblyLinearVelocity = endpointVelocity
+		bodyVelocity.Velocity = GrappleSettings.CurrentVelocity
+		root.AssemblyLinearVelocity = GrappleSettings.CurrentVelocity
 		return
 	end
 
@@ -2130,14 +2164,8 @@ local function updateCharacterGrapplePhysics(deltaTime)
 		velocityFollow
 	)
 
-	local trajectoryVelocity = GrappleSettings.CurrentVelocity + Vector3.new(
-		0,
-		GrappleSettings.TrajectoryLift,
-		0
-	)
-
-	bodyVelocity.Velocity = trajectoryVelocity
-	root.AssemblyLinearVelocity = trajectoryVelocity
+	bodyVelocity.Velocity = GrappleSettings.CurrentVelocity
+	root.AssemblyLinearVelocity = GrappleSettings.CurrentVelocity
 
 	if GrappleSettings.InitialDistance <= 0 then
 		GrappleSettings.InitialDistance = distance
