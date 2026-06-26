@@ -1772,6 +1772,10 @@ local function restoreCharacterGrapplePose()
 			pcall(function()
 				joint.Transform = state.Transform
 				joint.C0 = state.C0
+
+				if state.C1 then
+					joint.C1 = state.C1
+				end
 			end)
 		end
 	end
@@ -1788,6 +1792,9 @@ local function captureCharacterGrapplePose(character, humanoid)
 			GrappleSettings.JointTransforms[object] = {
 				Transform = object.Transform,
 				C0 = object.C0,
+				C1 = object.C1,
+				Part0 = object.Part0,
+				Part1 = object.Part1,
 				Role = getCharacterGrappleJointRole(object)
 			}
 		end
@@ -2116,6 +2123,58 @@ local function updateCharacterGrappleSegments()
 	end
 end
 
+local function getCharacterGrappleDirectionUp(direction, fallback)
+	local upVector = Vector3.yAxis
+
+	if math.abs(direction:Dot(upVector)) > 0.91 then
+		upVector = fallback and fallback.RightVector or Vector3.xAxis
+	end
+
+	return upVector
+end
+
+local function applyCharacterGrappleRightArm(joint, state, targetPosition)
+	if not joint
+		or not joint.Parent
+		or not state
+		or not state.Part0
+		or not state.Part0.Parent
+		or not state.Part1
+		or not state.Part1.Parent
+		or not state.C0
+		or not state.C1 then
+		return false
+	end
+
+	local shoulderCFrame = state.Part0.CFrame * state.C0
+	local shoulderPosition = shoulderCFrame.Position
+	local armDirection = targetPosition - shoulderPosition
+
+	if armDirection.Magnitude < 0.01 then
+		return false
+	end
+
+	armDirection = armDirection.Unit
+
+	local armLength = math.max(state.Part1.Size.Y, 0.5)
+	local centerPosition = shoulderPosition + armDirection * (armLength * 0.45)
+	local upVector = getCharacterGrappleDirectionUp(armDirection, state.Part0.CFrame)
+	local desiredPartCFrame = CFrame.lookAt(
+		centerPosition,
+		centerPosition + armDirection,
+		upVector
+	) * CFrame.Angles(math.rad(90), 0, 0)
+
+	local desiredC0 = state.Part0.CFrame:ToObjectSpace(desiredPartCFrame) * state.C1
+
+	pcall(function()
+		joint.C0 = desiredC0
+		joint.Transform = CFrame.identity
+	end)
+
+	return true
+end
+
 local function updateCharacterGrapplePose(deltaTime)
 	if not isCharacterGrappleValid() then
 		clearCharacterGrapple()
@@ -2148,30 +2207,18 @@ local function updateCharacterGrapplePose(deltaTime)
 	local cycle = GrappleSettings.AnimationTime * (4 + speedRatio * 3)
 	local legMotion = math.sin(cycle) * math.rad(2.5) * speedRatio
 	local poseBlend = 1 - math.exp(-24 * deltaTime)
-	local isR6 = GrappleSettings.RigType == Enum.HumanoidRigType.R6
 
 	for joint, state in pairs(GrappleSettings.JointTransforms) do
 		if joint and joint.Parent and state and state.C0 then
+			if state.Role == "rightshoulder"
+				and applyCharacterGrappleRightArm(joint, state, targetPosition) then
+				continue
+			end
+
 			local offset = nil
 
-			if state.Role == "rightshoulder" then
-				local armForward = math.rad(35 + 58 * shotEase)
-
-				if isR6 then
-					offset = CFrame.Angles(
-						armForward,
-						math.rad(-12),
-						math.rad(17)
-					)
-				else
-					offset = CFrame.Angles(
-						armForward,
-						math.rad(-16),
-						math.rad(18)
-					)
-				end
-			elseif state.Role == "rightelbow" then
-				offset = CFrame.Angles(math.rad(-6), 0, math.rad(-8))
+			if state.Role == "rightelbow" then
+				offset = CFrame.Angles(math.rad(-8), 0, math.rad(-10))
 			elseif state.Role == "leftshoulder" then
 				offset = CFrame.Angles(
 					math.rad(-27),
