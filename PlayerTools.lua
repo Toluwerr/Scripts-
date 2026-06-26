@@ -54,6 +54,12 @@ local MovementSettings = {
 	CollisionStates = setmetatable({}, {__mode = "k"})
 }
 
+local ClickTeleportSettings = {
+	Enabled = false,
+	Cooldown = 0.12,
+	LastTeleport = 0
+}
+
 local AimlockSettings = {
 	Enabled = false,
 	TeamCheck = true,
@@ -992,6 +998,12 @@ local function updateVehicleBoost(deltaTime)
 		end
 	end
 
+	local jumpStabilizer = VehicleJumpSettings.Stabilizer
+
+	if jumpStabilizer and jumpStabilizer.Parent then
+		jumpStabilizer.CFrame = getVehicleUprightCFrame(root, seat)
+	end
+
 	stabilizeVehicle(root, seat, delta)
 end
 
@@ -1067,7 +1079,7 @@ local function jumpVehicle()
 
 			local stabilizer = Instance.new("BodyGyro")
 			stabilizer.Name = "__PlayerToolsVehicleJumpStabilizer"
-			stabilizer.MaxTorque = Vector3.new(1e8, 1e8, 1e8)
+			stabilizer.MaxTorque = Vector3.new(1e8, 0, 1e8)
 			stabilizer.P = 30000
 			stabilizer.D = 1600
 			stabilizer.CFrame = CFrame.lookAt(
@@ -1092,6 +1104,85 @@ local function jumpVehicle()
 			end)
 		end
 	end
+end
+
+local function canClickTeleport()
+	local character = LocalPlayer.Character
+	local root = getRoot(character)
+	local humanoid = MovementSettings.Humanoid
+
+	return running
+		and ClickTeleportSettings.Enabled
+		and character
+		and character.Parent
+		and root
+		and root.Parent
+		and humanoid
+		and humanoid.Parent
+end
+
+local function getClickTeleportTarget(screenPosition)
+	local camera = Workspace.CurrentCamera
+	local character = LocalPlayer.Character
+
+	if not camera then
+		return nil
+	end
+
+	local position = screenPosition or UserInputService:GetMouseLocation()
+	local ray = camera:ViewportPointToRay(position.X, position.Y)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = character and {character} or {}
+	params.IgnoreWater = false
+
+	local result = Workspace:Raycast(ray.Origin, ray.Direction * 10000, params)
+
+	if not result then
+		return nil
+	end
+
+	return result.Position
+end
+
+local function teleportCharacterToMouse(screenPosition)
+	if not canClickTeleport() then
+		return
+	end
+
+	local now = os.clock()
+
+	if now - ClickTeleportSettings.LastTeleport < ClickTeleportSettings.Cooldown then
+		return
+	end
+
+	local destination = getClickTeleportTarget(screenPosition)
+
+	if not destination then
+		return
+	end
+
+	local root = getRoot(LocalPlayer.Character)
+
+	if not root or not root.Parent then
+		return
+	end
+
+	local look = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+
+	if look.Magnitude < 0.001 then
+		look = Vector3.zAxis
+	else
+		look = look.Unit
+	end
+
+	local lift = math.max(root.Size.Y * 0.5 + 2, 3)
+	local position = destination + Vector3.yAxis * lift
+
+	root.CFrame = CFrame.lookAt(position, position + look)
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	ClickTeleportSettings.LastTeleport = now
 end
 
 local function canVehicleTeleport()
@@ -2046,6 +2137,7 @@ local function cleanup()
 	Settings.Enabled = false
 	AimlockSettings.Enabled = false
 	MovementSettings.Noclip = false
+	ClickTeleportSettings.Enabled = false
 	clearNoclip()
 	FlingSettings.Enabled = false
 	FlingSettings.WorkerToken += 1
@@ -2572,6 +2664,19 @@ local noclipToggle = MovementSection:AddToggle({
 })
 noclipToggle.Instance.LayoutOrder = 5
 
+local ClickTeleportSection = MovementTab:AddSection({
+	Name = "Click Teleport",
+})
+
+local clickTeleportToggle = ClickTeleportSection:AddToggle({
+	Name = "Enable Click Teleport",
+	Default = false,
+	Callback = function(value)
+		ClickTeleportSettings.Enabled = value and true or false
+	end
+})
+clickTeleportToggle.Instance.LayoutOrder = 1
+
 local FlySection = MovementTab:AddSection({
 	Name = "Fly",
 })
@@ -2808,9 +2913,7 @@ end))
 
 
 track(Mouse.Button1Down:Connect(function()
-	if not running
-		or not VehicleTeleportSettings.Enabled
-		or UserInputService:GetFocusedTextBox() then
+	if not running or UserInputService:GetFocusedTextBox() then
 		return
 	end
 
@@ -2829,9 +2932,16 @@ track(Mouse.Button1Down:Connect(function()
 		end
 	end
 
-	if not overWindow then
-		teleportVehicleToMouse(position)
+	if overWindow then
+		return
 	end
+
+	if canVehicleTeleport() then
+		teleportVehicleToMouse(position)
+		return
+	end
+
+	teleportCharacterToMouse(position)
 end))
 
 pcall(function()
@@ -2874,6 +2984,7 @@ local function queueLayoutRefresh()
 		if running then
 			StyleSection:Refresh()
 			MovementSection:Refresh()
+			ClickTeleportSection:Refresh()
 			FlySection:Refresh()
 			AimlockSection:Refresh()
 			FlingSection:Refresh()
