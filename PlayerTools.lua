@@ -23,7 +23,7 @@ elseif type(Global.__ProjectESPCleanup) == "function" then
 end
 
 local Google = loadstring(game:HttpGet("https://raw.githubusercontent.com/Toluwerr/Google-UI/refs/heads/main/main.lua"))()
-Google.SetTheme("Google")
+Google.SetTheme("DarkGoogle")
 
 local Settings = {
 	Enabled = false,
