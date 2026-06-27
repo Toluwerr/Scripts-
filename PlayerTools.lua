@@ -60,6 +60,17 @@ local ClickTeleportSettings = {
 	LastTeleport = 0
 }
 
+local PlatformSettings = {
+	Enabled = false,
+	Part = nil,
+	Connection = nil,
+	UpHeld = false,
+	DownHeld = false,
+	ForwardHeld = false,
+	MoveSpeed = 42,
+	Size = Vector3.new(12, 1, 12)
+}
+
 local AimlockSettings = {
 	Enabled = false,
 	TeamCheck = true,
@@ -655,6 +666,161 @@ local function setNoclipEnabled(value)
 	MovementSettings.NoclipConnection = RunService.Stepped:Connect(function()
 		applyNoclip()
 	end)
+end
+
+local function clearPlatform()
+	disconnect(PlatformSettings.Connection)
+	PlatformSettings.Connection = nil
+
+	if PlatformSettings.Part then
+		pcall(function()
+			PlatformSettings.Part:Destroy()
+		end)
+	end
+
+	PlatformSettings.Part = nil
+	PlatformSettings.UpHeld = false
+	PlatformSettings.DownHeld = false
+	PlatformSettings.ForwardHeld = false
+end
+
+local function getPlatformStartCFrame(character)
+	local humanoid = MovementSettings.Humanoid
+	local root = getRoot(character)
+
+	if not humanoid
+		or not humanoid.Parent
+		or not root
+		or not root.Parent then
+		return nil
+	end
+
+	local verticalOffset = humanoid.HipHeight
+		+ root.Size.Y * 0.5
+		+ PlatformSettings.Size.Y * 0.5
+
+	return CFrame.new(root.Position - Vector3.yAxis * verticalOffset)
+end
+
+local function isCharacterOnPlatform(character, root, platform)
+	if not character
+		or not root
+		or not platform
+		or not platform.Parent then
+		return false
+	end
+
+	local localPosition = platform.CFrame:PointToObjectSpace(root.Position)
+	local horizontalPadding = 1.5
+	local expectedHeight = MovementSettings.Humanoid
+		and MovementSettings.Humanoid.HipHeight
+		+ root.Size.Y * 0.5
+		+ platform.Size.Y * 0.5
+		or 3
+
+	return math.abs(localPosition.X) <= platform.Size.X * 0.5 + horizontalPadding
+		and math.abs(localPosition.Z) <= platform.Size.Z * 0.5 + horizontalPadding
+		and math.abs(localPosition.Y - expectedHeight) <= 5
+end
+
+local function movePlatformBy(offset)
+	local platform = PlatformSettings.Part
+
+	if not platform or not platform.Parent then
+		return
+	end
+
+	platform.CFrame += offset
+
+	local character = LocalPlayer.Character
+	local root = getRoot(character)
+
+	if root
+		and root.Parent
+		and isCharacterOnPlatform(character, root, platform) then
+		root.CFrame += offset
+		root.AssemblyLinearVelocity = Vector3.zero
+	end
+end
+
+local function updatePlatform(deltaTime)
+	if not running
+		or not PlatformSettings.Enabled
+		or not PlatformSettings.Part
+		or not PlatformSettings.Part.Parent then
+		return
+	end
+
+	local movement = Vector3.zero
+
+	if PlatformSettings.UpHeld then
+		movement += Vector3.yAxis
+	end
+
+	if PlatformSettings.DownHeld then
+		movement -= Vector3.yAxis
+	end
+
+	if PlatformSettings.ForwardHeld then
+		local camera = Workspace.CurrentCamera
+		local lookVector = camera and camera.CFrame.LookVector or Vector3.zAxis
+		local forward = Vector3.new(lookVector.X, 0, lookVector.Z)
+
+		if forward.Magnitude > 0.001 then
+			movement += forward.Unit
+		end
+	end
+
+	if movement.Magnitude > 0.001 then
+		movePlatformBy(
+			movement.Unit
+				* PlatformSettings.MoveSpeed
+				* math.max(tonumber(deltaTime) or 0, 0)
+		)
+	end
+end
+
+local function startPlatformForCharacter(character)
+	clearPlatform()
+
+	if not running or not PlatformSettings.Enabled then
+		return
+	end
+
+	local cframe = getPlatformStartCFrame(character)
+
+	if not cframe then
+		return
+	end
+
+	local platform = Instance.new("Part")
+	platform.Name = "__PlayerToolsPlatform"
+	platform.Anchored = true
+	platform.CanCollide = true
+	platform.CanTouch = true
+	platform.CanQuery = false
+	platform.CastShadow = true
+	platform.Size = PlatformSettings.Size
+	platform.CFrame = cframe
+	platform.Material = Enum.Material.Plastic
+	platform.Color = Color3.fromRGB(90, 130, 205)
+	platform.TopSurface = Enum.SurfaceType.Studs
+	platform.BottomSurface = Enum.SurfaceType.Inlet
+	platform.Parent = Workspace
+
+	PlatformSettings.Part = platform
+	PlatformSettings.Connection = RunService.Heartbeat:Connect(updatePlatform)
+end
+
+local function setPlatformEnabled(value)
+	PlatformSettings.Enabled = value and true or false
+
+	if not PlatformSettings.Enabled then
+		clearPlatform()
+		return
+	end
+
+	startPlatformForCharacter(LocalPlayer.Character)
 end
 
 local function clearVehicleSeatedConnection()
@@ -1834,6 +2000,16 @@ local function bindMovementCharacter(character)
 		applyNoclip()
 	end
 
+	if PlatformSettings.Enabled then
+		task.defer(function()
+			if running
+				and PlatformSettings.Enabled
+				and LocalPlayer.Character == character then
+				startPlatformForCharacter(character)
+			end
+		end)
+	end
+
 	if MovementSettings.Enabled then
 		MovementSettings.OriginalSpeed = humanoid.WalkSpeed
 		applySpeed()
@@ -2585,6 +2761,8 @@ local function cleanup()
 	AimlockSettings.Enabled = false
 	MovementSettings.Noclip = false
 	ClickTeleportSettings.Enabled = false
+	PlatformSettings.Enabled = false
+	clearPlatform()
 	clearNoclip()
 	FlingSettings.Enabled = false
 	FlingSettings.WorkerToken += 1
@@ -3128,6 +3306,19 @@ local clickTeleportToggle = ClickTeleportSection:AddToggle({
 })
 clickTeleportToggle.Instance.LayoutOrder = 1
 
+local PlatformSection = MovementTab:AddSection({
+	Name = "Platform",
+})
+
+local platformToggle = PlatformSection:AddToggle({
+	Name = "Enable Platform",
+	Default = false,
+	Callback = function(value)
+		setPlatformEnabled(value)
+	end
+})
+platformToggle.Instance.LayoutOrder = 1
+
 local FlySection = MovementTab:AddSection({
 	Name = "Fly",
 })
@@ -3379,6 +3570,25 @@ local function setInterfaceHidden(value)
 end
 
 track(UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+	if PlatformSettings.Enabled
+		and not UserInputService:GetFocusedTextBox() then
+		if input.KeyCode == Enum.KeyCode.E then
+			PlatformSettings.UpHeld = true
+			return
+		end
+
+		if input.KeyCode == Enum.KeyCode.Q then
+			PlatformSettings.DownHeld = true
+			return
+		end
+
+		if input.KeyCode == Enum.KeyCode.LeftShift
+			or input.KeyCode == Enum.KeyCode.RightShift then
+			PlatformSettings.ForwardHeld = true
+			return
+		end
+	end
+
 	if input.KeyCode == Enum.KeyCode.K
 		and not UserInputService:GetFocusedTextBox() then
 		setInterfaceHidden(not InterfaceSettings.Hidden)
@@ -3406,6 +3616,22 @@ track(UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
 end))
 
 track(UserInputService.InputEnded:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.E then
+		PlatformSettings.UpHeld = false
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.Q then
+		PlatformSettings.DownHeld = false
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.LeftShift
+		or input.KeyCode == Enum.KeyCode.RightShift then
+		PlatformSettings.ForwardHeld = false
+		return
+	end
+
 	if input.UserInputType == Enum.UserInputType.MouseButton2 then
 		endAimlock()
 	end
@@ -3485,6 +3711,7 @@ local function queueLayoutRefresh()
 			StyleSection:Refresh()
 			MovementSection:Refresh()
 			ClickTeleportSection:Refresh()
+			PlatformSection:Refresh()
 			FlySection:Refresh()
 			AimlockSection:Refresh()
 			FlingSection:Refresh()
