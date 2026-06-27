@@ -108,7 +108,6 @@ local VehicleSettings = {
 	OriginalMaxSpeed = setmetatable({}, {__mode = "k"}),
 	OriginalTurnSpeed = setmetatable({}, {__mode = "k"}),
 	SeatedConnection = nil,
-	DiedConnection = nil,
 	SpeedWatchConnection = nil,
 	BoostConnection = nil,
 	FlipGyro = nil,
@@ -133,7 +132,6 @@ local VehicleJumpSettings = {
 	Power = 90,
 	Cooldown = 0.65,
 	LastJump = 0,
-	AirUntil = 0,
 	Stabilizer = nil,
 	StabilizerToken = 0
 }
@@ -155,11 +153,7 @@ local VehicleTeleportSettings = {
 local VehicleFlingSettings = {
 	Enabled = false,
 	Power = 100,
-	WorkerToken = 0,
-	PulseToken = 0,
-	SuspendUntil = 0,
-	ActiveRoot = nil,
-	ActiveVelocity = nil
+	WorkerToken = 0
 }
 
 local InterfaceSettings = {
@@ -759,29 +753,6 @@ local function getVehicleUprightCFrame(root, seat)
 	return CFrame.lookAt(root.Position, root.Position + heading, Vector3.yAxis)
 end
 
-local function clearVehicleFlingPulse()
-	VehicleFlingSettings.PulseToken += 1
-
-	local root = VehicleFlingSettings.ActiveRoot
-	local velocity = VehicleFlingSettings.ActiveVelocity
-
-	if root
-		and root.Parent
-		and velocity then
-		pcall(function()
-			root.AssemblyLinearVelocity = velocity
-		end)
-	end
-
-	VehicleFlingSettings.ActiveRoot = nil
-	VehicleFlingSettings.ActiveVelocity = nil
-end
-
-local function clearVehicleDiedConnection()
-	disconnect(VehicleSettings.DiedConnection)
-	VehicleSettings.DiedConnection = nil
-end
-
 local function clearVehicleTeleportReinforcement()
 	VehicleTeleportSettings.ReinforceToken += 1
 	disconnect(VehicleTeleportSettings.ReinforceConnection)
@@ -798,7 +769,6 @@ local function restoreVehicleSpeed()
 	clearVehicleJumpStabilizer()
 	clearVehicleFlipAssist()
 	clearVehicleTeleportReinforcement()
-	clearVehicleFlingPulse()
 
 	if stopVehicleFlyRuntime then
 		stopVehicleFlyRuntime()
@@ -820,8 +790,6 @@ local function restoreVehicleSpeed()
 		end)
 	end
 
-	VehicleJumpSettings.AirUntil = 0
-	VehicleFlingSettings.SuspendUntil = 0
 	VehicleSettings.CurrentSeat = nil
 	VehicleSettings.CurrentModel = nil
 	VehicleSettings.CurrentRoot = nil
@@ -1027,30 +995,20 @@ local function updateVehicleBoost(deltaTime)
 		if forward.Magnitude > 0.001 then
 			forward = forward.Unit
 
+			local throttle = getVehicleThrottle(seat)
+			local speed = math.clamp(tonumber(VehicleSettings.Speed) or 60, 0, 500)
 			local velocity = root.AssemblyLinearVelocity
-			local airborne = os.clock() < VehicleJumpSettings.AirUntil
+			local forwardSpeed = velocity:Dot(forward)
+			local targetSpeed = throttle * speed
+			local alpha = 1 - math.exp(-18 * delta)
+			local nextForwardSpeed = forwardSpeed + (targetSpeed - forwardSpeed) * alpha
+			local lateralVelocity = velocity - forward * forwardSpeed
 
-			if not airborne then
-				local throttle = getVehicleThrottle(seat)
-				local speed = math.clamp(tonumber(VehicleSettings.Speed) or 60, 0, 500)
-				local forwardSpeed = velocity:Dot(forward)
-				local targetSpeed = throttle * speed
-				local alpha = 1 - math.exp(-18 * delta)
-				local nextForwardSpeed = forwardSpeed + (targetSpeed - forwardSpeed) * alpha
-				local lateralVelocity = velocity - forward * forwardSpeed
-
-				root.AssemblyLinearVelocity = lateralVelocity + forward * nextForwardSpeed
-				velocity = root.AssemblyLinearVelocity
-			end
+			root.AssemblyLinearVelocity = lateralVelocity + forward * nextForwardSpeed
 
 			local steer = getVehicleSteer(seat)
-			local speed = math.clamp(tonumber(VehicleSettings.Speed) or 60, 0, 500)
 			local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
-			local movementFactor = math.clamp(
-				math.max(horizontalSpeed, airborne and 12 or 0) / math.max(speed, 1),
-				0,
-				1
-			)
+			local movementFactor = math.clamp(horizontalSpeed / math.max(speed, 1), 0, 1)
 			local targetYaw = -steer
 				* math.clamp(tonumber(VehicleSettings.SteeringStrength) or 8, 0, 50)
 				* movementFactor
@@ -1106,18 +1064,6 @@ local function jumpVehicle()
 	local seat = VehicleSettings.CurrentSeat
 	local root = VehicleSettings.CurrentRoot
 	local power = math.clamp(tonumber(VehicleJumpSettings.Power) or 90, 20, 250)
-	local airTime = 0.48 + math.clamp(power / 250, 0, 1) * 0.62
-
-	VehicleJumpSettings.AirUntil = now + airTime
-
-	if VehicleFlingSettings.Enabled then
-		VehicleFlingSettings.SuspendUntil = math.max(
-			VehicleFlingSettings.SuspendUntil,
-			now + airTime + 0.08
-		)
-		clearVehicleFlingPulse()
-	end
-
 	local velocity = root.AssemblyLinearVelocity
 	local forward = Vector3.new(seat.CFrame.LookVector.X, 0, seat.CFrame.LookVector.Z)
 
@@ -1277,20 +1223,8 @@ local function canVehicleFling()
 		and root.Parent
 		and humanoid
 		and humanoid.Parent
-		and humanoid.Health > 0
 		and isVehicleSeatPart(seat)
 		and seat.Occupant == humanoid
-end
-
-local function isVehicleFlingPulseValid(root, workerToken, pulseToken)
-	return running
-		and VehicleFlingSettings.Enabled
-		and workerToken == VehicleFlingSettings.WorkerToken
-		and pulseToken == VehicleFlingSettings.PulseToken
-		and root
-		and root.Parent
-		and VehicleSettings.CurrentRoot == root
-		and canVehicleFling()
 end
 
 local function setVehicleFlingEnabled(value)
@@ -1302,8 +1236,6 @@ local function setVehicleFlingEnabled(value)
 
 	VehicleFlingSettings.Enabled = enabled
 	VehicleFlingSettings.WorkerToken += 1
-	VehicleFlingSettings.SuspendUntil = 0
-	clearVehicleFlingPulse()
 
 	if not enabled then
 		return
@@ -1325,48 +1257,45 @@ local function setVehicleFlingEnabled(value)
 				break
 			end
 
-			if os.clock() < VehicleFlingSettings.SuspendUntil
-				or VehicleFlySettings.Enabled
-				or VehicleTeleportSettings.ReinforceConnection
-				or not canVehicleFling() then
-				continue
-			end
+			if not VehicleFlySettings.Enabled
+				and not VehicleTeleportSettings.ReinforceConnection
+				and canVehicleFling() then
+				local root = VehicleSettings.CurrentRoot
 
-			local root = VehicleSettings.CurrentRoot
+				if root and root.Parent then
+					local savedVelocity = root.AssemblyLinearVelocity
+					local power = math.clamp(
+						tonumber(VehicleFlingSettings.Power) or 100,
+						1,
+						1000
+					)
 
-			if root and root.Parent then
-				local savedVelocity = root.AssemblyLinearVelocity
-				local power = math.clamp(
-					tonumber(VehicleFlingSettings.Power) or 100,
-					1,
-					1000
-				)
-				local pulseToken = VehicleFlingSettings.PulseToken
+					root.AssemblyLinearVelocity = savedVelocity * power
+						+ Vector3.new(0, power, 0)
 
-				VehicleFlingSettings.ActiveRoot = root
-				VehicleFlingSettings.ActiveVelocity = savedVelocity
+					RunService.RenderStepped:Wait()
 
-				root.AssemblyLinearVelocity = savedVelocity * power
-					+ Vector3.new(0, power, 0)
+					if running
+						and VehicleFlingSettings.Enabled
+						and workerToken == VehicleFlingSettings.WorkerToken
+						and root
+						and root.Parent
+						and VehicleSettings.CurrentRoot == root then
+						root.AssemblyLinearVelocity = savedVelocity
+					end
 
-				RunService.RenderStepped:Wait()
+					RunService.Stepped:Wait()
 
-				if isVehicleFlingPulseValid(root, workerToken, pulseToken) then
-					root.AssemblyLinearVelocity = savedVelocity
-				end
-
-				RunService.Stepped:Wait()
-
-				if isVehicleFlingPulseValid(root, workerToken, pulseToken) then
-					root.AssemblyLinearVelocity = savedVelocity
-						+ Vector3.new(0, verticalJitter, 0)
-					verticalJitter = -verticalJitter
-				end
-
-				if VehicleFlingSettings.PulseToken == pulseToken
-					and VehicleFlingSettings.ActiveRoot == root then
-					VehicleFlingSettings.ActiveRoot = nil
-					VehicleFlingSettings.ActiveVelocity = nil
+					if running
+						and VehicleFlingSettings.Enabled
+						and workerToken == VehicleFlingSettings.WorkerToken
+						and root
+						and root.Parent
+						and VehicleSettings.CurrentRoot == root then
+						root.AssemblyLinearVelocity = savedVelocity
+							+ Vector3.new(0, verticalJitter, 0)
+						verticalJitter = -verticalJitter
+					end
 				end
 			end
 		end
@@ -1654,7 +1583,6 @@ end
 
 local function startVehicleTeleportReinforcement(root, seat, desiredRoot, parts, offsets)
 	clearVehicleTeleportReinforcement()
-	clearVehicleFlingPulse()
 
 	VehicleTeleportSettings.ReinforceRoot = root
 	VehicleTeleportSettings.ReinforceSeat = seat
@@ -1793,7 +1721,6 @@ end
 
 local function bindVehicleHumanoid(humanoid)
 	clearVehicleSeatedConnection()
-	clearVehicleDiedConnection()
 	restoreVehicleSpeed()
 
 	if not running or not humanoid or not humanoid.Parent then
@@ -1806,11 +1733,6 @@ local function bindVehicleHumanoid(humanoid)
 		else
 			setVehicleSeat(nil)
 		end
-	end)
-
-	VehicleSettings.DiedConnection = humanoid.Died:Connect(function()
-		clearVehicleFlingPulse()
-		restoreVehicleSpeed()
 	end)
 
 	setVehicleSeat(humanoid.SeatPart)
@@ -2602,7 +2524,6 @@ local function cleanup()
 	stopVehicleFlyRuntime()
 	VehicleFlingSettings.Enabled = false
 	VehicleFlingSettings.WorkerToken += 1
-	clearVehicleFlingPulse()
 	VehicleTeleportSettings.Enabled = false
 	clearVehicleTeleportReinforcement()
 	clearVehicleFlipAssist()
@@ -2626,7 +2547,6 @@ local function cleanup()
 
 	clearSpeedWatcher()
 	clearVehicleSeatedConnection()
-	clearVehicleDiedConnection()
 	restoreVehicleSpeed()
 
 	if MovementSettings.Humanoid
