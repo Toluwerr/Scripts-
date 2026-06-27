@@ -68,6 +68,11 @@ local PlatformSettings = {
 	DownHeld = false,
 	ForwardHeld = false,
 	MoveSpeed = 42,
+	TrackHorizontalSpeed = 220,
+	TrackUpSpeed = 150,
+	TrackDownSpeed = 460,
+	TrackSwoopSpeed = 760,
+	TrackSnapDistance = 120,
 	Size = Vector3.new(12, 1, 12)
 }
 
@@ -672,55 +677,70 @@ local function clearPlatform()
 	disconnect(PlatformSettings.Connection)
 	PlatformSettings.Connection = nil
 
-	if PlatformSettings.Part then
-		pcall(function()
-			PlatformSettings.Part:Destroy()
-		end)
-	end
-
+	local platform = PlatformSettings.Part
 	PlatformSettings.Part = nil
 	PlatformSettings.UpHeld = false
 	PlatformSettings.DownHeld = false
 	PlatformSettings.ForwardHeld = false
+
+	if platform and platform.Parent then
+		pcall(function()
+			platform:Destroy()
+		end)
+	end
 end
 
-local function getPlatformStartCFrame(character)
-	local humanoid = MovementSettings.Humanoid
+local function getPlatformCharacterData()
+	local character = LocalPlayer.Character
+
+	if not character or not character.Parent then
+		return nil, nil, nil
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local root = getRoot(character)
 
 	if not humanoid
 		or not humanoid.Parent
 		or not root
 		or not root.Parent then
+		return nil, nil, nil
+	end
+
+	return character, humanoid, root
+end
+
+local function getPlatformStartCFrame()
+	local _, humanoid, root = getPlatformCharacterData()
+
+	if not humanoid or not root then
 		return nil
 	end
 
-	local verticalOffset = humanoid.HipHeight
-		+ root.Size.Y * 0.5
-		+ PlatformSettings.Size.Y * 0.5
+	local platformHalfHeight = PlatformSettings.Size.Y * 0.5
+	local offset = humanoid.HipHeight + root.Size.Y * 0.5 + platformHalfHeight
 
-	return CFrame.new(root.Position - Vector3.yAxis * verticalOffset)
+	return CFrame.new(root.Position - Vector3.new(0, offset, 0))
 end
 
-local function isCharacterOnPlatform(character, root, platform)
-	if not character
+local function shouldCarryCharacter(platform, root, humanoid)
+	if not platform
+		or not platform.Parent
 		or not root
-		or not platform
-		or not platform.Parent then
+		or not root.Parent
+		or not humanoid
+		or not humanoid.Parent then
 		return false
 	end
 
-	local localPosition = platform.CFrame:PointToObjectSpace(root.Position)
-	local horizontalPadding = 1.5
-	local expectedHeight = MovementSettings.Humanoid
-		and MovementSettings.Humanoid.HipHeight
+	local point = platform.CFrame:PointToObjectSpace(root.Position)
+	local expectedY = humanoid.HipHeight
 		+ root.Size.Y * 0.5
 		+ platform.Size.Y * 0.5
-		or 3
 
-	return math.abs(localPosition.X) <= platform.Size.X * 0.5 + horizontalPadding
-		and math.abs(localPosition.Z) <= platform.Size.Z * 0.5 + horizontalPadding
-		and math.abs(localPosition.Y - expectedHeight) <= 5
+	return math.abs(point.X) <= platform.Size.X * 0.5 + 1
+		and math.abs(point.Z) <= platform.Size.Z * 0.5 + 1
+		and math.abs(point.Y - expectedY) <= 6
 end
 
 local function movePlatformBy(offset)
@@ -730,17 +750,39 @@ local function movePlatformBy(offset)
 		return
 	end
 
-	platform.CFrame += offset
+	local nextCFrame = platform.CFrame + offset
+	platform.CFrame = nextCFrame
 
-	local character = LocalPlayer.Character
-	local root = getRoot(character)
+	local _, humanoid, root = getPlatformCharacterData()
 
-	if root
-		and root.Parent
-		and isCharacterOnPlatform(character, root, platform) then
-		root.CFrame += offset
-		root.AssemblyLinearVelocity = Vector3.zero
+	if shouldCarryCharacter(platform, root, humanoid) then
+		root.CFrame = root.CFrame + offset
+		root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 	end
+end
+
+local function getPlatformMoveDirection()
+	local direction = Vector3.new(0, 0, 0)
+
+	if PlatformSettings.UpHeld then
+		direction += Vector3.new(0, 1, 0)
+	end
+
+	if PlatformSettings.DownHeld then
+		direction -= Vector3.new(0, 1, 0)
+	end
+
+	if PlatformSettings.ForwardHeld then
+		local camera = Workspace.CurrentCamera
+		local look = camera and camera.CFrame.LookVector or Vector3.new(0, 0, -1)
+		local forward = Vector3.new(look.X, 0, look.Z)
+
+		if forward.Magnitude > 0.001 then
+			direction += forward.Unit
+		end
+	end
+
+	return direction
 end
 
 local function updatePlatform(deltaTime)
@@ -751,43 +793,92 @@ local function updatePlatform(deltaTime)
 		return
 	end
 
-	local movement = Vector3.zero
+	local duration = math.max(tonumber(deltaTime) or 0, 0)
 
-	if PlatformSettings.UpHeld then
-		movement += Vector3.yAxis
+	if duration <= 0 then
+		return
 	end
 
-	if PlatformSettings.DownHeld then
-		movement -= Vector3.yAxis
+	local direction = getPlatformMoveDirection()
+
+	if direction.Magnitude > 0.001 then
+		movePlatformBy(direction.Unit * PlatformSettings.MoveSpeed * duration)
 	end
 
-	if PlatformSettings.ForwardHeld then
-		local camera = Workspace.CurrentCamera
-		local lookVector = camera and camera.CFrame.LookVector or Vector3.zAxis
-		local forward = Vector3.new(lookVector.X, 0, lookVector.Z)
+	local platform = PlatformSettings.Part
+	local _, humanoid, root = getPlatformCharacterData()
 
-		if forward.Magnitude > 0.001 then
-			movement += forward.Unit
+	if not platform
+		or not platform.Parent
+		or not humanoid
+		or not root then
+		return
+	end
+
+	local footOffset = humanoid.HipHeight
+		+ root.Size.Y * 0.5
+		+ platform.Size.Y * 0.5
+	local targetPosition = root.Position - Vector3.new(0, footOffset, 0)
+	local currentPosition = platform.Position
+	local horizontalDelta = Vector3.new(
+		targetPosition.X - currentPosition.X,
+		0,
+		targetPosition.Z - currentPosition.Z
+	)
+	local horizontalDistance = horizontalDelta.Magnitude
+	local verticalDelta = targetPosition.Y - currentPosition.Y
+
+	if horizontalDistance > PlatformSettings.TrackSnapDistance
+		or math.abs(verticalDelta) > PlatformSettings.TrackSnapDistance then
+		platform.CFrame = CFrame.new(targetPosition)
+		return
+	end
+
+	local horizontalOffset = Vector3.new(0, 0, 0)
+
+	if horizontalDistance > 0.001 then
+		local horizontalStep = math.min(
+			horizontalDistance,
+			PlatformSettings.TrackHorizontalSpeed * duration
+		)
+		horizontalOffset = horizontalDelta.Unit * horizontalStep
+	end
+
+	local downwardVelocity = math.max(-root.AssemblyLinearVelocity.Y, 0)
+	local verticalSpeed = PlatformSettings.TrackUpSpeed
+
+	if verticalDelta < 0 then
+		verticalSpeed = PlatformSettings.TrackDownSpeed + downwardVelocity * 5
+
+		if root.Position.Y < currentPosition.Y - 3 then
+			verticalSpeed = math.max(
+				verticalSpeed,
+				PlatformSettings.TrackSwoopSpeed + downwardVelocity * 6
+			)
 		end
 	end
 
-	if movement.Magnitude > 0.001 then
-		movePlatformBy(
-			movement.Unit
-				* PlatformSettings.MoveSpeed
-				* math.max(tonumber(deltaTime) or 0, 0)
-		)
+	local verticalOffset = math.clamp(
+		verticalDelta,
+		-verticalSpeed * duration,
+		verticalSpeed * duration
+	)
+
+	if horizontalOffset.Magnitude > 0.001
+		or math.abs(verticalOffset) > 0.001 then
+		platform.CFrame = platform.CFrame + horizontalOffset
+			+ Vector3.new(0, verticalOffset, 0)
 	end
 end
 
-local function startPlatformForCharacter(character)
+local function startPlatformForCharacter()
 	clearPlatform()
 
 	if not running or not PlatformSettings.Enabled then
 		return
 	end
 
-	local cframe = getPlatformStartCFrame(character)
+	local cframe = getPlatformStartCFrame()
 
 	if not cframe then
 		return
@@ -799,17 +890,21 @@ local function startPlatformForCharacter(character)
 	platform.CanCollide = true
 	platform.CanTouch = true
 	platform.CanQuery = false
-	platform.CastShadow = true
 	platform.Size = PlatformSettings.Size
 	platform.CFrame = cframe
 	platform.Material = Enum.Material.Plastic
 	platform.Color = Color3.fromRGB(90, 130, 205)
 	platform.TopSurface = Enum.SurfaceType.Studs
-	platform.BottomSurface = Enum.SurfaceType.Inlet
 	platform.Parent = Workspace
 
 	PlatformSettings.Part = platform
-	PlatformSettings.Connection = RunService.Heartbeat:Connect(updatePlatform)
+	PlatformSettings.Connection = RunService.Heartbeat:Connect(function(deltaTime)
+		local ok = pcall(updatePlatform, deltaTime)
+
+		if not ok then
+			clearPlatform()
+		end
+	end)
 end
 
 local function setPlatformEnabled(value)
@@ -820,7 +915,7 @@ local function setPlatformEnabled(value)
 		return
 	end
 
-	startPlatformForCharacter(LocalPlayer.Character)
+	startPlatformForCharacter()
 end
 
 local function clearVehicleSeatedConnection()
@@ -2005,7 +2100,7 @@ local function bindMovementCharacter(character)
 			if running
 				and PlatformSettings.Enabled
 				and LocalPlayer.Character == character then
-				startPlatformForCharacter(character)
+				startPlatformForCharacter()
 			end
 		end)
 	end
@@ -2847,6 +2942,9 @@ local VehicleMovementTab = Window:AddTab({
 	Icon = "settings"
 })
 
+local UISections = {}
+
+do
 local MainSection = ESPTab:AddSection({
 	Name = "Player ESP",
 })
@@ -2918,9 +3016,13 @@ LabelSection:AddToggle({
 	end
 })
 
+end
+
+do
 local StyleSection = ESPTab:AddSection({
 	Name = "Style",
 })
+UISections.Style = StyleSection
 
 local picker = Instance.new("Frame")
 picker.Name = "HSVColorPicker"
@@ -3241,9 +3343,15 @@ local distanceSlider = StyleSection:AddSlider({
 })
 distanceSlider.Instance.LayoutOrder = 2
 
+applyPickerTheme()
+updateColorPicker()
+end
+
+do
 local MovementSection = MovementTab:AddSection({
 	Name = "Walk Speed",
 })
+UISections.Movement = MovementSection
 
 local speedToggle = MovementSection:AddToggle({
 	Name = "Enable Speed",
@@ -3293,9 +3401,13 @@ local noclipToggle = MovementSection:AddToggle({
 })
 noclipToggle.Instance.LayoutOrder = 5
 
+end
+
+do
 local ClickTeleportSection = MovementTab:AddSection({
 	Name = "Click Teleport",
 })
+UISections.ClickTeleport = ClickTeleportSection
 
 local clickTeleportToggle = ClickTeleportSection:AddToggle({
 	Name = "Enable Click Teleport",
@@ -3306,9 +3418,13 @@ local clickTeleportToggle = ClickTeleportSection:AddToggle({
 })
 clickTeleportToggle.Instance.LayoutOrder = 1
 
+end
+
+do
 local PlatformSection = MovementTab:AddSection({
 	Name = "Platform",
 })
+UISections.Platform = PlatformSection
 
 local platformToggle = PlatformSection:AddToggle({
 	Name = "Enable Platform",
@@ -3319,9 +3435,13 @@ local platformToggle = PlatformSection:AddToggle({
 })
 platformToggle.Instance.LayoutOrder = 1
 
+end
+
+do
 local FlySection = MovementTab:AddSection({
 	Name = "Fly",
 })
+UISections.Fly = FlySection
 
 local flyToggle = FlySection:AddToggle({
 	Name = "Enable Fly",
@@ -3343,9 +3463,13 @@ local flySpeedSlider = FlySection:AddSlider({
 })
 flySpeedSlider.Instance.LayoutOrder = 2
 
+end
+
+do
 local AimlockSection = MovementTab:AddSection({
 	Name = "Aimlock",
 })
+UISections.Aimlock = AimlockSection
 
 local aimlockToggle = AimlockSection:AddToggle({
 	Name = "Enable Aimlock",
@@ -3370,9 +3494,13 @@ aimStatusLabel = AimlockSection:AddLabel({
 })
 aimStatusLabel.Instance.LayoutOrder = 3
 
+end
+
+do
 local FlingSection = MovementTab:AddSection({
 	Name = "Fling",
 })
+UISections.Fling = FlingSection
 
 local flingToggle = FlingSection:AddToggle({
 	Name = "Fling",
@@ -3407,9 +3535,13 @@ local flingPowerInput = FlingSection:AddInput({
 })
 flingPowerInput.Instance.LayoutOrder = 3
 
+end
+
+do
 local VehicleSection = VehicleMovementTab:AddSection({
 	Name = "Vehicle Speed"
 })
+UISections.Vehicle = VehicleSection
 
 local vehicleSpeedSlider = VehicleSection:AddSlider({
 	Name = "Vehicle Speed",
@@ -3435,9 +3567,13 @@ local steeringStrengthSlider = VehicleSection:AddSlider({
 })
 steeringStrengthSlider.Instance.LayoutOrder = 2
 
+end
+
+do
 local VehicleFlySection = VehicleMovementTab:AddSection({
 	Name = "Vehicle Fly"
 })
+UISections.VehicleFly = VehicleFlySection
 
 local vehicleFlyToggle = VehicleFlySection:AddToggle({
 	Name = "Enable Vehicle Fly",
@@ -3459,9 +3595,13 @@ local vehicleFlySpeedSlider = VehicleFlySection:AddSlider({
 })
 vehicleFlySpeedSlider.Instance.LayoutOrder = 2
 
+end
+
+do
 local VehicleJumpSection = VehicleMovementTab:AddSection({
 	Name = "Vehicle Jump"
 })
+UISections.VehicleJump = VehicleJumpSection
 
 local vehicleJumpPowerSlider = VehicleJumpSection:AddSlider({
 	Name = "Jump Power",
@@ -3474,9 +3614,13 @@ local vehicleJumpPowerSlider = VehicleJumpSection:AddSlider({
 })
 vehicleJumpPowerSlider.Instance.LayoutOrder = 1
 
+end
+
+do
 local VehicleSpeedBoostSection = VehicleMovementTab:AddSection({
 	Name = "Vehicle Speed Boost"
 })
+UISections.VehicleSpeedBoost = VehicleSpeedBoostSection
 
 local vehicleSpeedBoostSlider = VehicleSpeedBoostSection:AddSlider({
 	Name = "Boost Speed",
@@ -3489,9 +3633,13 @@ local vehicleSpeedBoostSlider = VehicleSpeedBoostSection:AddSlider({
 })
 vehicleSpeedBoostSlider.Instance.LayoutOrder = 1
 
+end
+
+do
 local VehicleFlingSection = VehicleMovementTab:AddSection({
 	Name = "Vehicle Fling"
 })
+UISections.VehicleFling = VehicleFlingSection
 
 local vehicleFlingToggle = VehicleFlingSection:AddToggle({
 	Name = "Vehicle Fling",
@@ -3517,9 +3665,13 @@ local vehicleFlingPowerInput = VehicleFlingSection:AddInput({
 })
 vehicleFlingPowerInput.Instance.LayoutOrder = 2
 
+end
+
+do
 local VehicleTeleportSection = VehicleMovementTab:AddSection({
 	Name = "Vehicle Teleport"
 })
+UISections.VehicleTeleport = VehicleTeleportSection
 
 local vehicleTeleportToggle = VehicleTeleportSection:AddToggle({
 	Name = "Enable Vehicle Teleport",
@@ -3529,6 +3681,8 @@ local vehicleTeleportToggle = VehicleTeleportSection:AddToggle({
 	end
 })
 vehicleTeleportToggle.Instance.LayoutOrder = 1
+
+end
 
 track(LocalPlayer.CharacterAdded:Connect(function(character)
 	bindMovementCharacter(character)
@@ -3708,27 +3862,17 @@ local function queueLayoutRefresh()
 		layoutRefreshQueued = false
 
 		if running then
-			StyleSection:Refresh()
-			MovementSection:Refresh()
-			ClickTeleportSection:Refresh()
-			PlatformSection:Refresh()
-			FlySection:Refresh()
-			AimlockSection:Refresh()
-			FlingSection:Refresh()
-			VehicleSection:Refresh()
-			VehicleFlySection:Refresh()
-			VehicleJumpSection:Refresh()
-			VehicleSpeedBoostSection:Refresh()
-			VehicleFlingSection:Refresh()
-			VehicleTeleportSection:Refresh()
+			for _, section in pairs(UISections) do
+				if section and section.Refresh then
+					section:Refresh()
+				end
+			end
 		end
 	end)
 end
 
 track(Window.Instance:GetPropertyChangedSignal("AbsoluteSize"):Connect(queueLayoutRefresh))
 
-applyPickerTheme()
-updateColorPicker()
 updateAimStatus()
 queueLayoutRefresh()
 task.defer(queueLayoutRefresh)
