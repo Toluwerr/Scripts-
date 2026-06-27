@@ -156,6 +156,14 @@ local VehicleFlingSettings = {
 	WorkerToken = 0
 }
 
+local VehicleSpeedBoostSettings = {
+	Power = 160,
+	Cooldown = 0.65,
+	Duration = 0.42,
+	LastBoost = 0,
+	ActiveUntil = 0
+}
+
 local InterfaceSettings = {
 	Hidden = false
 }
@@ -963,6 +971,10 @@ local function getVehicleThrottle(seat)
 	return math.clamp(throttle, -1, 1)
 end
 
+local function isVehicleSpeedBoostActive()
+	return os.clock() < VehicleSpeedBoostSettings.ActiveUntil
+end
+
 local function updateVehicleBoost(deltaTime)
 	if not running then
 		return
@@ -1000,6 +1012,14 @@ local function updateVehicleBoost(deltaTime)
 			local velocity = root.AssemblyLinearVelocity
 			local forwardSpeed = velocity:Dot(forward)
 			local targetSpeed = throttle * speed
+
+			if isVehicleSpeedBoostActive() then
+				targetSpeed = math.max(
+					targetSpeed,
+					math.clamp(tonumber(VehicleSpeedBoostSettings.Power) or 160, 20, 600)
+				)
+			end
+
 			local alpha = 1 - math.exp(-18 * delta)
 			local nextForwardSpeed = forwardSpeed + (targetSpeed - forwardSpeed) * alpha
 			local lateralVelocity = velocity - forward * forwardSpeed
@@ -1208,6 +1228,57 @@ local function teleportCharacterToMouse(screenPosition)
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
 	ClickTeleportSettings.LastTeleport = now
+end
+
+local function canVehicleSpeedBoost()
+	local seat = VehicleSettings.CurrentSeat
+	local root = VehicleSettings.CurrentRoot
+	local humanoid = MovementSettings.Humanoid
+
+	return running
+		and seat
+		and seat.Parent
+		and root
+		and root.Parent
+		and humanoid
+		and humanoid.Parent
+		and not VehicleFlySettings.Enabled
+		and not VehicleFlingSettings.Enabled
+		and not VehicleTeleportSettings.ReinforceConnection
+		and isVehicleSeatPart(seat)
+		and seat.Occupant == humanoid
+end
+
+local function boostVehicleSpeed()
+	if not canVehicleSpeedBoost() then
+		return
+	end
+
+	local now = os.clock()
+
+	if now - VehicleSpeedBoostSettings.LastBoost < VehicleSpeedBoostSettings.Cooldown then
+		return
+	end
+
+	local seat = VehicleSettings.CurrentSeat
+	local root = VehicleSettings.CurrentRoot
+	local forward = Vector3.new(seat.CFrame.LookVector.X, 0, seat.CFrame.LookVector.Z)
+
+	if forward.Magnitude < 0.001 then
+		return
+	end
+
+	forward = forward.Unit
+
+	local power = math.clamp(tonumber(VehicleSpeedBoostSettings.Power) or 160, 20, 600)
+	local velocity = root.AssemblyLinearVelocity
+	local forwardSpeed = velocity:Dot(forward)
+	local lateralVelocity = velocity - forward * forwardSpeed
+	local targetSpeed = math.max(forwardSpeed, power)
+
+	root.AssemblyLinearVelocity = lateralVelocity + forward * targetSpeed
+	VehicleSpeedBoostSettings.LastBoost = now
+	VehicleSpeedBoostSettings.ActiveUntil = now + VehicleSpeedBoostSettings.Duration
 end
 
 local function canVehicleFling()
@@ -2524,6 +2595,7 @@ local function cleanup()
 	stopVehicleFlyRuntime()
 	VehicleFlingSettings.Enabled = false
 	VehicleFlingSettings.WorkerToken += 1
+	VehicleSpeedBoostSettings.ActiveUntil = 0
 	VehicleTeleportSettings.Enabled = false
 	clearVehicleTeleportReinforcement()
 	clearVehicleFlipAssist()
@@ -3211,6 +3283,21 @@ local vehicleJumpPowerSlider = VehicleJumpSection:AddSlider({
 })
 vehicleJumpPowerSlider.Instance.LayoutOrder = 1
 
+local VehicleSpeedBoostSection = VehicleMovementTab:AddSection({
+	Name = "Vehicle Speed Boost"
+})
+
+local vehicleSpeedBoostSlider = VehicleSpeedBoostSection:AddSlider({
+	Name = "Boost Speed",
+	Min = 20,
+	Max = 600,
+	Default = VehicleSpeedBoostSettings.Power,
+	Callback = function(value)
+		VehicleSpeedBoostSettings.Power = value
+	end
+})
+vehicleSpeedBoostSlider.Instance.LayoutOrder = 1
+
 local VehicleFlingSection = VehicleMovementTab:AddSection({
 	Name = "Vehicle Fling"
 })
@@ -3295,6 +3382,12 @@ track(UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
 	if input.KeyCode == Enum.KeyCode.K
 		and not UserInputService:GetFocusedTextBox() then
 		setInterfaceHidden(not InterfaceSettings.Hidden)
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.E
+		and not UserInputService:GetFocusedTextBox() then
+		boostVehicleSpeed()
 		return
 	end
 
@@ -3398,6 +3491,7 @@ local function queueLayoutRefresh()
 			VehicleSection:Refresh()
 			VehicleFlySection:Refresh()
 			VehicleJumpSection:Refresh()
+			VehicleSpeedBoostSection:Refresh()
 			VehicleFlingSection:Refresh()
 			VehicleTeleportSection:Refresh()
 		end
