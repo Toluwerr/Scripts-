@@ -76,6 +76,36 @@ local PlatformSettings = {
 	Size = Vector3.new(12, 1, 12)
 }
 
+local PartRingSettings = {
+	Enabled = false,
+	TargetUserId = nil,
+	TargetPickerEnabled = false,
+	HoveredPlayer = nil,
+	PickerHighlight = nil,
+	PickerRenderConnection = nil,
+	PickerInputConnection = nil,
+	ScanRadius = 70,
+	Radius = 12,
+	Height = 4,
+	Speed = 3.5,
+	RotationSpeed = 18,
+	PullGain = 14,
+	MinimumPullSpeed = 18,
+	MaximumPullSpeed = 220,
+	MaximumDynamicSpeed = 6000,
+	MaximumAssemblyMass = 300,
+	MaximumAssemblySize = 50,
+	RescanInterval = 0.75,
+	Parts = {},
+	PartStates = setmetatable({}, {__mode = "k"}),
+	Connection = nil,
+	NextRescan = 0,
+	CollisionStates = setmetatable({}, {__mode = "k"})
+}
+
+local PartRing = {}
+
+
 local AimlockSettings = {
 	Enabled = false,
 	TeamCheck = true,
@@ -234,6 +264,707 @@ local function getRoot(character)
 	return character:FindFirstChild("HumanoidRootPart")
 		or character:FindFirstChild("UpperTorso")
 		or character:FindFirstChild("Torso")
+end
+
+do
+	PartRing.getTargetOption = function()
+		if not PartRingSettings.TargetUserId then
+			return "Me"
+		end
+
+		local player = Players:GetPlayerByUserId(PartRingSettings.TargetUserId)
+
+		return player and player.Name or "Me"
+	end
+
+	PartRing.getTargetRoot = function()
+		local player = LocalPlayer
+
+		if PartRingSettings.TargetUserId then
+			player = Players:GetPlayerByUserId(PartRingSettings.TargetUserId)
+
+			if not player then
+				PartRingSettings.TargetUserId = nil
+
+				if type(PartRing.OnTargetChanged) == "function" then
+					PartRing.OnTargetChanged("Me")
+				end
+
+				player = LocalPlayer
+			end
+		end
+
+		local character = player and player.Character
+		local root = getRoot(character)
+
+		if root and root.Parent then
+			return root
+		end
+
+		return nil
+	end
+
+	local function updatePartRingStatus(text)
+		if type(PartRing.OnStatusChanged) == "function" then
+			PartRing.OnStatusChanged(text)
+		end
+	end
+
+	local function getPlayerFromPart(part)
+		local current = part
+
+		while current and current ~= Workspace do
+			if current:IsA("Model") then
+				local player = Players:GetPlayerFromCharacter(current)
+
+				if player then
+					return player
+				end
+			end
+
+			current = current.Parent
+		end
+
+		return nil
+	end
+
+	local function clearPartRingPickerHighlight()
+		local highlight = PartRingSettings.PickerHighlight
+		PartRingSettings.PickerHighlight = nil
+		PartRingSettings.HoveredPlayer = nil
+
+		if highlight and highlight.Parent then
+			pcall(function()
+				highlight:Destroy()
+			end)
+		end
+	end
+
+	local function showPartRingPickerHighlight(player)
+		local character = player and player.Character
+
+		if not character or not character.Parent then
+			clearPartRingPickerHighlight()
+			return
+		end
+
+		local highlight = PartRingSettings.PickerHighlight
+
+		if not highlight or not highlight.Parent then
+			highlight = Instance.new("Highlight")
+			highlight.Name = "__PlayerToolsPartRingTarget"
+			highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+			highlight.FillColor = Color3.fromRGB(66, 133, 244)
+			highlight.FillTransparency = 0.62
+			highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+			highlight.OutlineTransparency = 0.08
+			highlight.Parent = Workspace
+			PartRingSettings.PickerHighlight = highlight
+		end
+
+		highlight.Adornee = character
+		highlight.Enabled = true
+		PartRingSettings.HoveredPlayer = player
+	end
+
+	PartRing.getHoveredPlayer = function()
+		local unitRay = Mouse and Mouse.UnitRay
+
+		if not unitRay then
+			local directPart = Mouse and Mouse.Target
+			local directPlayer = getPlayerFromPart(directPart)
+
+			return directPlayer ~= LocalPlayer and directPlayer or nil
+		end
+
+		local filter = {}
+		local seen = {}
+
+		local function addFilter(instance)
+			if instance and instance.Parent and not seen[instance] then
+				seen[instance] = true
+				table.insert(filter, instance)
+			end
+		end
+
+		if LocalPlayer.Character then
+			addFilter(LocalPlayer.Character)
+		end
+
+		for _, root in ipairs(PartRingSettings.Parts) do
+			addFilter(root)
+
+			pcall(function()
+				for _, connected in ipairs(root:GetConnectedParts(true)) do
+					addFilter(connected)
+				end
+			end)
+		end
+
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = filter
+		params.IgnoreWater = false
+
+		local result = Workspace:Raycast(
+			unitRay.Origin,
+			unitRay.Direction * 10000,
+			params
+		)
+		local player = getPlayerFromPart(result and result.Instance)
+
+		return player ~= LocalPlayer and player or nil
+	end
+
+	local function updatePartRingTargetPicker()
+		if not running or not PartRingSettings.TargetPickerEnabled then
+			return
+		end
+
+		local player = PartRing.getHoveredPlayer()
+
+		if player then
+			showPartRingPickerHighlight(player)
+		else
+			clearPartRingPickerHighlight()
+		end
+	end
+
+	PartRing.stopTargetPicker = function()
+		disconnect(PartRingSettings.PickerRenderConnection)
+		disconnect(PartRingSettings.PickerInputConnection)
+		PartRingSettings.PickerRenderConnection = nil
+		PartRingSettings.PickerInputConnection = nil
+		clearPartRingPickerHighlight()
+	end
+
+	PartRing.setTarget = function(value)
+		if value == "Me" or not value then
+			PartRingSettings.TargetUserId = nil
+		else
+			local player = nil
+
+			if typeof(value) == "Instance" and value:IsA("Player") then
+				player = value
+			else
+				player = Players:FindFirstChild(tostring(value))
+			end
+
+			PartRingSettings.TargetUserId = player and player.UserId or nil
+		end
+
+		if type(PartRing.OnTargetChanged) == "function" then
+			PartRing.OnTargetChanged(PartRing.getTargetOption())
+		end
+
+		if PartRingSettings.Enabled then
+			PartRing.refresh()
+		end
+	end
+
+	PartRing.setPickerEnabled = function(value)
+		local enabled = value and true or false
+
+		PartRing.stopTargetPicker()
+		PartRingSettings.TargetPickerEnabled = enabled
+
+		if type(PartRing.OnPickerEnabledChanged) == "function" then
+			pcall(PartRing.OnPickerEnabledChanged, enabled)
+		end
+
+		if not enabled then
+			return
+		end
+
+		PartRingSettings.PickerRenderConnection = RunService.RenderStepped:Connect(
+			updatePartRingTargetPicker
+		)
+
+		PartRingSettings.PickerInputConnection = UserInputService.InputBegan:Connect(
+			function(input, gameProcessedEvent)
+				if gameProcessedEvent
+					or not PartRingSettings.TargetPickerEnabled
+					or UserInputService:GetFocusedTextBox() then
+					return
+				end
+
+				if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+					return
+				end
+
+				local player = PartRingSettings.HoveredPlayer
+					or PartRing.getHoveredPlayer()
+
+				if player then
+					PartRing.setTarget(player)
+					PartRing.setPickerEnabled(false)
+				end
+			end
+		)
+	end
+
+	local function hasPartRingDisallowedAncestor(part)
+		local current = part
+
+		while current and current ~= Workspace do
+			if current:IsA("Tool") then
+				return true
+			end
+
+			if current:IsA("Model")
+				and current:FindFirstChildOfClass("Humanoid") then
+				return true
+			end
+
+			current = current.Parent
+		end
+
+		return false
+	end
+
+	local function getPartRingSearchRadius()
+		local configuredRadius = math.clamp(
+			tonumber(PartRingSettings.ScanRadius) or 70,
+			15,
+			5000
+		)
+		local ringRadius = math.clamp(
+			tonumber(PartRingSettings.Radius) or 12,
+			3,
+			150
+		)
+
+		return math.clamp(
+			math.max(configuredRadius, ringRadius + 30),
+			15,
+			5000
+		)
+	end
+
+
+	local function canRingPart(part, targetRoot)
+		if not part
+			or not part:IsA("BasePart")
+			or not part.Parent
+			or part.Anchored
+			or part:IsA("Seat")
+			or part:IsA("VehicleSeat")
+			or part.AssemblyRootPart ~= part then
+			return false
+		end
+
+		if LocalPlayer.Character and part:IsDescendantOf(LocalPlayer.Character) then
+			return false
+		end
+
+		if VehicleSettings.CurrentModel
+			and VehicleSettings.CurrentModel.Parent
+			and part:IsDescendantOf(VehicleSettings.CurrentModel) then
+			return false
+		end
+
+		if hasPartRingDisallowedAncestor(part) then
+			return false
+		end
+
+		local maximumAssemblyMass = math.clamp(
+			tonumber(PartRingSettings.MaximumAssemblyMass) or 300,
+			1,
+			100000
+		)
+		local maximumAssemblySize = math.clamp(
+			tonumber(PartRingSettings.MaximumAssemblySize) or 50,
+			1,
+			10000
+		)
+
+		if part.AssemblyMass > maximumAssemblyMass
+			or part.Size.Magnitude > maximumAssemblySize then
+			return false
+		end
+
+		return (part.Position - targetRoot.Position).Magnitude
+			<= getPartRingSearchRadius()
+	end
+
+	local function getPartRingAssemblyParts(root)
+		local parts = {}
+		local seen = {}
+
+		local function addPart(part)
+			if not part
+				or not part:IsA("BasePart")
+				or not part.Parent
+				or seen[part]
+				or part.AssemblyRootPart ~= root then
+				return
+			end
+
+			seen[part] = true
+			table.insert(parts, part)
+		end
+
+		addPart(root)
+
+		pcall(function()
+			for _, part in ipairs(root:GetConnectedParts(true)) do
+				addPart(part)
+			end
+		end)
+
+		return parts
+	end
+
+	local function removeLegacyPartRingConstraints(root)
+		for _, name in ipairs({
+			"__PlayerToolsPartRingAlign",
+			"__PlayerToolsPartRingAttachment"
+		}) do
+			local object = root:FindFirstChild(name)
+
+			if object then
+				pcall(function()
+					object:Destroy()
+				end)
+			end
+		end
+	end
+
+	local function getPartRingState(root)
+		local state = PartRingSettings.PartStates[root]
+
+		if state then
+			return state
+		end
+
+		state = {
+			CollisionParts = {}
+		}
+		PartRingSettings.PartStates[root] = state
+
+		return state
+	end
+
+	local function restorePartRingPart(root)
+		local state = PartRingSettings.PartStates[root]
+		local controlledParts = state and state.CollisionParts or {root}
+
+		removeLegacyPartRingConstraints(root)
+
+		for _, part in ipairs(controlledParts) do
+			local originalCollision = PartRingSettings.CollisionStates[part]
+
+			if part and part.Parent then
+				pcall(function()
+					if originalCollision ~= nil then
+						part.CanCollide = originalCollision
+					end
+
+					part.AssemblyLinearVelocity = Vector3.zero
+					part.AssemblyAngularVelocity = Vector3.zero
+				end)
+			end
+
+			PartRingSettings.CollisionStates[part] = nil
+		end
+
+		PartRingSettings.PartStates[root] = nil
+	end
+
+	local function preparePartForRing(root)
+		removeLegacyPartRingConstraints(root)
+
+		local state = getPartRingState(root)
+		local known = {}
+
+		for _, part in ipairs(state.CollisionParts) do
+			known[part] = true
+		end
+
+		for _, part in ipairs(getPartRingAssemblyParts(root)) do
+			if not known[part] then
+				known[part] = true
+				table.insert(state.CollisionParts, part)
+			end
+
+			if PartRingSettings.CollisionStates[part] == nil then
+				PartRingSettings.CollisionStates[part] = part.CanCollide
+			end
+
+			pcall(function()
+				part.CanCollide = false
+			end)
+		end
+	end
+
+	local function clearPartRingParts()
+		for _, part in ipairs(PartRingSettings.Parts) do
+			restorePartRingPart(part)
+		end
+
+		PartRingSettings.Parts = {}
+		PartRingSettings.PartStates = setmetatable({}, {__mode = "k"})
+		PartRingSettings.CollisionStates = setmetatable({}, {__mode = "k"})
+	end
+
+	PartRing.refresh = function()
+		local targetRoot = PartRing.getTargetRoot()
+
+		if not targetRoot or not targetRoot.Parent then
+			clearPartRingParts()
+			updatePartRingStatus("Target unavailable")
+			return
+		end
+
+		local overlap = OverlapParams.new()
+		overlap.FilterType = Enum.RaycastFilterType.Exclude
+
+		local filter = {}
+
+		if LocalPlayer.Character then
+			table.insert(filter, LocalPlayer.Character)
+		end
+
+		local targetPlayer = PartRingSettings.TargetUserId
+			and Players:GetPlayerByUserId(PartRingSettings.TargetUserId)
+			or LocalPlayer
+
+		if targetPlayer
+			and targetPlayer.Character
+			and targetPlayer.Character ~= LocalPlayer.Character then
+			table.insert(filter, targetPlayer.Character)
+		end
+
+		overlap.FilterDescendantsInstances = filter
+		overlap.MaxParts = 0
+
+		local nearby = {}
+
+		pcall(function()
+			nearby = Workspace:GetPartBoundsInRadius(
+				targetRoot.Position,
+				getPartRingSearchRadius(),
+				overlap
+			)
+		end)
+
+		local candidates = {}
+		local candidateSet = {}
+
+		for _, part in ipairs(nearby) do
+			if canRingPart(part, targetRoot) and not candidateSet[part] then
+				candidateSet[part] = true
+				table.insert(candidates, part)
+			end
+		end
+
+		table.sort(candidates, function(first, second)
+			return (first.Position - targetRoot.Position).Magnitude
+				< (second.Position - targetRoot.Position).Magnitude
+		end)
+
+		local nextParts = {}
+		local selected = {}
+
+		for _, part in ipairs(PartRingSettings.Parts) do
+			if candidateSet[part] and canRingPart(part, targetRoot) then
+				selected[part] = true
+				table.insert(nextParts, part)
+			else
+				restorePartRingPart(part)
+			end
+		end
+
+		for _, part in ipairs(candidates) do
+			if not selected[part] then
+				selected[part] = true
+				table.insert(nextParts, part)
+			end
+		end
+
+		PartRingSettings.Parts = nextParts
+
+		for _, part in ipairs(nextParts) do
+			preparePartForRing(part)
+		end
+
+		PartRingSettings.NextRescan = os.clock() + PartRingSettings.RescanInterval
+
+		if #nextParts > 0 then
+			updatePartRingStatus(
+				"Ringing " .. tostring(#nextParts) .. " eligible physics parts"
+			)
+		else
+			updatePartRingStatus("No eligible loose parts")
+		end
+	end
+
+	PartRing.stop = function()
+		disconnect(PartRingSettings.Connection)
+		PartRingSettings.Connection = nil
+		clearPartRingParts()
+		PartRingSettings.NextRescan = 0
+		updatePartRingStatus("Part Ring off")
+	end
+
+	local function updatePartRing(deltaTime)
+		if not running or not PartRingSettings.Enabled then
+			return
+		end
+
+		local targetRoot = PartRing.getTargetRoot()
+
+		if not targetRoot or not targetRoot.Parent then
+			return
+		end
+
+		local now = os.clock()
+
+		if now >= PartRingSettings.NextRescan then
+			PartRing.refresh()
+		end
+
+		local parts = PartRingSettings.Parts
+		local count = #parts
+
+		if count == 0 then
+			return
+		end
+
+		local radius = math.clamp(
+			tonumber(PartRingSettings.Radius) or 12,
+			3,
+			150
+		)
+		local height = math.clamp(
+			tonumber(PartRingSettings.Height) or 4,
+			-10,
+			25
+		)
+		local spinSpeed = math.clamp(
+			tonumber(PartRingSettings.Speed) or 3.5,
+			0,
+			20
+		)
+		local rotationSpeed = math.clamp(
+			tonumber(PartRingSettings.RotationSpeed) or 18,
+			0,
+			300
+		)
+		local pullGain = math.clamp(
+			tonumber(PartRingSettings.PullGain) or 11,
+			1,
+			40
+		)
+		local minimumPullSpeed = math.clamp(
+			tonumber(PartRingSettings.MinimumPullSpeed) or 18,
+			1,
+			300
+		)
+		local baseMaximumPullSpeed = math.clamp(
+			tonumber(PartRingSettings.MaximumPullSpeed) or 220,
+			minimumPullSpeed,
+			1000
+		)
+		local maximumDynamicSpeed = math.clamp(
+			tonumber(PartRingSettings.MaximumDynamicSpeed) or 6000,
+			baseMaximumPullSpeed,
+			9000
+		)
+		local orbitVelocity = radius * spinSpeed
+		local maximumPullSpeed = math.clamp(
+			math.max(
+				baseMaximumPullSpeed,
+				orbitVelocity * 2 + 200,
+				radius * 4 + 100
+			),
+			baseMaximumPullSpeed,
+			maximumDynamicSpeed
+		)
+		local rootVelocity = targetRoot.AssemblyLinearVelocity
+		local carry = Vector3.new(
+			rootVelocity.X,
+			0,
+			rootVelocity.Z
+		) * 0.35
+		local baseAngle = now * spinSpeed
+
+		for index = count, 1, -1 do
+			local part = parts[index]
+
+			if not canRingPart(part, targetRoot) then
+				restorePartRingPart(part)
+				table.remove(parts, index)
+			else
+				local angle = baseAngle
+					+ ((index - 1) / count) * math.pi * 2
+				local targetPosition = targetRoot.Position + Vector3.new(
+					math.cos(angle) * radius,
+					height,
+					math.sin(angle) * radius
+				)
+				local delta = targetPosition - part.Position
+				local distance = delta.Magnitude
+				local correctionVelocity = Vector3.zero
+
+				if distance > 0.001 then
+					local correctionSpeed = math.clamp(
+						distance * pullGain,
+						minimumPullSpeed,
+						maximumPullSpeed
+					)
+					correctionVelocity = delta.Unit * correctionSpeed
+				end
+
+				local tangentVelocity = Vector3.new(
+					-math.sin(angle) * orbitVelocity,
+					0,
+					math.cos(angle) * orbitVelocity
+				)
+				local desiredVelocity = correctionVelocity
+					+ tangentVelocity
+					+ carry
+
+				if desiredVelocity.Magnitude > maximumPullSpeed then
+					desiredVelocity = desiredVelocity.Unit
+						* maximumPullSpeed
+				end
+
+				pcall(function()
+					part.CanCollide = false
+					part.AssemblyLinearVelocity = desiredVelocity
+					part.AssemblyAngularVelocity = Vector3.new(
+						math.sin(angle * 1.7) * rotationSpeed * 0.3,
+						rotationSpeed,
+						math.cos(angle * 1.3) * rotationSpeed * 0.3
+					)
+				end)
+			end
+		end
+	end
+
+	PartRing.setEnabled = function(value)
+		local enabled = value and true or false
+
+		if not enabled then
+			PartRing.setPickerEnabled(false)
+		end
+
+		PartRing.stop()
+		PartRingSettings.Enabled = enabled
+
+		if type(PartRing.OnEnabledChanged) == "function" then
+			pcall(PartRing.OnEnabledChanged, enabled)
+		end
+
+		if not enabled then
+			return
+		end
+
+		PartRing.refresh()
+		PartRingSettings.Connection = RunService.Heartbeat:Connect(updatePartRing)
+	end
+
 end
 
 local function isAimTeammate(player)
@@ -2857,6 +3588,10 @@ local function cleanup()
 	MovementSettings.Noclip = false
 	ClickTeleportSettings.Enabled = false
 	PlatformSettings.Enabled = false
+	PartRingSettings.Enabled = false
+	PartRingSettings.TargetPickerEnabled = false
+	PartRing.stop()
+	PartRing.stopTargetPicker()
 	clearPlatform()
 	clearNoclip()
 	FlingSettings.Enabled = false
@@ -2940,6 +3675,11 @@ local MovementTab = Window:AddTab({
 local VehicleMovementTab = Window:AddTab({
 	Name = "Vehicle Movment",
 	Icon = "settings"
+})
+
+local FunTab = Window:AddTab({
+	Name = "Fun",
+	Icon = "star"
 })
 
 local UISections = {}
@@ -3435,6 +4175,183 @@ local platformToggle = PlatformSection:AddToggle({
 })
 platformToggle.Instance.LayoutOrder = 1
 
+end
+
+do
+local PartRingSection = FunTab:AddSection({
+	Name = "Part Ring",
+})
+UISections.PartRing = PartRingSection
+
+local partRingToggleSyncing = false
+local partRingToggleValue = false
+local partRingToggle = PartRingSection:AddToggle({
+	Name = "Enable Part Ring",
+	Default = false,
+	Callback = function(value)
+		partRingToggleValue = value and true or false
+
+		if not partRingToggleSyncing then
+			PartRing.setEnabled(partRingToggleValue)
+		end
+	end
+})
+partRingToggle.Instance.LayoutOrder = 1
+
+PartRing.OnEnabledChanged = function(enabled)
+	local desiredValue = enabled and true or false
+
+	if partRingToggleValue == desiredValue then
+		return
+	end
+
+	partRingToggleValue = desiredValue
+	partRingToggleSyncing = true
+	pcall(function()
+		partRingToggle:Set(desiredValue)
+	end)
+	partRingToggleSyncing = false
+end
+
+local partRingTargetLabel = PartRingSection:AddLabel({
+	Name = "Target: " .. PartRing.getTargetOption(),
+})
+partRingTargetLabel.Instance.LayoutOrder = 2
+
+local partRingTargetPickerSyncing = false
+local partRingTargetPickerValue = false
+local partRingTargetPickerToggle = PartRingSection:AddToggle({
+	Name = "Select Ring Target",
+	Description = "Hover a player and left-click them",
+	Default = false,
+	Callback = function(value)
+		partRingTargetPickerValue = value and true or false
+
+		if not partRingTargetPickerSyncing then
+			PartRing.setPickerEnabled(partRingTargetPickerValue)
+		end
+	end
+})
+partRingTargetPickerToggle.Instance.LayoutOrder = 3
+
+PartRing.OnPickerEnabledChanged = function(enabled)
+	local desiredValue = enabled and true or false
+
+	if partRingTargetPickerValue == desiredValue then
+		return
+	end
+
+	partRingTargetPickerValue = desiredValue
+	partRingTargetPickerSyncing = true
+	pcall(function()
+		partRingTargetPickerToggle:Set(desiredValue)
+	end)
+	partRingTargetPickerSyncing = false
+end
+
+local partRingTargetMeButton = PartRingSection:AddButton({
+	Name = "Target Me",
+	Icon = "user",
+	Callback = function()
+		PartRing.setTarget("Me")
+	end
+})
+partRingTargetMeButton.Instance.LayoutOrder = 4
+
+local partRingStatusLabel = PartRingSection:AddLabel({
+	Name = "Part Ring off",
+})
+partRingStatusLabel.Instance.LayoutOrder = 5
+
+PartRing.OnStatusChanged = function(status)
+	partRingStatusLabel:Set(tostring(status or "Part Ring off"))
+end
+
+PartRing.OnTargetChanged = function(name)
+	partRingTargetLabel:Set("Target: " .. tostring(name or "Me"))
+
+	if partRingTargetPickerValue then
+		PartRing.setPickerEnabled(false)
+	end
+end
+
+local partRingRangeSlider = PartRingSection:AddSlider({
+	Name = "Search Range",
+	Min = 15,
+	Max = 5000,
+	Default = PartRingSettings.ScanRadius,
+	Callback = function(value)
+		PartRingSettings.ScanRadius = value
+
+		if PartRingSettings.Enabled then
+			PartRing.refresh()
+		end
+	end
+})
+partRingRangeSlider.Instance.LayoutOrder = 6
+
+
+local partRingRadiusSlider = PartRingSection:AddSlider({
+	Name = "Ring Radius",
+	Min = 3,
+	Max = 150,
+	Default = PartRingSettings.Radius,
+	Callback = function(value)
+		PartRingSettings.Radius = math.clamp(
+			tonumber(value) or 12,
+			3,
+			150
+		)
+
+		if PartRingSettings.Enabled then
+			PartRingSettings.NextRescan = 0
+			PartRing.refresh()
+		end
+	end
+})
+partRingRadiusSlider.Instance.LayoutOrder = 7
+
+local partRingHeightSlider = PartRingSection:AddSlider({
+	Name = "Ring Height",
+	Min = -10,
+	Max = 25,
+	Default = PartRingSettings.Height,
+	Callback = function(value)
+		PartRingSettings.Height = value
+	end
+})
+partRingHeightSlider.Instance.LayoutOrder = 8
+
+local partRingSpeedSlider = PartRingSection:AddSlider({
+	Name = "Ring Speed",
+	Min = 0,
+	Max = 20,
+	Default = PartRingSettings.Speed,
+	Callback = function(value)
+		PartRingSettings.Speed = value
+	end
+})
+partRingSpeedSlider.Instance.LayoutOrder = 9
+
+local partRingRotationSpeedSlider = PartRingSection:AddSlider({
+	Name = "Rotation Speed",
+	Min = 0,
+	Max = 300,
+	Default = PartRingSettings.RotationSpeed,
+	Callback = function(value)
+		PartRingSettings.RotationSpeed = value
+	end
+})
+partRingRotationSpeedSlider.Instance.LayoutOrder = 10
+
+local partRingRefreshButton = PartRingSection:AddButton({
+	Name = "Refresh Parts",
+	Icon = "refresh-cw",
+	Callback = function()
+		PartRing.refresh()
+	end
+})
+partRingRefreshButton.Instance.LayoutOrder = 11
 end
 
 do
