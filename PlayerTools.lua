@@ -96,14 +96,11 @@ local PartRingSettings = {
         Height = 4,
         Speed = 3.5,
         RotationSpeed = 30,
-        PullGain = 25,
-        MinimumPullSpeed = 30,
-        MaximumPullSpeed = 350,
-        MaximumDynamicSpeed = 12000,
+        CaptureSpeed = 12,
         MaximumAssemblyMass = 5000000,
         RingAngle = 0,
         MaximumAssemblySize = 300,
-        MaximumParts = 250,
+        MaximumParts = 300,
         ReleasePower = 1,
         RescanInterval = 0.5,
         Parts = {},
@@ -630,71 +627,17 @@ do
 
                 state = {
                         CollisionParts = {},
-                        Phase = nil,
-                        SpinAxis = nil,
-                        SpinScale = nil,
-                        SpinSign = 1
+                        SpinAxis = Vector3.new(
+                                (math.random() - 0.5) * 0.8,
+                                1,
+                                (math.random() - 0.5) * 0.8
+                        ).Unit,
+                        SpinScale = 0.55 + math.random() * 0.9,
+                        SpinSign = math.random() < 0.5 and -1 or 1
                 }
                 PartRingSettings.PartStates[root] = state
 
                 return state
-        end
-
-        local function assignPartRingPhase(state)
-                -- Give a newly ringed part a persistent slot on the circle by
-                -- placing it in the middle of the largest gap between the parts
-                -- already orbiting. Slots survive rescans, so the circle never
-                -- scrambles when parts join or leave.
-                local phases = {}
-
-                for _, part in ipairs(PartRingSettings.Parts) do
-                        local other = PartRingSettings.PartStates[part]
-
-                        if other ~= state and other and other.Phase then
-                                table.insert(phases, other.Phase)
-                        end
-                end
-
-                if #phases == 0 then
-                        state.Phase = 0
-                        return
-                end
-
-                table.sort(phases)
-
-                local bestGap = 0
-                local bestStart = 0
-
-                for index = 1, #phases do
-                        local startPhase = phases[index]
-                        local endPhase = index < #phases
-                                and phases[index + 1]
-                                or phases[1] + TAU
-                        local gap = endPhase - startPhase
-
-                        if gap > bestGap then
-                                bestGap = gap
-                                bestStart = startPhase
-                        end
-                end
-
-                state.Phase = (bestStart + bestGap * 0.5) % TAU
-        end
-
-        local function ensurePartRingMotion(state)
-                if state.Phase == nil then
-                        assignPartRingPhase(state)
-                end
-
-                if state.SpinAxis == nil then
-                        state.SpinAxis = Vector3.new(
-                                (math.random() - 0.5) * 0.8,
-                                1,
-                                (math.random() - 0.5) * 0.8
-                        ).Unit
-                        state.SpinScale = 0.55 + math.random() * 0.9
-                        state.SpinSign = math.random() < 0.5 and -1 or 1
-                end
         end
 
         local function restorePartRingPart(root)
@@ -749,8 +692,6 @@ do
 
                 local state = getPartRingState(root)
 
-                ensurePartRingMotion(state)
-
                 local known = {}
 
                 for _, part in ipairs(state.CollisionParts) do
@@ -794,7 +735,7 @@ do
                 end
 
                 local maximumParts = math.clamp(
-                        tonumber(PartRingSettings.MaximumParts) or 250,
+                        tonumber(PartRingSettings.MaximumParts) or 300,
                         10,
                         2000
                 )
@@ -879,26 +820,6 @@ do
 
                 PartRingSettings.Parts = nextParts
 
-                local alreadyRinged = 0
-
-                for _, part in ipairs(nextParts) do
-                        local state = PartRingSettings.PartStates[part]
-
-                        if state and state.Phase then
-                                alreadyRinged = alreadyRinged + 1
-                        end
-                end
-
-                if alreadyRinged == 0 then
-                        -- Fresh ring: perfectly even slots so the circle
-                        -- forms instantly with no shuffling.
-                        local total = #nextParts
-
-                        for index, part in ipairs(nextParts) do
-                                getPartRingState(part).Phase = ((index - 1) / total) * TAU
-                        end
-                end
-
                 for _, part in ipairs(nextParts) do
                         preparePartForRing(part)
                 end
@@ -926,70 +847,6 @@ do
                 clearPartRingParts()
                 PartRingSettings.NextRescan = 0
                 updatePartRingStatus("Part Ring off")
-        end
-
-        local function relaxPartRingPhases(dt)
-                -- Smoothly redistribute the persistent slots so the parts converge
-                -- to an evenly spaced perfect circle. The sorted phases are
-                -- unwrapped into ascending positions, the best-matching perfectly
-                -- even slot layout is fitted onto them, and every part blends a
-                -- little toward its ideal slot each frame. Parts keep their
-                -- identity while joining/leaving, so nothing ever jumps.
-                local parts = PartRingSettings.Parts
-
-                if #parts < 2 then
-                        return
-                end
-
-                local list = {}
-
-                for _, part in ipairs(parts) do
-                        local state = PartRingSettings.PartStates[part]
-
-                        if state and state.Phase then
-                                table.insert(list, state)
-                        end
-                end
-
-                local total = #list
-
-                if total < 2 then
-                        return
-                end
-
-                table.sort(list, function(first, second)
-                        return first.Phase < second.Phase
-                end)
-
-                local positions = {}
-                local cumulative = list[1].Phase
-
-                for index = 1, total do
-                        if index > 1 then
-                                local gap = (list[index].Phase - list[index - 1].Phase) % TAU
-                                cumulative = cumulative + gap
-                        end
-
-                        positions[index] = cumulative
-                end
-
-                local spacing = TAU / total
-                local offset = 0
-
-                for index = 1, total do
-                        offset = offset + positions[index] - (index - 1) * spacing
-                end
-
-                offset = offset / total
-
-                local relax = 1 - math.exp(-2.5 * dt)
-
-                for index = 1, total do
-                        local ideal = offset + (index - 1) * spacing
-                        local state = list[index]
-
-                        state.Phase = (state.Phase + (ideal - positions[index]) * relax) % TAU
-                end
         end
 
         local function updatePartRing(deltaTime)
@@ -1046,51 +903,23 @@ do
                         0,
                         300
                 )
-                local pullGain = math.clamp(
-                        tonumber(PartRingSettings.PullGain) or 25,
+                local captureSpeed = math.clamp(
+                        tonumber(PartRingSettings.CaptureSpeed) or 12,
                         1,
-                        200
-                )
-                local minimumPullSpeed = math.clamp(
-                        tonumber(PartRingSettings.MinimumPullSpeed) or 30,
-                        1,
-                        600
-                )
-                local baseMaximumPullSpeed = math.clamp(
-                        tonumber(PartRingSettings.MaximumPullSpeed) or 350,
-                        minimumPullSpeed,
-                        3000
-                )
-                local maximumDynamicSpeed = math.clamp(
-                        tonumber(PartRingSettings.MaximumDynamicSpeed) or 12000,
-                        baseMaximumPullSpeed,
-                        30000
-                )
-                local orbitVelocity = radius * spinSpeed
-                local maximumPullSpeed = math.clamp(
-                        math.max(
-                                baseMaximumPullSpeed,
-                                orbitVelocity * 2 + 200,
-                                radius * 4 + 100
-                        ),
-                        baseMaximumPullSpeed,
-                        maximumDynamicSpeed
+                        40
                 )
                 local stepTime = math.clamp(tonumber(deltaTime) or 0, 0, 0.1)
-                local leadAngle = spinSpeed * stepTime * 0.5
 
                 PartRingSettings.RingAngle = (PartRingSettings.RingAngle
                         + spinSpeed * stepTime) % TAU
 
-                relaxPartRingPhases(stepTime)
-
+                -- Even spacing is recomputed from the live part list every
+                -- frame, so the ring is always a mathematically perfect
+                -- circle no matter how many parts join or leave.
                 local center = targetRoot.Position
-                local carry = targetRoot.AssemblyLinearVelocity * 0.8
-                local gravityCompensation = Vector3.new(
-                        0,
-                        0.5 * Workspace.Gravity * stepTime,
-                        0
-                )
+                local carry = targetRoot.AssemblyLinearVelocity * 0.5
+                local orbitVelocity = radius * spinSpeed
+                local alpha = 1 - math.exp(-captureSpeed * stepTime)
 
                 for index = 1, count do
                         local part = parts[index]
@@ -1100,53 +929,42 @@ do
                                 state = getPartRingState(part)
                         end
 
-                        ensurePartRingMotion(state)
-
-                        local angle = PartRingSettings.RingAngle + state.Phase
-                                + leadAngle
+                        local angle = PartRingSettings.RingAngle
+                                + ((index - 1) / count) * TAU
                         local targetPosition = center + Vector3.new(
                                 math.cos(angle) * radius,
                                 height,
                                 math.sin(angle) * radius
                         )
-                        local delta = targetPosition - part.Position
-                        local distance = delta.Magnitude
-                        local correctionVelocity = Vector3.zero
-
-                        if distance > 0.01 then
-                                local proportionalSpeed = distance * pullGain
-                                local suctionSpeed = minimumPullSpeed
-                                        * math.clamp((distance - 3) / 10, 0, 1)
-                                local correctionSpeed = math.clamp(
-                                        math.max(proportionalSpeed, suctionSpeed),
-                                        0,
-                                        maximumPullSpeed
-                                )
-
-                                correctionVelocity = (delta / distance) * correctionSpeed
-                        end
-
                         local tangentVelocity = Vector3.new(
                                 -math.sin(angle) * orbitVelocity,
                                 0,
                                 math.cos(angle) * orbitVelocity
                         )
-                        local desiredVelocity = correctionVelocity
-                                + tangentVelocity
-                                + carry
-
-                        if desiredVelocity.Magnitude > maximumPullSpeed then
-                                desiredVelocity = desiredVelocity.Unit
-                                        * maximumPullSpeed
-                        end
-
-                        desiredVelocity = desiredVelocity + gravityCompensation
 
                         pcall(function()
                                 part.CanCollide = false
-                                part.AssemblyLinearVelocity = desiredVelocity
+
+                                -- Glide toward the exact slot, then hold it.
+                                -- Direct CFrame control is immune to gravity,
+                                -- mass and collision jitter, so even huge
+                                -- assemblies sit perfectly on the circle.
+                                local newPosition = part.Position:Lerp(
+                                        targetPosition,
+                                        alpha
+                                )
+                                part.CFrame = CFrame.new(newPosition)
+                                        * part.CFrame.Rotation
+
+                                -- Keep the real orbital velocity underneath so
+                                -- physics stays alive, the ring tracks a
+                                -- moving player, and releasing flings parts
+                                -- outward along the circle.
+                                part.AssemblyLinearVelocity = tangentVelocity
+                                        + carry
                                 part.AssemblyAngularVelocity = state.SpinAxis
-                                        * (rotationSpeed * state.SpinScale * state.SpinSign)
+                                        * (rotationSpeed * state.SpinScale
+                                                * state.SpinSign)
                         end)
                 end
         end
@@ -4214,36 +4032,16 @@ do
 local RingPowerSection = FunTab:Section("Ring Power")
 
 RingPowerSection:Paragraph({
-        Text = "Raise Max Part Mass and Max Part Size to ring heavier and larger objects. Pull Strength controls how hard parts snap into orbit."
+        Text = "Parts are placed directly onto the ring every frame, so any mass or size rings instantly and holds a perfect circle. Capture Speed controls how fast parts snap into orbit."
 })
 
 RingPowerSection:Slider({
-        Text = "Pull Strength",
-        Min = 1,
-        Max = 200,
-        Value = PartRingSettings.PullGain,
+        Text = "Capture Speed",
+        Min = 2,
+        Max = 30,
+        Value = PartRingSettings.CaptureSpeed,
         Callback = function(value)
-                PartRingSettings.PullGain = value
-        end
-})
-
-RingPowerSection:Slider({
-        Text = "Minimum Pull Speed",
-        Min = 1,
-        Max = 600,
-        Value = PartRingSettings.MinimumPullSpeed,
-        Callback = function(value)
-                PartRingSettings.MinimumPullSpeed = value
-        end
-})
-
-RingPowerSection:Slider({
-        Text = "Maximum Pull Speed",
-        Min = 30,
-        Max = 3000,
-        Value = PartRingSettings.MaximumPullSpeed,
-        Callback = function(value)
-                PartRingSettings.MaximumPullSpeed = value
+                PartRingSettings.CaptureSpeed = value
         end
 })
 
