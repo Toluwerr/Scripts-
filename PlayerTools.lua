@@ -96,11 +96,9 @@ local PartRingSettings = {
         Height = 4,
         Speed = 3.5,
         RotationSpeed = 30,
-        CaptureSpeed = 12,
+        PullStrength = 20,
         MaximumAssemblyMass = 5000000,
-        RingAngle = 0,
         MaximumAssemblySize = 300,
-        MaximumParts = 300,
         ReleasePower = 1,
         RescanInterval = 0.4,
         Parts = {},
@@ -297,7 +295,7 @@ do
         end
 
         local function updatePartRingStatus(text)
-                local message = tostring(text or "Part Ring off")
+                local message = tostring(text or "Chaos off")
 
                 if PartRingSettings.LastStatus == message then
                         return
@@ -637,12 +635,22 @@ do
                         return state
                 end
 
+                -- Chaos parameters: every part draws its own random orbit
+                -- shape at capture time, so the swarm tangles instead of
+                -- marching in an even circle.
                 state = {
                         CollisionParts = {},
-                        Phase = nil,
+                        Angle = nil,
                         FailCount = 0,
                         PrevPos = nil,
                         LastSlot = nil,
+                        RadiusScale = 0.3 + math.random() * 1.4,
+                        HeightOffset = (math.random() - 0.5) * 10,
+                        SpeedScale = 0.45 + math.random() * 1.3,
+                        Direction = math.random() < 0.5 and -1 or 1,
+                        WobbleAmplitude = 1 + math.random() * 5,
+                        WobbleFrequency = 0.8 + math.random() * 2.6,
+                        WobblePhase = math.random() * TAU,
                         SpinAxis = Vector3.new(
                                 (math.random() - 0.5) * 0.8,
                                 1,
@@ -750,66 +758,6 @@ do
                 return offset.Magnitude <= distanceLimit
         end
 
-        local function reslotRingParts(targetRoot)
-                -- Redistribute the persistent angular slots so the parts form a
-                -- perfectly even circle. Existing phases keep their sorted
-                -- order and shift by the minimum possible amount, so parts
-                -- never scramble or cross each other when the membership
-                -- changes; the position glide smooths out the small shifts.
-                -- Running this on an already-even ring is a no-op.
-                local parts = PartRingSettings.Parts
-                local count = #parts
-
-                if count == 0 then
-                        return
-                end
-
-                local center = targetRoot.Position
-                local entries = {}
-
-                for _, part in ipairs(parts) do
-                        local state = getPartRingState(part)
-
-                        if state.Phase == nil then
-                                -- New parts enter at their current angle
-                                -- around the target so they barely move.
-                                local offsetX = part.Position.X - center.X
-                                local offsetZ = part.Position.Z - center.Z
-
-                                if offsetX ~= offsetX or offsetZ ~= offsetZ then
-                                        state.Phase = 0
-                                else
-                                        state.Phase = math.atan2(offsetZ, offsetX) % TAU
-                                end
-                        end
-
-                        table.insert(entries, state)
-                end
-
-                table.sort(entries, function(first, second)
-                        return first.Phase < second.Phase
-                end)
-
-                local spacing = TAU / count
-                local sumSin = 0
-                local sumCos = 0
-
-                for index = 1, count do
-                        local difference = entries[index].Phase
-                                - (index - 1) * spacing
-
-                        sumSin = sumSin + math.sin(difference)
-                        sumCos = sumCos + math.cos(difference)
-                end
-
-                local offset = math.atan2(sumSin, sumCos)
-
-                for index = 1, count do
-                        entries[index].Phase = (offset
-                                + (index - 1) * spacing) % TAU
-                end
-        end
-
         local function applyRingPlacement(
                 part,
                 targetNow,
@@ -851,7 +799,7 @@ do
                 return velocity, currentPosition
         end
 
-        local function composePartRingStatus(capped)
+        local function composePartRingStatus()
                 local parts = PartRingSettings.Parts
                 local total = #parts
 
@@ -860,15 +808,11 @@ do
                         local label
 
                         if moving >= total then
-                                label = "Orbiting " .. tostring(total) .. " parts"
+                                label = "Chaos: " .. tostring(total) .. " parts swarming"
                         else
-                                label = "Orbiting " .. tostring(moving) .. " of "
+                                label = "Chaos: " .. tostring(moving) .. " of "
                                         .. tostring(total)
-                                        .. " parts (rest waiting on physics)"
-                        end
-
-                        if capped then
-                                label = label .. " (part cap reached)"
+                                        .. " parts swarming (rest waiting on physics)"
                         end
 
                         updatePartRingStatus(label)
@@ -886,7 +830,6 @@ do
                 PartRingSettings.PartStates = setmetatable({}, {__mode = "k"})
                 PartRingSettings.CollisionStates = setmetatable({}, {__mode = "k"})
                 PartRingSettings.Cooldowns = setmetatable({}, {__mode = "k"})
-                PartRingSettings.RingAngle = 0
         end
 
         PartRing.refresh = function()
@@ -899,12 +842,6 @@ do
                 end
 
                 local now = os.clock()
-                local maximumParts = math.clamp(
-                        tonumber(PartRingSettings.MaximumParts) or 300,
-                        10,
-                        2000
-                )
-
                 local overlap = OverlapParams.new()
                 overlap.FilterType = Enum.RaycastFilterType.Exclude
 
@@ -975,23 +912,7 @@ do
                         end
                 end
 
-                if #nextParts > maximumParts then
-                        table.sort(nextParts, function(first, second)
-                                return (first.Position - targetRoot.Position).Magnitude
-                                        < (second.Position - targetRoot.Position).Magnitude
-                        end)
-
-                        for index = #nextParts, maximumParts + 1, -1 do
-                                local part = nextParts[index]
-
-                                restorePartRingPart(part)
-                                nextParts[index] = nil
-                        end
-                end
-
                 PartRingSettings.Parts = nextParts
-
-                reslotRingParts(targetRoot)
 
                 for _, part in ipairs(nextParts) do
                         preparePartForRing(part)
@@ -999,7 +920,7 @@ do
 
                 PartRingSettings.NextRescan = os.clock() + PartRingSettings.RescanInterval
 
-                composePartRingStatus(#nextParts >= maximumParts)
+                composePartRingStatus()
         end
 
         PartRing.stop = function()
@@ -1007,7 +928,7 @@ do
                 PartRingSettings.Connection = nil
                 clearPartRingParts()
                 PartRingSettings.NextRescan = 0
-                updatePartRingStatus("Part Ring off")
+                updatePartRingStatus("Chaos off")
         end
 
         local function updatePartRing(deltaTime)
@@ -1071,17 +992,13 @@ do
                 end
 
                 if removedAny then
-                        composePartRingStatus(false)
+                        composePartRingStatus()
                 end
 
                 local count = #parts
 
                 if count == 0 then
                         return
-                end
-
-                if removedAny then
-                        reslotRingParts(targetRoot)
                 end
 
                 local radius = math.clamp(
@@ -1104,19 +1021,16 @@ do
                         0,
                         300
                 )
-                local captureSpeed = math.clamp(
-                        tonumber(PartRingSettings.CaptureSpeed) or 12,
+                local pullStrength = math.clamp(
+                        tonumber(PartRingSettings.PullStrength) or 20,
                         1,
-                        40
+                        100
                 )
                 local stepTime = math.clamp(tonumber(deltaTime) or 0, 0, 0.1)
 
                 if stepTime < 0.0001 then
                         return
                 end
-
-                PartRingSettings.RingAngle = (PartRingSettings.RingAngle
-                        + spinSpeed * stepTime) % TAU
 
                 local center = targetRoot.Position
 
@@ -1139,11 +1053,11 @@ do
                 end
 
                 local orbitVelocity = radius * spinSpeed
-                -- Approach cap must scale with the orbit speed, otherwise a
-                -- fast ring can never apply the correction it needs to stay
-                -- locked on the circle.
+                -- Pull Strength caps how hard parts can be yanked toward
+                -- their chaotic slot when far away; the floor keeps a fast
+                -- swarm able to apply the correction it needs to stay locked.
                 local approachCap = math.max(
-                        captureSpeed * 30,
+                        pullStrength * 30,
                         orbitVelocity * 2 + 200
                 )
                 local slotTolerance = math.max(2.5, radius * 0.25)
@@ -1157,30 +1071,73 @@ do
                                 state = getPartRingState(part)
                         end
 
-                        if state.Phase == nil then
-                                state.Phase = ((index - 1) / count) * TAU
+                        local currentPosition = part.Position
+
+                        if state.Angle == nil then
+                                -- The part enters the swarm from wherever it
+                                -- currently is, so joining never teleports it.
+                                local offsetX = currentPosition.X - center.X
+                                local offsetZ = currentPosition.Z - center.Z
+
+                                if offsetX ~= offsetX or offsetZ ~= offsetZ then
+                                        state.Angle = 0
+                                else
+                                        state.Angle = math.atan2(offsetZ, offsetX) % TAU
+                                end
                         end
 
-                        -- Stable slot: parts keep their phase when others
-                        -- join or leave, and the phases are always perfectly
-                        -- even after every reslot, so the ring stays a clean
-                        -- rotating circle instead of scrambling.
-                        local angle = PartRingSettings.RingAngle + state.Phase
-                        local nextAngle = angle + spinSpeed * stepTime
+                        -- Chaos trajectory: each part sweeps its own private
+                        -- orbit - personal radius band, personal height,
+                        -- personal speed, personal direction, breathing
+                        -- wobble - so the swarm tangles around the target
+                        -- instead of marching in a circle. The exact-landing
+                        -- controller tracks this shape exactly like it tracked
+                        -- the ring: land on targetNext after one step.
+                        local angularSpeed = spinSpeed * state.SpeedScale
+                                * state.Direction
+                        local angle = state.Angle
+                        local nextAngle = angle + angularSpeed * stepTime
+
+                        state.Angle = nextAngle % TAU
+
+                        local wobbleNow = math.sin(
+                                now * state.WobbleFrequency + state.WobblePhase
+                        ) * state.WobbleAmplitude
+                        local wobbleNext = math.sin(
+                                (now + stepTime) * state.WobbleFrequency
+                                        + state.WobblePhase
+                        ) * state.WobbleAmplitude
+                        local verticalNow = math.cos(
+                                now * state.WobbleFrequency * 0.7
+                                        + state.WobblePhase * 1.3
+                        ) * state.WobbleAmplitude * 0.6
+                        local verticalNext = math.cos(
+                                (now + stepTime) * state.WobbleFrequency * 0.7
+                                        + state.WobblePhase * 1.3
+                        ) * state.WobbleAmplitude * 0.6
+                        local radiusNow = math.max(
+                                2,
+                                radius * state.RadiusScale + wobbleNow
+                        )
+                        local radiusNext = math.max(
+                                2,
+                                radius * state.RadiusScale + wobbleNext
+                        )
                         local targetNow = center + Vector3.new(
-                                math.cos(angle) * radius,
-                                height,
-                                math.sin(angle) * radius
+                                math.cos(angle) * radiusNow,
+                                height + state.HeightOffset + verticalNow,
+                                math.sin(angle) * radiusNow
                         )
                         local targetNext = center + Vector3.new(
-                                math.cos(nextAngle) * radius,
-                                height,
-                                math.sin(nextAngle) * radius
+                                math.cos(nextAngle) * radiusNext,
+                                height + state.HeightOffset + verticalNext,
+                                math.sin(nextAngle) * radiusNext
                         )
+                        local tangentSpeed = radiusNow * angularSpeed
                         local tangentVelocity = Vector3.new(
-                                -math.sin(nextAngle) * orbitVelocity,
+                                -math.sin(angle) * tangentSpeed,
                                 0,
-                                math.cos(nextAngle) * orbitVelocity
+                                math.cos(angle) * tangentSpeed
                         )
                         local angularVelocity = state.SpinAxis
                                 * (rotationSpeed * state.SpinScale
@@ -1188,17 +1145,15 @@ do
 
                         -- Ownership-greedy command: every part receives the
                         -- exact same real physics order every single frame,
-                        -- forever. Parts this client owns fly onto the ring
+                        -- forever. Parts this client owns fly into the swarm
                         -- through replicating physics; parts still owned by
                         -- the server ignore the order for now, and the moment
                         -- Roblox hands their simulation to this client they
-                        -- snap into orbit - no probe, no release, no restart,
-                        -- no giving up before ownership arrives. There is no
-                        -- CFrame and no other client-only motion anywhere in
-                        -- the engine, so nothing can look ringed without
-                        -- being ringed.
-                        local currentPosition = part.Position
-
+                        -- snap into the chaos - no probe, no release, no
+                        -- restart, no giving up before ownership arrives.
+                        -- There is no CFrame and no other client-only motion
+                        -- anywhere in the engine, so nothing can look pulled
+                        -- in without really being pulled in.
                         if state.PrevPos then
                                 local moved = (currentPosition - state.PrevPos).Magnitude
 
@@ -4173,11 +4128,11 @@ PlatformSection:Toggle({
 end
 
 do
-local PartRingSection = FunTab:Section("Part Ring")
+local PartRingSection = FunTab:Section("Chaos")
 
 local partRingToggleValue = false
 local partRingToggle = PartRingSection:Toggle({
-        Text = "Enable Part Ring",
+        Text = "Enable Chaos",
         Value = false,
         Callback = function(value)
                 partRingToggleValue = value and true or false
@@ -4202,7 +4157,7 @@ local partRingTargetLabel = PartRingSection:Paragraph({
 
 local partRingTargetPickerValue = false
 local partRingTargetPickerToggle = PartRingSection:Toggle({
-        Text = "Select Ring Target",
+        Text = "Select Chaos Target",
         Value = false,
         Callback = function(value)
                 partRingTargetPickerValue = value and true or false
@@ -4211,7 +4166,7 @@ local partRingTargetPickerToggle = PartRingSection:Toggle({
 })
 
 PartRingSection:Paragraph({
-        Text = "Hover a player and left-click them to set the ring target."
+        Text = "Hover a player and left-click them to set the chaos target."
 })
 
 PartRing.OnPickerEnabledChanged = function(enabled)
@@ -4233,11 +4188,11 @@ PartRingSection:Button({
 })
 
 local partRingStatusLabel = PartRingSection:Paragraph({
-        Text = "Part Ring off"
+        Text = "Chaos off"
 })
 
 PartRing.OnStatusChanged = function(status)
-        partRingStatusLabel:Set(tostring(status or "Part Ring off"))
+        partRingStatusLabel:Set(tostring(status or "Chaos off"))
 end
 
 PartRing.OnTargetChanged = function(name)
@@ -4263,7 +4218,7 @@ PartRingSection:Slider({
 })
 
 PartRingSection:Slider({
-        Text = "Ring Radius",
+        Text = "Chaos Radius",
         Min = 3,
         Max = 150,
         Value = PartRingSettings.Radius,
@@ -4282,7 +4237,7 @@ PartRingSection:Slider({
 })
 
 PartRingSection:Slider({
-        Text = "Ring Height",
+        Text = "Chaos Height",
         Min = -10,
         Max = 25,
         Value = PartRingSettings.Height,
@@ -4292,7 +4247,7 @@ PartRingSection:Slider({
 })
 
 PartRingSection:Slider({
-        Text = "Ring Speed",
+        Text = "Chaos Speed",
         Min = 0,
         Max = 20,
         Step = 0.5,
@@ -4321,19 +4276,19 @@ PartRingSection:Button({
 end
 
 do
-local RingPowerSection = FunTab:Section("Ring Power")
+local RingPowerSection = FunTab:Section("Chaos Power")
 
 RingPowerSection:Paragraph({
-        Text = "Every part gets a real physics order every frame - velocity only, never CFrame, so whatever orbits you on your screen orbits you on the server too. Parts the server still holds wait in place and snap into the ring the moment their physics reaches your client, so walk near parts to sweep them up. Capture Speed controls how fast parts pull into orbit."
+        Text = "Every part gets a real physics order every frame - velocity only, never CFrame, so whatever swarms around you on your screen swarms around you on the server too. There is no cap on how many parts get pulled: every loose part in range joins the swarm. Pull Strength controls how hard parts get yanked in, and Speed drives how fast the swarm moves. Parts the server still holds wait in place and snap into the chaos the moment their physics reaches your client, so walk near parts to sweep them up."
 })
 
 RingPowerSection:Slider({
-        Text = "Capture Speed",
+        Text = "Pull Strength",
         Min = 1,
-        Max = 30,
-        Value = PartRingSettings.CaptureSpeed,
+        Max = 100,
+        Value = PartRingSettings.PullStrength,
         Callback = function(value)
-                PartRingSettings.CaptureSpeed = value
+                PartRingSettings.PullStrength = value
         end
 })
 
@@ -4358,20 +4313,6 @@ RingPowerSection:Slider({
         Value = PartRingSettings.MaximumAssemblySize,
         Callback = function(value)
                 PartRingSettings.MaximumAssemblySize = value
-
-                if PartRingSettings.Enabled then
-                        PartRing.refresh()
-                end
-        end
-})
-
-RingPowerSection:Slider({
-        Text = "Max Parts",
-        Min = 10,
-        Max = 1000,
-        Value = PartRingSettings.MaximumParts,
-        Callback = function(value)
-                PartRingSettings.MaximumParts = value
 
                 if PartRingSettings.Enabled then
                         PartRing.refresh()
