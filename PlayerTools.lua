@@ -649,7 +649,7 @@ do
                         PrevPos = nil,
                         LastVelocity = nil,
                         LastStep = nil,
-                        WrittenPos = nil,
+                        LastSlot = nil,
                         SpinAxis = Vector3.new(
                                 (math.random() - 0.5) * 0.8,
                                 1,
@@ -822,33 +822,25 @@ do
                 targetNow,
                 targetNext,
                 tangentVelocity,
-                glide,
                 stepTime,
                 approachCap,
                 carry,
-                angularVelocity,
-                writeCFrame
+                angularVelocity
         )
                 part.CanCollide = false
 
                 local currentPosition = part.Position
-                local newPosition
 
-                if writeCFrame then
-                        newPosition = currentPosition:Lerp(targetNow, glide)
-                else
-                        -- Capture stage: velocity-only. For parts this client
-                        -- owns this is real, replicating physics; for parts the
-                        -- server owns the write is inert, so nothing flickers
-                        -- on screen while we find out which is which.
-                        newPosition = currentPosition
-                end
-
-                -- Velocity that lands the part exactly on its next slot after
-                -- the physics step, so the circle stays perfect at any speed,
-                -- radius or mass. While capturing from far away the approach
-                -- is capped so parts glide in instead of teleporting.
-                local residual = targetNext - newPosition
+                -- Real-motion ring: CFrame is never written here, because a
+                -- client CFrame write only ever moves a part on this screen.
+                -- The only motion that replicates to the server is physics on
+                -- an assembly this client owns, so the ring is driven purely
+                -- by velocity commands. The correction below lands the part
+                -- exactly on its next slot after one physics step (gravity
+                -- included), which works at any speed, radius or mass; while
+                -- capturing from far away the approach is capped so parts
+                -- glide in instead of teleporting.
+                local residual = targetNext - currentPosition
                         - tangentVelocity * stepTime
                 local correction = residual / stepTime
                         + Vector3.new(0, 0.5 * Workspace.Gravity * stepTime, 0)
@@ -860,14 +852,10 @@ do
 
                 local velocity = tangentVelocity + correction + carry
 
-                if writeCFrame then
-                        part.CFrame = CFrame.new(newPosition) * part.CFrame.Rotation
-                end
-
                 part.AssemblyLinearVelocity = velocity
                 part.AssemblyAngularVelocity = angularVelocity
 
-                return velocity, writeCFrame and newPosition or nil, currentPosition
+                return velocity, currentPosition
         end
 
         local function composePartRingStatus(capped)
@@ -897,8 +885,8 @@ do
 
                         if total > live then
                                 label = label .. " ("
-                                        .. tostring(live) .. " live, "
-                                        .. tostring(total - live) .. " capturing)"
+                                        .. tostring(live) .. " real, "
+                                        .. tostring(total - live) .. " probing)"
                         end
 
                         if blocked > 0 then
@@ -929,12 +917,12 @@ do
                 removedAny,
                 promotedAny
         )
-                -- Ownership tracking: compare where the part actually is
-                -- against where the previous command should have put it.
-                -- Parts this client controls follow the command closely.
-                -- Parts the server or another player controls ignore it,
-                -- and writing CFrame at those only ever produced a
-                -- client-only flicker, so they get released instead.
+                -- Ownership tracking with no CFrame anywhere in the engine:
+                -- the only way a part can reach its slot is real physics on
+                -- an assembly this client controls, which replicates to the
+                -- server. Parts the server or another player holds ignore
+                -- the velocity commands, never approach the slot, and get
+                -- released instead of being faked into a client-only ring.
                 local part = parts[index]
 
                 if state.LastVelocity and state.LastStep then
@@ -944,19 +932,13 @@ do
                         local evaluated = false
                         local tracked = false
 
-                        if state.Mode == "live" then
-                                if state.WrittenPos then
-                                        local expected = state.WrittenPos
-                                                + state.LastVelocity * state.LastStep
-
-                                        tracked = (currentPosition - expected).Magnitude
-                                                <= math.max(0.8, commanded * 0.35)
-                                        evaluated = true
-                                end
-                        elseif state.PrevPos then
-                                tracked = commanded < 0.6
-                                        or (currentPosition - state.PrevPos).Magnitude
-                                                >= commanded * 0.4
+                        if commanded >= 0.3 then
+                                tracked = (currentPosition - state.PrevPos).Magnitude
+                                        >= commanded * 0.35
+                                evaluated = true
+                        elseif state.LastSlot then
+                                tracked = (currentPosition - state.LastSlot).Magnitude
+                                        <= 2
                                 evaluated = true
                         end
 
@@ -977,18 +959,17 @@ do
                 if state.Mode == "live" then
                         if state.MissStreak >= 12 then
                                 -- Ownership was probably taken away from this
-                                -- client mid-ring. Demote back to the
-                                -- velocity-only capture probe: a momentary
-                                -- glitch re-promotes quickly, and a real loss
-                                -- gets released by the capture verdict with a
-                                -- cooldown instead of a CFrame flicker war.
+                                -- client mid-ring. Demote back to the probing
+                                -- stage: a momentary glitch re-promotes
+                                -- quickly, and a real loss gets released by
+                                -- the probe verdict with a cooldown instead
+                                -- of a client-only flicker war.
                                 state.Mode = "capture"
                                 state.CaptureStart = now
                                 state.GoodFrames = 0
                                 state.CheckFrames = 0
                                 state.GoodStreak = 0
                                 state.MissStreak = 0
-                                state.WrittenPos = nil
                                 state.LastVelocity = nil
                                 state.PrevPos = nil
                                 state.LastStep = nil
@@ -999,21 +980,33 @@ do
                         local ratio = checked > 0
                                 and state.GoodFrames / checked
                                 or 0
+                        local slotDistance = state.LastSlot
+                                and (part.Position - state.LastSlot).Magnitude
+                                or math.huge
+                        local ringTolerance = math.max(
+                                2.5,
+                                math.clamp(
+                                        tonumber(PartRingSettings.Radius) or 12,
+                                        3,
+                                        150
+                                ) * 0.25
+                        )
 
-                        if ratio >= 0.75 or state.GoodStreak >= 15 then
-                                -- The part obeys physics commands from this
-                                -- client, so writes replicate and the motion
-                                -- is real for everyone. Promote it to the
-                                -- direct-placement perfect circle.
+                        if slotDistance <= ringTolerance
+                                and (ratio >= 0.5 or state.GoodStreak >= 10) then
+                                -- The part physically reached its slot, which
+                                -- is only possible through replicating physics
+                                -- this client commands. Promote it: from here
+                                -- on it is a confirmed real-motion ring part.
                                 state.Mode = "live"
                                 state.MissStreak = 0
                                 state.GoodStreak = 0
                                 return removedAny, true
                         else
-                                -- Never obeyed a command: the server holds
-                                -- it and a client cannot move it for real.
-                                -- Release quietly and retry later in case
-                                -- ownership changes.
+                                -- Never reached the slot: the server or
+                                -- another player holds it and a client cannot
+                                -- move it for real. Release quietly and retry
+                                -- later in case ownership changes.
                                 restorePartRingPart(part, true)
                                 PartRingSettings.Cooldowns[part] = now + 6
                                 table.remove(parts, index)
@@ -1304,7 +1297,6 @@ do
                 end
 
                 local orbitVelocity = radius * spinSpeed
-                local glide = 1 - math.exp(-captureSpeed * stepTime)
                 -- Approach cap must scale with the orbit speed, otherwise a
                 -- fast ring can never apply the correction it needs to stay
                 -- locked on the circle.
@@ -1349,38 +1341,34 @@ do
                         local angularVelocity = state.SpinAxis
                                 * (rotationSpeed * state.SpinScale
                                         * state.SpinSign)
-                        local isLive = state.Mode == "live"
 
-                        -- Capture parts get velocity-only physics: real,
-                        -- replicating motion for parts this client owns, and
-                        -- inert for parts it does not. Live parts get the
-                        -- direct placement that is immune to gravity, mass
-                        -- and collision jitter, with exact-landing velocity
-                        -- that removes the outward drift.
-                        local placed, velocity, writtenPosition, preWritePosition = pcall(
+                        -- Every part, probing or confirmed, is driven exactly
+                        -- the same way: exact-landing velocity commands only,
+                        -- never CFrame. For assemblies this client owns the
+                        -- motion is real physics that replicates to the server
+                        -- and every other player; the probe verdict simply
+                        -- confirms which parts those are.
+                        local placed, velocity, preWritePosition = pcall(
                                 applyRingPlacement,
                                 part,
                                 targetNow,
                                 targetNext,
                                 tangentVelocity,
-                                isLive and glide or 0,
                                 stepTime,
                                 approachCap,
                                 carry,
-                                angularVelocity,
-                                isLive
+                                angularVelocity
                         )
 
                         state.PrevPos = preWritePosition
                         state.LastStep = stepTime
+                        state.LastSlot = targetNow
 
                         if placed then
                                 state.LastVelocity = velocity
-                                state.WrittenPos = writtenPosition
                                 state.FailCount = 0
                         else
                                 state.LastVelocity = nil
-                                state.WrittenPos = nil
                                 state.FailCount = state.FailCount + 1
                         end
                 end
@@ -4471,7 +4459,7 @@ do
 local RingPowerSection = FunTab:Section("Ring Power")
 
 RingPowerSection:Paragraph({
-        Text = "Parts are placed directly onto the ring every frame, so any mass or size rings instantly. Slots stay stable when parts join or leave, and Capture Speed controls how fast parts snap into orbit."
+        Text = "Parts are ringed with real physics only: velocity commands on assemblies this client owns replicate to the server, and client-only CFrame teleports are never used. Any mass or size rings the same way, parts this client cannot really move are dropped automatically, and Capture Speed controls how fast parts pull into orbit."
 })
 
 RingPowerSection:Slider({
