@@ -102,12 +102,14 @@ local PartRingSettings = {
         MaximumAssemblySize = 300,
         MaximumParts = 300,
         ReleasePower = 1,
-        RescanInterval = 0.5,
+        RescanInterval = 0.4,
         Parts = {},
         PartStates = setmetatable({}, {__mode = "k"}),
         Connection = nil,
         NextRescan = 0,
-        CollisionStates = setmetatable({}, {__mode = "k"})
+        CollisionStates = setmetatable({}, {__mode = "k"}),
+        LastStatus = nil,
+        ErrorCount = 0
 }
 
 local PartRing = {}
@@ -293,8 +295,16 @@ do
         end
 
         local function updatePartRingStatus(text)
+                local message = tostring(text or "Part Ring off")
+
+                if PartRingSettings.LastStatus == message then
+                        return
+                end
+
+                PartRingSettings.LastStatus = message
+
                 if type(PartRing.OnStatusChanged) == "function" then
-                        PartRing.OnStatusChanged(text)
+                        pcall(PartRing.OnStatusChanged, message)
                 end
         end
 
@@ -627,6 +637,8 @@ do
 
                 state = {
                         CollisionParts = {},
+                        Phase = nil,
+                        FailCount = 0,
                         SpinAxis = Vector3.new(
                                 (math.random() - 0.5) * 0.8,
                                 1,
@@ -714,6 +726,118 @@ do
                 end
         end
 
+        local function isPartRingViable(part, targetRoot, distanceLimit)
+                -- Cheap per-frame validity. The full rule set runs at rescan
+                -- time; this only catches the ways a part can die between
+                -- rescans: destroyed, merged into another assembly, flung out
+                -- of range, or corrupted to a NaN position (NaN fails every
+                -- comparison, so it drops out automatically).
+                if not part
+                        or not part.Parent
+                        or part.AssemblyRootPart ~= part then
+                        return false
+                end
+
+                local offset = part.Position - targetRoot.Position
+
+                return offset.Magnitude <= distanceLimit
+        end
+
+        local function reslotRingParts(targetRoot)
+                -- Redistribute the persistent angular slots so the parts form a
+                -- perfectly even circle. Existing phases keep their sorted
+                -- order and shift by the minimum possible amount, so parts
+                -- never scramble or cross each other when the membership
+                -- changes; the position glide smooths out the small shifts.
+                -- Running this on an already-even ring is a no-op.
+                local parts = PartRingSettings.Parts
+                local count = #parts
+
+                if count == 0 then
+                        return
+                end
+
+                local center = targetRoot.Position
+                local entries = {}
+
+                for _, part in ipairs(parts) do
+                        local state = getPartRingState(part)
+
+                        if state.Phase == nil then
+                                -- New parts enter at their current angle
+                                -- around the target so they barely move.
+                                local offsetX = part.Position.X - center.X
+                                local offsetZ = part.Position.Z - center.Z
+
+                                if offsetX ~= offsetX or offsetZ ~= offsetZ then
+                                        state.Phase = 0
+                                else
+                                        state.Phase = math.atan2(offsetZ, offsetX) % TAU
+                                end
+                        end
+
+                        table.insert(entries, state)
+                end
+
+                table.sort(entries, function(first, second)
+                        return first.Phase < second.Phase
+                end)
+
+                local spacing = TAU / count
+                local sumSin = 0
+                local sumCos = 0
+
+                for index = 1, count do
+                        local difference = entries[index].Phase
+                                - (index - 1) * spacing
+
+                        sumSin = sumSin + math.sin(difference)
+                        sumCos = sumCos + math.cos(difference)
+                end
+
+                local offset = math.atan2(sumSin, sumCos)
+
+                for index = 1, count do
+                        entries[index].Phase = (offset
+                                + (index - 1) * spacing) % TAU
+                end
+        end
+
+        local function applyRingPlacement(
+                part,
+                targetNow,
+                targetNext,
+                tangentVelocity,
+                glide,
+                stepTime,
+                approachCap,
+                carry,
+                angularVelocity
+        )
+                part.CanCollide = false
+
+                local currentPosition = part.Position
+                local newPosition = currentPosition:Lerp(targetNow, glide)
+
+                -- Velocity that lands the part exactly on its next slot after
+                -- the physics step, so the circle stays perfect at any speed,
+                -- radius or mass. While capturing from far away the approach
+                -- is capped so parts glide in instead of teleporting.
+                local residual = targetNext - newPosition
+                        - tangentVelocity * stepTime
+                local correction = residual / stepTime
+                        + Vector3.new(0, 0.5 * Workspace.Gravity * stepTime, 0)
+
+                if (targetNow - currentPosition).Magnitude > 4
+                        and correction.Magnitude > approachCap then
+                        correction = correction.Unit * approachCap
+                end
+
+                part.CFrame = CFrame.new(newPosition) * part.CFrame.Rotation
+                part.AssemblyLinearVelocity = tangentVelocity + correction + carry
+                part.AssemblyAngularVelocity = angularVelocity
+        end
+
         local function clearPartRingParts()
                 for _, part in ipairs(PartRingSettings.Parts) do
                         restorePartRingPart(part)
@@ -791,7 +915,7 @@ do
                 local selected = {}
 
                 for _, part in ipairs(PartRingSettings.Parts) do
-                        if candidateSet[part] and canRingPart(part, targetRoot) then
+                        if candidateSet[part] then
                                 selected[part] = true
                                 table.insert(nextParts, part)
                         else
@@ -819,6 +943,8 @@ do
                 end
 
                 PartRingSettings.Parts = nextParts
+
+                reslotRingParts(targetRoot)
 
                 for _, part in ipairs(nextParts) do
                         preparePartForRing(part)
@@ -857,6 +983,13 @@ do
                 local targetRoot = PartRing.getTargetRoot()
 
                 if not targetRoot or not targetRoot.Parent then
+                        -- Target died, left or is respawning: release every
+                        -- part instead of leaving a frozen ring in the air.
+                        if #PartRingSettings.Parts > 0 then
+                                clearPartRingParts()
+                                updatePartRingStatus("Target unavailable")
+                        end
+
                         return
                 end
 
@@ -867,13 +1000,20 @@ do
                 end
 
                 local parts = PartRingSettings.Parts
+                local searchLimit = getPartRingSearchRadius() * 1.02
+                local removedAny = false
 
                 for index = #parts, 1, -1 do
                         local part = parts[index]
+                        local state = PartRingSettings.PartStates[part]
+                        local failedTooOften = state ~= nil
+                                and (state.FailCount or 0) >= 30
 
-                        if not canRingPart(part, targetRoot) then
+                        if failedTooOften
+                                or not isPartRingViable(part, targetRoot, searchLimit) then
                                 restorePartRingPart(part)
                                 table.remove(parts, index)
+                                removedAny = true
                         end
                 end
 
@@ -881,6 +1021,10 @@ do
 
                 if count == 0 then
                         return
+                end
+
+                if removedAny then
+                        reslotRingParts(targetRoot)
                 end
 
                 local radius = math.clamp(
@@ -910,16 +1054,42 @@ do
                 )
                 local stepTime = math.clamp(tonumber(deltaTime) or 0, 0, 0.1)
 
+                if stepTime < 0.0001 then
+                        return
+                end
+
                 PartRingSettings.RingAngle = (PartRingSettings.RingAngle
                         + spinSpeed * stepTime) % TAU
 
-                -- Even spacing is recomputed from the live part list every
-                -- frame, so the ring is always a mathematically perfect
-                -- circle no matter how many parts join or leave.
                 local center = targetRoot.Position
+
+                if center.X ~= center.X
+                        or center.Y ~= center.Y
+                        or center.Z ~= center.Z then
+                        -- Corrupted target position; skip this frame rather
+                        -- than scattering every part to NaN coordinates.
+                        return
+                end
+
                 local carry = targetRoot.AssemblyLinearVelocity * 0.5
+
+                if carry.X ~= carry.X
+                        or carry.Y ~= carry.Y
+                        or carry.Z ~= carry.Z then
+                        carry = Vector3.zero
+                elseif carry.Magnitude > 250 then
+                        carry = carry.Unit * 250
+                end
+
                 local orbitVelocity = radius * spinSpeed
-                local alpha = 1 - math.exp(-captureSpeed * stepTime)
+                local glide = 1 - math.exp(-captureSpeed * stepTime)
+                -- Approach cap must scale with the orbit speed, otherwise a
+                -- fast ring can never apply the correction it needs to stay
+                -- locked on the circle.
+                local approachCap = math.max(
+                        captureSpeed * 30,
+                        orbitVelocity * 2 + 200
+                )
 
                 for index = 1, count do
                         local part = parts[index]
@@ -929,43 +1099,57 @@ do
                                 state = getPartRingState(part)
                         end
 
-                        local angle = PartRingSettings.RingAngle
-                                + ((index - 1) / count) * TAU
-                        local targetPosition = center + Vector3.new(
+                        if state.Phase == nil then
+                                state.Phase = ((index - 1) / count) * TAU
+                        end
+
+                        -- Stable slot: parts keep their phase when others
+                        -- join or leave, and the phases are always perfectly
+                        -- even after every reslot, so the ring stays a clean
+                        -- rotating circle instead of scrambling.
+                        local angle = PartRingSettings.RingAngle + state.Phase
+                        local nextAngle = angle + spinSpeed * stepTime
+                        local targetNow = center + Vector3.new(
                                 math.cos(angle) * radius,
                                 height,
                                 math.sin(angle) * radius
                         )
+                        local targetNext = center + Vector3.new(
+                                math.cos(nextAngle) * radius,
+                                height,
+                                math.sin(nextAngle) * radius
+                        )
                         local tangentVelocity = Vector3.new(
-                                -math.sin(angle) * orbitVelocity,
+                                -math.sin(nextAngle) * orbitVelocity,
                                 0,
-                                math.cos(angle) * orbitVelocity
+                                math.cos(nextAngle) * orbitVelocity
+                        )
+                        local angularVelocity = state.SpinAxis
+                                * (rotationSpeed * state.SpinScale
+                                        * state.SpinSign)
+
+                        -- Direct placement: immune to gravity, mass and
+                        -- collision jitter, and the exact-landing velocity
+                        -- removes the outward drift that used to deform the
+                        -- circle at high speeds.
+                        local placed = pcall(
+                                applyRingPlacement,
+                                part,
+                                targetNow,
+                                targetNext,
+                                tangentVelocity,
+                                glide,
+                                stepTime,
+                                approachCap,
+                                carry,
+                                angularVelocity
                         )
 
-                        pcall(function()
-                                part.CanCollide = false
-
-                                -- Glide toward the exact slot, then hold it.
-                                -- Direct CFrame control is immune to gravity,
-                                -- mass and collision jitter, so even huge
-                                -- assemblies sit perfectly on the circle.
-                                local newPosition = part.Position:Lerp(
-                                        targetPosition,
-                                        alpha
-                                )
-                                part.CFrame = CFrame.new(newPosition)
-                                        * part.CFrame.Rotation
-
-                                -- Keep the real orbital velocity underneath so
-                                -- physics stays alive, the ring tracks a
-                                -- moving player, and releasing flings parts
-                                -- outward along the circle.
-                                part.AssemblyLinearVelocity = tangentVelocity
-                                        + carry
-                                part.AssemblyAngularVelocity = state.SpinAxis
-                                        * (rotationSpeed * state.SpinScale
-                                                * state.SpinSign)
-                        end)
+                        if placed then
+                                state.FailCount = 0
+                        else
+                                state.FailCount = state.FailCount + 1
+                        end
                 end
         end
 
@@ -988,7 +1172,29 @@ do
                 end
 
                 PartRing.refresh()
-                PartRingSettings.Connection = RunService.Heartbeat:Connect(updatePartRing)
+                PartRingSettings.Connection = RunService.Heartbeat:Connect(
+                        function(stepTime)
+                                -- One bad frame must never freeze the whole
+                                -- ring silently; surface persistent errors in
+                                -- the status label so they are actually
+                                -- visible instead of "it just stopped working".
+                                local ok, err = pcall(updatePartRing, stepTime)
+
+                                if ok then
+                                        PartRingSettings.ErrorCount = 0
+                                        return
+                                end
+
+                                PartRingSettings.ErrorCount = PartRingSettings.ErrorCount + 1
+
+                                if PartRingSettings.ErrorCount == 5 then
+                                        updatePartRingStatus(
+                                                "Engine error: "
+                                                        .. tostring(err):sub(1, 80)
+                                        )
+                                end
+                        end
+                )
         end
 
 end
@@ -4032,12 +4238,12 @@ do
 local RingPowerSection = FunTab:Section("Ring Power")
 
 RingPowerSection:Paragraph({
-        Text = "Parts are placed directly onto the ring every frame, so any mass or size rings instantly and holds a perfect circle. Capture Speed controls how fast parts snap into orbit."
+        Text = "Parts are placed directly onto the ring every frame, so any mass or size rings instantly. Slots stay stable when parts join or leave, and Capture Speed controls how fast parts snap into orbit."
 })
 
 RingPowerSection:Slider({
         Text = "Capture Speed",
-        Min = 2,
+        Min = 1,
         Max = 30,
         Value = PartRingSettings.CaptureSpeed,
         Callback = function(value)
