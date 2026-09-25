@@ -108,6 +108,7 @@ local PartRingSettings = {
         Connection = nil,
         NextRescan = 0,
         CollisionStates = setmetatable({}, {__mode = "k"}),
+        Cooldowns = setmetatable({}, {__mode = "k"}),
         LastStatus = nil,
         ErrorCount = 0
 }
@@ -639,6 +640,16 @@ do
                         CollisionParts = {},
                         Phase = nil,
                         FailCount = 0,
+                        Mode = "capture",
+                        CaptureStart = os.clock(),
+                        GoodFrames = 0,
+                        CheckFrames = 0,
+                        GoodStreak = 0,
+                        MissStreak = 0,
+                        PrevPos = nil,
+                        LastVelocity = nil,
+                        LastStep = nil,
+                        WrittenPos = nil,
                         SpinAxis = Vector3.new(
                                 (math.random() - 0.5) * 0.8,
                                 1,
@@ -652,7 +663,10 @@ do
                 return state
         end
 
-        local function restorePartRingPart(root)
+        local function restorePartRingPart(root, quiet)
+                -- "quiet" releases skip the fling: parts this client never
+                -- controlled cannot be flung for real anyway, and writing
+                -- velocities at them just creates client-only noise.
                 local state = PartRingSettings.PartStates[root]
                 local controlledParts = state and state.CollisionParts or {root}
 
@@ -678,7 +692,7 @@ do
                         PartRingSettings.CollisionStates[part] = nil
                 end
 
-                if root and root.Parent then
+                if root and root.Parent and not quiet then
                         pcall(function()
                                 if releasePower <= 0.001 then
                                         root.AssemblyLinearVelocity = Vector3.zero
@@ -812,12 +826,23 @@ do
                 stepTime,
                 approachCap,
                 carry,
-                angularVelocity
+                angularVelocity,
+                writeCFrame
         )
                 part.CanCollide = false
 
                 local currentPosition = part.Position
-                local newPosition = currentPosition:Lerp(targetNow, glide)
+                local newPosition
+
+                if writeCFrame then
+                        newPosition = currentPosition:Lerp(targetNow, glide)
+                else
+                        -- Capture stage: velocity-only. For parts this client
+                        -- owns this is real, replicating physics; for parts the
+                        -- server owns the write is inert, so nothing flickers
+                        -- on screen while we find out which is which.
+                        newPosition = currentPosition
+                end
 
                 -- Velocity that lands the part exactly on its next slot after
                 -- the physics step, so the circle stays perfect at any speed,
@@ -833,19 +858,183 @@ do
                         correction = correction.Unit * approachCap
                 end
 
-                part.CFrame = CFrame.new(newPosition) * part.CFrame.Rotation
-                part.AssemblyLinearVelocity = tangentVelocity + correction + carry
+                local velocity = tangentVelocity + correction + carry
+
+                if writeCFrame then
+                        part.CFrame = CFrame.new(newPosition) * part.CFrame.Rotation
+                end
+
+                part.AssemblyLinearVelocity = velocity
                 part.AssemblyAngularVelocity = angularVelocity
+
+                return velocity, writeCFrame and newPosition or nil, currentPosition
+        end
+
+        local function composePartRingStatus(capped)
+                local parts = PartRingSettings.Parts
+                local total = #parts
+                local live = 0
+                local now = os.clock()
+
+                for _, part in ipairs(parts) do
+                        local state = PartRingSettings.PartStates[part]
+
+                        if state and state.Mode == "live" then
+                                live = live + 1
+                        end
+                end
+
+                local blocked = 0
+
+                for _, expiry in pairs(PartRingSettings.Cooldowns) do
+                        if expiry > now then
+                                blocked = blocked + 1
+                        end
+                end
+
+                if total > 0 then
+                        local label = "Ringing " .. tostring(total) .. " parts"
+
+                        if total > live then
+                                label = label .. " ("
+                                        .. tostring(live) .. " live, "
+                                        .. tostring(total - live) .. " capturing)"
+                        end
+
+                        if blocked > 0 then
+                                label = label .. " - " .. tostring(blocked)
+                                        .. " server-held"
+                        end
+
+                        if capped then
+                                label = label .. " (part cap reached)"
+                        end
+
+                        updatePartRingStatus(label)
+                elseif blocked > 0 then
+                        updatePartRingStatus(
+                                "No controllable parts - " .. tostring(blocked)
+                                        .. " server-held"
+                        )
+                else
+                        updatePartRingStatus("No eligible loose parts")
+                end
+        end
+
+        local function trackPartRingControl(
+                parts,
+                index,
+                state,
+                now,
+                removedAny,
+                promotedAny
+        )
+                -- Ownership tracking: compare where the part actually is
+                -- against where the previous command should have put it.
+                -- Parts this client controls follow the command closely.
+                -- Parts the server or another player controls ignore it,
+                -- and writing CFrame at those only ever produced a
+                -- client-only flicker, so they get released instead.
+                local part = parts[index]
+
+                if state.LastVelocity and state.LastStep then
+                        local commanded = state.LastVelocity.Magnitude
+                                * state.LastStep
+                        local currentPosition = part.Position
+                        local evaluated = false
+                        local tracked = false
+
+                        if state.Mode == "live" then
+                                if state.WrittenPos then
+                                        local expected = state.WrittenPos
+                                                + state.LastVelocity * state.LastStep
+
+                                        tracked = (currentPosition - expected).Magnitude
+                                                <= math.max(0.8, commanded * 0.35)
+                                        evaluated = true
+                                end
+                        elseif state.PrevPos then
+                                tracked = commanded < 0.6
+                                        or (currentPosition - state.PrevPos).Magnitude
+                                                >= commanded * 0.4
+                                evaluated = true
+                        end
+
+                        if evaluated then
+                                state.CheckFrames = state.CheckFrames + 1
+
+                                if tracked then
+                                        state.GoodFrames = state.GoodFrames + 1
+                                        state.GoodStreak = state.GoodStreak + 1
+                                        state.MissStreak = 0
+                                else
+                                        state.GoodStreak = 0
+                                        state.MissStreak = state.MissStreak + 1
+                                end
+                        end
+                end
+
+                if state.Mode == "live" then
+                        if state.MissStreak >= 12 then
+                                -- Ownership was probably taken away from this
+                                -- client mid-ring. Demote back to the
+                                -- velocity-only capture probe: a momentary
+                                -- glitch re-promotes quickly, and a real loss
+                                -- gets released by the capture verdict with a
+                                -- cooldown instead of a CFrame flicker war.
+                                state.Mode = "capture"
+                                state.CaptureStart = now
+                                state.GoodFrames = 0
+                                state.CheckFrames = 0
+                                state.GoodStreak = 0
+                                state.MissStreak = 0
+                                state.WrittenPos = nil
+                                state.LastVelocity = nil
+                                state.PrevPos = nil
+                                state.LastStep = nil
+                                return removedAny, true
+                        end
+                elseif now - (state.CaptureStart or now) >= 1.5 then
+                        local checked = state.CheckFrames
+                        local ratio = checked > 0
+                                and state.GoodFrames / checked
+                                or 0
+
+                        if ratio >= 0.75 or state.GoodStreak >= 15 then
+                                -- The part obeys physics commands from this
+                                -- client, so writes replicate and the motion
+                                -- is real for everyone. Promote it to the
+                                -- direct-placement perfect circle.
+                                state.Mode = "live"
+                                state.MissStreak = 0
+                                state.GoodStreak = 0
+                                return removedAny, true
+                        else
+                                -- Never obeyed a command: the server holds
+                                -- it and a client cannot move it for real.
+                                -- Release quietly and retry later in case
+                                -- ownership changes.
+                                restorePartRingPart(part, true)
+                                PartRingSettings.Cooldowns[part] = now + 6
+                                table.remove(parts, index)
+                                return true, promotedAny
+                        end
+                end
+
+                return removedAny, promotedAny
         end
 
         local function clearPartRingParts()
                 for _, part in ipairs(PartRingSettings.Parts) do
-                        restorePartRingPart(part)
+                        local state = PartRingSettings.PartStates[part]
+
+                        restorePartRingPart(part, not (state and state.Mode == "live"))
                 end
 
                 PartRingSettings.Parts = {}
                 PartRingSettings.PartStates = setmetatable({}, {__mode = "k"})
                 PartRingSettings.CollisionStates = setmetatable({}, {__mode = "k"})
+                PartRingSettings.Cooldowns = setmetatable({}, {__mode = "k"})
                 PartRingSettings.RingAngle = 0
         end
 
@@ -858,6 +1047,7 @@ do
                         return
                 end
 
+                local now = os.clock()
                 local maximumParts = math.clamp(
                         tonumber(PartRingSettings.MaximumParts) or 300,
                         10,
@@ -900,7 +1090,11 @@ do
                 local candidateSet = {}
 
                 for _, part in ipairs(nearby) do
-                        if canRingPart(part, targetRoot) and not candidateSet[part] then
+                        local cooldown = PartRingSettings.Cooldowns[part]
+
+                        if canRingPart(part, targetRoot)
+                                and not candidateSet[part]
+                                and not (cooldown and cooldown > now) then
                                 candidateSet[part] = true
                                 table.insert(candidates, part)
                         end
@@ -919,7 +1113,12 @@ do
                                 selected[part] = true
                                 table.insert(nextParts, part)
                         else
-                                restorePartRingPart(part)
+                                local state = PartRingSettings.PartStates[part]
+
+                                restorePartRingPart(
+                                        part,
+                                        not (state and state.Mode == "live")
+                                )
                         end
                 end
 
@@ -937,7 +1136,13 @@ do
                         end)
 
                         for index = #nextParts, maximumParts + 1, -1 do
-                                restorePartRingPart(nextParts[index])
+                                local part = nextParts[index]
+                                local state = PartRingSettings.PartStates[part]
+
+                                restorePartRingPart(
+                                        part,
+                                        not (state and state.Mode == "live")
+                                )
                                 nextParts[index] = nil
                         end
                 end
@@ -952,19 +1157,7 @@ do
 
                 PartRingSettings.NextRescan = os.clock() + PartRingSettings.RescanInterval
 
-                if #nextParts > 0 then
-                        if #nextParts >= maximumParts then
-                                updatePartRingStatus(
-                                        "Ringing " .. tostring(#nextParts) .. " parts (part cap reached)"
-                                )
-                        else
-                                updatePartRingStatus(
-                                        "Ringing " .. tostring(#nextParts) .. " eligible physics parts"
-                                )
-                        end
-                else
-                        updatePartRingStatus("No eligible loose parts")
-                end
+                composePartRingStatus(#nextParts >= maximumParts)
         end
 
         PartRing.stop = function()
@@ -1002,19 +1195,48 @@ do
                 local parts = PartRingSettings.Parts
                 local searchLimit = getPartRingSearchRadius() * 1.02
                 local removedAny = false
+                local promotedAny = false
 
                 for index = #parts, 1, -1 do
                         local part = parts[index]
                         local state = PartRingSettings.PartStates[part]
-                        local failedTooOften = state ~= nil
-                                and (state.FailCount or 0) >= 30
 
-                        if failedTooOften
-                                or not isPartRingViable(part, targetRoot, searchLimit) then
-                                restorePartRingPart(part)
+                        if not part or not part.Parent then
+                                restorePartRingPart(part, true)
                                 table.remove(parts, index)
                                 removedAny = true
+                        else
+                                local failedTooOften = state ~= nil
+                                        and (state.FailCount or 0) >= 30
+
+                                if failedTooOften
+                                        or not isPartRingViable(part, targetRoot, searchLimit) then
+                                        restorePartRingPart(
+                                                part,
+                                                not (state and state.Mode == "live")
+                                        )
+
+                                        if failedTooOften then
+                                                PartRingSettings.Cooldowns[part] = now + 6
+                                        end
+
+                                        table.remove(parts, index)
+                                        removedAny = true
+                                elseif state then
+                                        removedAny, promotedAny = trackPartRingControl(
+                                                parts,
+                                                index,
+                                                state,
+                                                now,
+                                                removedAny,
+                                                promotedAny
+                                        )
+                                end
                         end
+                end
+
+                if removedAny or promotedAny then
+                        composePartRingStatus(false)
                 end
 
                 local count = #parts
@@ -1127,27 +1349,38 @@ do
                         local angularVelocity = state.SpinAxis
                                 * (rotationSpeed * state.SpinScale
                                         * state.SpinSign)
+                        local isLive = state.Mode == "live"
 
-                        -- Direct placement: immune to gravity, mass and
-                        -- collision jitter, and the exact-landing velocity
-                        -- removes the outward drift that used to deform the
-                        -- circle at high speeds.
-                        local placed = pcall(
+                        -- Capture parts get velocity-only physics: real,
+                        -- replicating motion for parts this client owns, and
+                        -- inert for parts it does not. Live parts get the
+                        -- direct placement that is immune to gravity, mass
+                        -- and collision jitter, with exact-landing velocity
+                        -- that removes the outward drift.
+                        local placed, velocity, writtenPosition, preWritePosition = pcall(
                                 applyRingPlacement,
                                 part,
                                 targetNow,
                                 targetNext,
                                 tangentVelocity,
-                                glide,
+                                isLive and glide or 0,
                                 stepTime,
                                 approachCap,
                                 carry,
-                                angularVelocity
+                                angularVelocity,
+                                isLive
                         )
 
+                        state.PrevPos = preWritePosition
+                        state.LastStep = stepTime
+
                         if placed then
+                                state.LastVelocity = velocity
+                                state.WrittenPos = writtenPosition
                                 state.FailCount = 0
                         else
+                                state.LastVelocity = nil
+                                state.WrittenPos = nil
                                 state.FailCount = state.FailCount + 1
                         end
                 end
