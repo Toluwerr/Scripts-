@@ -96,7 +96,7 @@ local PartRingSettings = {
         Height = 4,
         Speed = 3.5,
         RotationSpeed = 30,
-        PullStrength = 20,
+        PullStrength = 60,
         MaximumAssemblyMass = 5000000,
         MaximumAssemblySize = 300,
         ReleasePower = 1,
@@ -764,7 +764,7 @@ do
                 targetNext,
                 tangentVelocity,
                 stepTime,
-                approachCap,
+                pullGain,
                 carry,
                 angularVelocity
         )
@@ -772,24 +772,23 @@ do
 
                 local currentPosition = part.Position
 
-                -- Real-motion ring: CFrame is never written here, because a
+                -- Real-motion swarm: CFrame is never written here, because a
                 -- client CFrame write only ever moves a part on this screen.
                 -- The only motion that replicates to the server is physics on
-                -- an assembly this client owns, so the ring is driven purely
+                -- an assembly this client owns, so the swarm is driven purely
                 -- by velocity commands. The correction below lands the part
-                -- exactly on its next slot after one physics step (gravity
-                -- included), which works at any speed, radius or mass; while
-                -- capturing from far away the approach is capped so parts
-                -- glide in instead of teleporting.
+                -- on its next slot after one physics step (gravity included).
+                -- Nothing moderates it: there is no approach cap, no distance
+                -- gate, no speed ceiling - a part 90 studs away is ordered to
+                -- close the entire gap this frame at whatever velocity
+                -- physics will actually deliver. Pull Strength only scales
+                -- how hard that yank is: 1.0 would be an exact landing, the
+                -- default 1.34 slams parts in with over-correction, and the
+                -- slider max (1.9) is a violent snap.
                 local residual = targetNext - currentPosition
                         - tangentVelocity * stepTime
-                local correction = residual / stepTime
+                local correction = residual / stepTime * pullGain
                         + Vector3.new(0, 0.5 * Workspace.Gravity * stepTime, 0)
-
-                if (targetNow - currentPosition).Magnitude > 4
-                        and correction.Magnitude > approachCap then
-                        correction = correction.Unit * approachCap
-                end
 
                 local velocity = tangentVelocity + correction + carry
 
@@ -1022,7 +1021,7 @@ do
                         300
                 )
                 local pullStrength = math.clamp(
-                        tonumber(PartRingSettings.PullStrength) or 20,
+                        tonumber(PartRingSettings.PullStrength) or 60,
                         1,
                         100
                 )
@@ -1052,14 +1051,14 @@ do
                         carry = carry.Unit * 250
                 end
 
-                local orbitVelocity = radius * spinSpeed
-                -- Pull Strength caps how hard parts can be yanked toward
-                -- their chaotic slot when far away; the floor keeps a fast
-                -- swarm able to apply the correction it needs to stay locked.
-                local approachCap = math.max(
-                        pullStrength * 30,
-                        orbitVelocity * 2 + 200
-                )
+                -- Pull Strength is pure yank hardness with zero moderation
+                -- behind it. The old approach cap is gone entirely: capture
+                -- always runs at whatever speed physics can physically
+                -- deliver this frame, from any distance. 1 maps to a loose
+                -- drift (~0.51x), 60 to a hard slam (~1.34x), 100 to a
+                -- violent over-corrected snap (~1.9x). Every value stays
+                -- numerically stable (error factor |1 - gain| < 1).
+                local pullGain = 0.5 + pullStrength * 0.014
                 local slotTolerance = math.max(2.5, radius * 0.25)
                 local movingCount = 0
 
@@ -1176,7 +1175,7 @@ do
                                 targetNext,
                                 tangentVelocity,
                                 stepTime,
-                                approachCap,
+                                pullGain,
                                 carry,
                                 angularVelocity
                         )
@@ -4279,7 +4278,7 @@ do
 local RingPowerSection = FunTab:Section("Chaos Power")
 
 RingPowerSection:Paragraph({
-        Text = "Every part gets a real physics order every frame - velocity only, never CFrame, so whatever swarms around you on your screen swarms around you on the server too. There is no cap on how many parts get pulled: every loose part in range joins the swarm. Pull Strength controls how hard parts get yanked in, and Speed drives how fast the swarm moves. Parts the server still holds wait in place and snap into the chaos the moment their physics reaches your client, so walk near parts to sweep them up."
+        Text = "Every part gets a real physics order every frame - velocity only, never CFrame, so whatever swarms around you on your screen swarms around you on the server too. There is no cap on how many parts get pulled and no cap on how hard they get pulled: the yank is completely raw, so parts slam in at whatever speed physics allows instead of gliding in. Pull Strength sets the violence of that yank - low values drift parts in loosely, high values over-correct into a hard snap - and Speed drives how fast the swarm moves. Parts the server still holds wait in place and snap into the chaos the moment their physics reaches your client, so walk near parts to sweep them up."
 })
 
 RingPowerSection:Slider({
