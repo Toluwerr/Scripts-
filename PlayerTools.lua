@@ -114,6 +114,8 @@ local PartRingSettings = {
 
 local PartRing = {}
 
+local VehicleTroll = {}
+
 
 local AimlockSettings = {
         Enabled = false,
@@ -209,6 +211,28 @@ local VehicleFlingSettings = {
         Enabled = false,
         Power = 100,
         WorkerToken = 0
+}
+
+local VehicleTrollSettings = {
+        FlingEnabled = false,
+        FlingPower = 500,
+        LevitateEnabled = false,
+        FloatHeight = 80,
+        RiseSpeed = 25,
+        StealEnabled = false,
+        FollowGap = 10,
+        SpinEnabled = false,
+        SpinPower = 40,
+        ScanRadius = 70,
+        RescanInterval = 0.4,
+        Vehicles = {},
+        States = setmetatable({}, {__mode = "k"}),
+        Connection = nil,
+        NextRescan = 0,
+        MovingCount = 0,
+        OccupiedCount = 0,
+        LastStatus = nil,
+        ErrorCount = 0
 }
 
 local VehicleSpeedBoostSettings = {
@@ -1237,6 +1261,499 @@ do
                 )
         end
 
+end
+
+do
+        local TAU = math.pi * 2
+
+        -- ============================================================
+        -- Vehicle Troll: real-physics trolling of other players'
+        -- vehicles. The hard physics truth this is built around: a
+        -- vehicle with a driver seated is simulated by the DRIVER's
+        -- client, so no script on this machine can ever move it; but
+        -- an empty vehicle near your character has its physics handed
+        -- to YOUR client, and velocity writes on an assembly you
+        -- simulate replicate to the server for everyone to see. The
+        -- engine is therefore ownership-greedy exactly like Chaos:
+        -- every empty vehicle receives its velocity order every
+        -- single frame, forever. Server-held vehicles ignore the
+        -- orders silently, and the instant ownership transfers - most
+        -- deliciously the exact frame a driver steps out of their car
+        -- - the vehicle snaps under control. There is no CFrame
+        -- anywhere in here, so nothing can look moved without really
+        -- being moved on the server.
+        -- ============================================================
+
+        local function updateVehicleTrollStatus(text)
+                local message = tostring(text or "Vehicle Troll off")
+
+                if VehicleTrollSettings.LastStatus == message then
+                        return
+                end
+
+                VehicleTrollSettings.LastStatus = message
+
+                if type(VehicleTroll.OnStatusChanged) == "function" then
+                        pcall(VehicleTroll.OnStatusChanged, message)
+                end
+        end
+
+        local function getVehicleTrollRoot()
+                local character = LocalPlayer.Character
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+
+                if root and root.Parent then
+                        return root
+                end
+
+                return nil
+        end
+
+        local function isVehicleTrollActive()
+                return VehicleTrollSettings.FlingEnabled
+                        or VehicleTrollSettings.LevitateEnabled
+                        or VehicleTrollSettings.StealEnabled
+                        or VehicleTrollSettings.SpinEnabled
+        end
+
+        local function getVehicleTrollScanRadius()
+                return math.clamp(
+                        tonumber(VehicleTrollSettings.ScanRadius) or 70,
+                        15,
+                        500
+                )
+        end
+
+        local function composeVehicleTrollStatus()
+                local total = #VehicleTrollSettings.Vehicles
+
+                if total == 0 then
+                        updateVehicleTrollStatus("No vehicles in range")
+                        return
+                end
+
+                local moving = tonumber(VehicleTrollSettings.MovingCount) or 0
+                local occupied = tonumber(VehicleTrollSettings.OccupiedCount) or 0
+                local rest = total - moving
+                local label
+
+                if occupied > 0 then
+                        label = "Vehicle Troll: " .. tostring(moving) .. " of "
+                                .. tostring(total) .. " vehicles moving ("
+                                .. tostring(occupied) .. " driver-held"
+                                .. ", yeet armed on exit)"
+                else
+                        label = "Vehicle Troll: " .. tostring(moving) .. " of "
+                                .. tostring(total) .. " vehicles moving"
+                end
+
+                if rest > moving then
+                        label = label .. " (rest waiting on physics)"
+                end
+
+                updateVehicleTrollStatus(label)
+        end
+
+        local function refreshVehicleTroll()
+                local myRoot = getVehicleTrollRoot()
+
+                if not myRoot then
+                        return
+                end
+
+                local now = os.clock()
+                local overlap = OverlapParams.new()
+                overlap.FilterType = Enum.RaycastFilterType.Exclude
+
+                local filter = {}
+
+                if LocalPlayer.Character then
+                        table.insert(filter, LocalPlayer.Character)
+                end
+
+                overlap.FilterDescendantsInstances = filter
+                overlap.MaxParts = 0
+
+                local nearby = {}
+
+                pcall(function()
+                        nearby = Workspace:GetPartBoundsInRadius(
+                                myRoot.Position,
+                                getVehicleTrollScanRadius(),
+                                overlap
+                        )
+                end)
+
+                -- A vehicle is the assembly of any VehicleSeat found in
+                -- range: the seat is welded to the chassis, so its
+                -- assembly root IS the car. Anchored chassis can never be
+                -- moved by any client, so they are filtered out up front;
+                -- your own current vehicle is skipped so you never troll
+                -- yourself mid-drive.
+                local seats = {}
+                local seatSet = {}
+
+                for _, part in ipairs(nearby) do
+                        if part:IsA("VehicleSeat")
+                                and part.Parent
+                                and not seatSet[part]
+                                and part ~= VehicleSettings.CurrentSeat then
+                                local assemblyRoot = part.AssemblyRootPart
+
+                                if assemblyRoot
+                                        and assemblyRoot.Parent
+                                        and not assemblyRoot.Anchored then
+                                        seatSet[part] = true
+                                        table.insert(seats, part)
+                                end
+                        end
+                end
+
+                table.sort(seats, function(first, second)
+                        return (first.Position - myRoot.Position).Magnitude
+                                < (second.Position - myRoot.Position).Magnitude
+                end)
+
+                VehicleTrollSettings.Vehicles = seats
+                VehicleTrollSettings.NextRescan = now + VehicleTrollSettings.RescanInterval
+
+                composeVehicleTrollStatus()
+        end
+
+        local function makeVehicleTrollState()
+                local axis = Vector3.new(
+                        math.random() * 2 - 1,
+                        math.random() * 2 - 1,
+                        math.random() * 2 - 1
+                )
+
+                if axis.Magnitude < 0.05 then
+                        axis = Vector3.new(0, 1, 0)
+                else
+                        axis = axis.Unit
+                end
+
+                return {
+                        Flung = false,
+                        BaseY = nil,
+                        SpinAxis = axis,
+                        PrevPos = nil
+                }
+        end
+
+        local function updateVehicleTroll(deltaTime)
+                if not running or not isVehicleTrollActive() then
+                        return
+                end
+
+                local myRoot = getVehicleTrollRoot()
+
+                if not myRoot then
+                        if #VehicleTrollSettings.Vehicles > 0 then
+                                VehicleTrollSettings.Vehicles = {}
+                                updateVehicleTrollStatus("Character unavailable")
+                        end
+
+                        return
+                end
+
+                local now = os.clock()
+
+                if now >= VehicleTrollSettings.NextRescan then
+                        refreshVehicleTroll()
+                end
+
+                local vehicles = VehicleTrollSettings.Vehicles
+                local count = #vehicles
+
+                if count == 0 then
+                        updateVehicleTrollStatus("No vehicles in range")
+                        return
+                end
+
+                local stepTime = math.clamp(tonumber(deltaTime) or 0, 0, 0.1)
+
+                if stepTime < 0.0001 then
+                        return
+                end
+
+                local flingEnabled = VehicleTrollSettings.FlingEnabled
+                local levitateEnabled = VehicleTrollSettings.LevitateEnabled
+                local stealEnabled = VehicleTrollSettings.StealEnabled
+                local spinEnabled = VehicleTrollSettings.SpinEnabled
+                local flingPower = math.clamp(
+                        tonumber(VehicleTrollSettings.FlingPower) or 500,
+                        50,
+                        5000
+                )
+                local floatHeight = math.clamp(
+                        tonumber(VehicleTrollSettings.FloatHeight) or 80,
+                        5,
+                        2000
+                )
+                local riseSpeed = math.clamp(
+                        tonumber(VehicleTrollSettings.RiseSpeed) or 25,
+                        2,
+                        200
+                )
+                local followGap = math.clamp(
+                        tonumber(VehicleTrollSettings.FollowGap) or 10,
+                        4,
+                        60
+                )
+                local spinPower = math.clamp(
+                        tonumber(VehicleTrollSettings.SpinPower) or 40,
+                        0,
+                        300
+                )
+
+                local center = myRoot.Position
+
+                if center.X ~= center.X
+                        or center.Y ~= center.Y
+                        or center.Z ~= center.Z then
+                        return
+                end
+
+                local carry = myRoot.AssemblyLinearVelocity * 0.5
+
+                if carry.X ~= carry.X
+                        or carry.Y ~= carry.Y
+                        or carry.Z ~= carry.Z then
+                        carry = Vector3.zero
+                elseif carry.Magnitude > 250 then
+                        carry = carry.Unit * 250
+                end
+
+                local look = myRoot.CFrame.LookVector
+                local flatLook = Vector3.new(look.X, 0, look.Z)
+
+                if flatLook.Magnitude < 0.05 then
+                        flatLook = Vector3.new(0, 0, -1)
+                else
+                        flatLook = flatLook.Unit
+                end
+
+                local gravityFeedForward = 0.5 * Workspace.Gravity * stepTime
+                local scanLimit = getVehicleTrollScanRadius() * 1.25
+                local movingCount = 0
+                local occupiedCount = 0
+
+                for index = 1, count do
+                        local seat = vehicles[index]
+                        local root = seat.Parent and seat.AssemblyRootPart or nil
+
+                        if root
+                                and root.Parent
+                                and root == seat.AssemblyRootPart
+                                and not root.Anchored then
+                                if seat.Occupant then
+                                        -- A seated driver means THEIR client
+                                        -- simulates this car right now: every
+                                        -- write we could make would be
+                                        -- silently ignored, so the car is
+                                        -- counted and left alone - but the
+                                        -- engine stays armed, and the exact
+                                        -- frame they step out this loop takes
+                                        -- the vehicle over.
+                                        occupiedCount = occupiedCount + 1
+                                else
+                                        local position = root.Position
+
+                                        if position.X == position.X
+                                                and position.Y == position.Y
+                                                and position.Z == position.Z
+                                                and (position - center).Magnitude
+                                                        <= scanLimit then
+                                                local state = VehicleTrollSettings.States[seat]
+
+                                                if not state then
+                                                        state = makeVehicleTrollState()
+                                                        VehicleTrollSettings.States[seat] = state
+                                                end
+
+                                                if state.PrevPos then
+                                                        local moved = (position - state.PrevPos).Magnitude
+
+                                                        if moved ~= moved then
+                                                                moved = 0
+                                                        end
+
+                                                        if moved > 0.05 then
+                                                                movingCount = movingCount + 1
+                                                        end
+                                                end
+
+                                                local handled = false
+
+                                                if flingEnabled and not state.Flung then
+                                                        -- One-shot launch per
+                                                        -- arming: the car is
+                                                        -- ordered up and
+                                                        -- sideways at full
+                                                        -- uncapped power with
+                                                        -- a wild tumble, then
+                                                        -- left ballistic. No
+                                                        -- cap, no glide, no
+                                                        -- moderation - the
+                                                        -- same raw-yank
+                                                        -- philosophy Chaos
+                                                        -- uses.
+                                                        local angle = math.random() * TAU
+                                                        local horizontal = Vector3.new(
+                                                                math.cos(angle),
+                                                                0,
+                                                                math.sin(angle)
+                                                        ) * (flingPower * 0.6)
+
+                                                        pcall(function()
+                                                                root.AssemblyLinearVelocity = horizontal
+                                                                        + Vector3.new(0, flingPower, 0)
+                                                                root.AssemblyAngularVelocity = state.SpinAxis * 40
+                                                        end)
+
+                                                        state.Flung = true
+                                                        handled = true
+                                                end
+
+                                                if not handled then
+                                                        local linearVelocity = nil
+
+                                                        if stealEnabled then
+                                                                -- Theft mode: every
+                                                                -- empty car in
+                                                                -- range lines up
+                                                                -- behind you in a
+                                                                -- trail and
+                                                                -- chases you
+                                                                -- across the map.
+                                                                -- Exact-landing
+                                                                -- velocity
+                                                                -- (residual per
+                                                                -- step plus
+                                                                -- gravity
+                                                                -- feed-forward,
+                                                                -- plus your
+                                                                -- carry) at raw
+                                                                -- uncapped
+                                                                -- magnitude - a
+                                                                -- car 60 studs
+                                                                -- behind closes
+                                                                -- the whole gap
+                                                                -- in one physics
+                                                                -- step.
+                                                                local target = center - flatLook
+                                                                        * (4 + (index - 1) * followGap)
+                                                                        + Vector3.new(0, 2, 0)
+                                                                local residual = target - position
+
+                                                                linearVelocity = residual / stepTime
+                                                                        + Vector3.new(0, gravityFeedForward, 0)
+                                                                        + carry
+                                                        elseif levitateEnabled then
+                                                                -- UFO mode: the car
+                                                                -- rises straight
+                                                                -- up from where
+                                                                -- it stands and
+                                                                -- hovers at float
+                                                                -- height, pinned
+                                                                -- horizontally.
+                                                                -- Gravity is
+                                                                -- cancelled every
+                                                                -- frame so the
+                                                                -- hover is real
+                                                                -- physics, not a
+                                                                -- CFrame freeze.
+                                                                if state.BaseY == nil then
+                                                                        state.BaseY = position.Y
+                                                                end
+
+                                                                local targetY = state.BaseY + floatHeight
+                                                                local rise = math.clamp(
+                                                                        (targetY - position.Y) * 2,
+                                                                        0,
+                                                                        riseSpeed
+                                                                )
+
+                                                                linearVelocity = Vector3.new(
+                                                                        0,
+                                                                        rise + gravityFeedForward,
+                                                                        0
+                                                                )
+                                                        end
+
+                                                        if linearVelocity then
+                                                                pcall(function()
+                                                                        root.AssemblyLinearVelocity = linearVelocity
+                                                                end)
+                                                        end
+                                                end
+
+                                                if spinEnabled and not handled then
+                                                        -- Beyblade mode:
+                                                        -- pure angular
+                                                        -- orders, composes
+                                                        -- with levitate and
+                                                        -- theft.
+                                                        pcall(function()
+                                                                root.AssemblyAngularVelocity = state.SpinAxis
+                                                                        * spinPower
+                                                        end)
+                                                end
+
+                                                state.PrevPos = position
+                                        end
+                                end
+                        end
+                end
+
+                VehicleTrollSettings.MovingCount = movingCount
+                VehicleTrollSettings.OccupiedCount = occupiedCount
+                composeVehicleTrollStatus()
+        end
+
+        local function stopVehicleTroll()
+                disconnect(VehicleTrollSettings.Connection)
+                VehicleTrollSettings.Connection = nil
+                VehicleTrollSettings.Vehicles = {}
+                VehicleTrollSettings.States = setmetatable({}, {__mode = "k"})
+                VehicleTrollSettings.NextRescan = 0
+                VehicleTrollSettings.MovingCount = 0
+                VehicleTrollSettings.OccupiedCount = 0
+                updateVehicleTrollStatus("Vehicle Troll off")
+        end
+
+        VehicleTroll.syncConnection = function()
+                if isVehicleTrollActive() then
+                        if not VehicleTrollSettings.Connection then
+                                refreshVehicleTroll()
+
+                                VehicleTrollSettings.Connection = RunService.Heartbeat:Connect(
+                                        function(stepTime)
+                                                local ok, err = pcall(updateVehicleTroll, stepTime)
+
+                                                if ok then
+                                                        VehicleTrollSettings.ErrorCount = 0
+                                                        return
+                                                end
+
+                                                VehicleTrollSettings.ErrorCount = VehicleTrollSettings.ErrorCount + 1
+
+                                                if VehicleTrollSettings.ErrorCount == 5 then
+                                                        updateVehicleTrollStatus(
+                                                                "Engine error: "
+                                                                        .. tostring(err):sub(1, 80)
+                                                        )
+                                                end
+                                        end
+                                )
+                        end
+                else
+                        stopVehicleTroll()
+                end
+        end
+
+        VehicleTroll.refresh = refreshVehicleTroll
 end
 
 local function isAimTeammate(player)
@@ -3879,6 +4396,13 @@ local function cleanup()
         stopVehicleFlyRuntime()
         VehicleFlingSettings.Enabled = false
         VehicleFlingSettings.WorkerToken += 1
+        VehicleTrollSettings.FlingEnabled = false
+        VehicleTrollSettings.LevitateEnabled = false
+        VehicleTrollSettings.StealEnabled = false
+        VehicleTrollSettings.SpinEnabled = false
+        pcall(function()
+                VehicleTroll.syncConnection()
+        end)
         VehicleSpeedBoostSettings.ActiveUntil = 0
         VehicleTeleportSettings.Enabled = false
         clearVehicleTeleportReinforcement()
@@ -4543,6 +5067,122 @@ VehicleTeleportSection:Toggle({
         Value = false,
         Callback = function(value)
                 setVehicleTeleportEnabled(value)
+        end
+})
+end
+
+do
+local VehicleTrollSection = VehicleMovementTab:Section("Vehicle Troll")
+
+VehicleTrollSection:Paragraph({
+        Text = "Real-physics trolling of other players' vehicles - velocity orders only, never CFrame, so whatever these cars do on your screen they do on the server for everyone. Works on every vehicle the physics server hands to your client: all parked and empty cars near you. A car with a driver seated is simulated by the driver's machine and nothing can touch it - but the troll stays armed, and the exact frame they step out, the car snaps under your control. Stand next to an occupied car, wait for the driver to leave, and it yeets instantly."
+})
+
+local vehicleTrollStatusLabel = VehicleTrollSection:Paragraph({
+        Text = "Vehicle Troll off"
+})
+
+VehicleTroll.OnStatusChanged = function(status)
+        vehicleTrollStatusLabel:Set(tostring(status or "Vehicle Troll off"))
+end
+
+VehicleTrollSection:Toggle({
+        Text = "Yeet Vehicles",
+        Value = false,
+        Callback = function(value)
+                VehicleTrollSettings.FlingEnabled = value and true or false
+                VehicleTroll.syncConnection()
+        end
+})
+
+VehicleTrollSection:Slider({
+        Text = "Yeet Power",
+        Min = 100,
+        Max = 2500,
+        Value = VehicleTrollSettings.FlingPower,
+        Callback = function(value)
+                VehicleTrollSettings.FlingPower = value
+        end
+})
+
+VehicleTrollSection:Toggle({
+        Text = "Levitate Vehicles (UFO)",
+        Value = false,
+        Callback = function(value)
+                VehicleTrollSettings.LevitateEnabled = value and true or false
+                VehicleTroll.syncConnection()
+        end
+})
+
+VehicleTrollSection:Slider({
+        Text = "Float Height",
+        Min = 10,
+        Max = 500,
+        Value = VehicleTrollSettings.FloatHeight,
+        Callback = function(value)
+                VehicleTrollSettings.FloatHeight = value
+        end
+})
+
+VehicleTrollSection:Slider({
+        Text = "Rise Speed",
+        Min = 5,
+        Max = 100,
+        Value = VehicleTrollSettings.RiseSpeed,
+        Callback = function(value)
+                VehicleTrollSettings.RiseSpeed = value
+        end
+})
+
+VehicleTrollSection:Toggle({
+        Text = "Steal Vehicles (Follow Me)",
+        Value = false,
+        Callback = function(value)
+                VehicleTrollSettings.StealEnabled = value and true or false
+                VehicleTroll.syncConnection()
+        end
+})
+
+VehicleTrollSection:Slider({
+        Text = "Follow Gap",
+        Min = 5,
+        Max = 40,
+        Value = VehicleTrollSettings.FollowGap,
+        Callback = function(value)
+                VehicleTrollSettings.FollowGap = value
+        end
+})
+
+VehicleTrollSection:Toggle({
+        Text = "Spin Vehicles (Beyblade)",
+        Value = false,
+        Callback = function(value)
+                VehicleTrollSettings.SpinEnabled = value and true or false
+                VehicleTroll.syncConnection()
+        end
+})
+
+VehicleTrollSection:Slider({
+        Text = "Spin Power",
+        Min = 5,
+        Max = 150,
+        Value = VehicleTrollSettings.SpinPower,
+        Callback = function(value)
+                VehicleTrollSettings.SpinPower = value
+        end
+})
+
+VehicleTrollSection:Slider({
+        Text = "Vehicle Scan Range",
+        Min = 20,
+        Max = 200,
+        Value = VehicleTrollSettings.ScanRadius,
+        Callback = function(value)
+                VehicleTrollSettings.ScanRadius = value
+
+                if VehicleTrollSettings.Connection then
+                        VehicleTrollSettings.NextRescan = 0
+                end
         end
 })
 end
