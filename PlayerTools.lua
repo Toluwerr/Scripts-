@@ -5075,7 +5075,7 @@ do
 local VehicleTrollSection = VehicleMovementTab:Section("Vehicle Troll")
 
 VehicleTrollSection:Paragraph({
-        Text = "Real-physics trolling of other players' vehicles - velocity orders only, never CFrame, so whatever these cars do on your screen they do on the server for everyone. Works on every vehicle the physics server hands to your client: all parked and empty cars near you. A car with a driver seated is simulated by the driver's machine and nothing can touch it - but the troll stays armed, and the exact frame they step out, the car snaps under your control. Stand next to an occupied car, wait for the driver to leave, and it yeets instantly."
+        Text = "Yeet and levitate other players' vehicles with real physics. Cars with a driver seated are simulated on the driver's machine - they stay armed here, and the exact frame that driver steps out, the car snaps under your control."
 })
 
 local vehicleTrollStatusLabel = VehicleTrollSection:Paragraph({
@@ -5133,8 +5133,16 @@ VehicleTrollSection:Slider({
                 VehicleTrollSettings.RiseSpeed = value
         end
 })
+end
 
-VehicleTrollSection:Toggle({
+do
+local VehicleTrollPowerSection = VehicleMovementTab:Section("Vehicle Troll Power")
+
+VehicleTrollPowerSection:Paragraph({
+        Text = "Steal makes every empty car in range form a trail behind you and chase you across the map; Spin stacks beyblade rotation on top of any other mode; the scan range sets how far the engine reaches. Everything is velocity orders only, never CFrame, so whatever these cars do on your screen they do on the server for everyone - and all four modes can run at once."
+})
+
+VehicleTrollPowerSection:Toggle({
         Text = "Steal Vehicles (Follow Me)",
         Value = false,
         Callback = function(value)
@@ -5143,7 +5151,7 @@ VehicleTrollSection:Toggle({
         end
 })
 
-VehicleTrollSection:Slider({
+VehicleTrollPowerSection:Slider({
         Text = "Follow Gap",
         Min = 5,
         Max = 40,
@@ -5153,7 +5161,7 @@ VehicleTrollSection:Slider({
         end
 })
 
-VehicleTrollSection:Toggle({
+VehicleTrollPowerSection:Toggle({
         Text = "Spin Vehicles (Beyblade)",
         Value = false,
         Callback = function(value)
@@ -5162,7 +5170,7 @@ VehicleTrollSection:Toggle({
         end
 })
 
-VehicleTrollSection:Slider({
+VehicleTrollPowerSection:Slider({
         Text = "Spin Power",
         Min = 5,
         Max = 150,
@@ -5172,7 +5180,7 @@ VehicleTrollSection:Slider({
         end
 })
 
-VehicleTrollSection:Slider({
+VehicleTrollPowerSection:Slider({
         Text = "Vehicle Scan Range",
         Min = 20,
         Max = 200,
