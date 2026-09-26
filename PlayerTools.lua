@@ -114,7 +114,7 @@ local PartRingSettings = {
 
 local PartRing = {}
 
-local VehicleTroll = {}
+local PlayerTroll = {}
 
 
 local AimlockSettings = {
@@ -213,24 +213,37 @@ local VehicleFlingSettings = {
         WorkerToken = 0
 }
 
-local VehicleTrollSettings = {
-        FlingEnabled = false,
-        FlingPower = 500,
-        LevitateEnabled = false,
-        FloatHeight = 80,
-        RiseSpeed = 25,
-        StealEnabled = false,
-        FollowGap = 10,
-        SpinEnabled = false,
-        SpinPower = 40,
-        ScanRadius = 70,
+local PlayerTrollSettings = {
+        BlastEnabled = false,
+        BlastPower = 800,
+        BlastCooldown = 1,
+        MeteorEnabled = false,
+        MeteorFlightTime = 1.5,
+        MeteorInterval = 1.5,
+        SwarmEnabled = false,
+        SwarmRadius = 5,
+        SwarmSpeed = 14,
+        CageEnabled = false,
+        CageSize = 7,
+        ScanRadius = 90,
         RescanInterval = 0.4,
-        Vehicles = {},
+        TargetUserId = nil,
+        TargetEveryone = false,
+        TargetPickerEnabled = false,
+        HoveredPlayer = nil,
+        PickerHighlight = nil,
+        PickerRenderConnection = nil,
+        PickerInputConnection = nil,
+        Parts = {},
         States = setmetatable({}, {__mode = "k"}),
+        CollisionStates = setmetatable({}, {__mode = "k"}),
         Connection = nil,
         NextRescan = 0,
+        NextBlast = 0,
+        NextMeteor = 0,
+        CycleIndex = 1,
+        CurrentTarget = nil,
         MovingCount = 0,
-        OccupiedCount = 0,
         LastStatus = nil,
         ErrorCount = 0
 }
@@ -1267,38 +1280,36 @@ do
         local TAU = math.pi * 2
 
         -- ============================================================
-        -- Vehicle Troll: real-physics trolling of other players'
-        -- vehicles. The hard physics truth this is built around: a
-        -- vehicle with a driver seated is simulated by the DRIVER's
-        -- client, so no script on this machine can ever move it; but
-        -- an empty vehicle near your character has its physics handed
-        -- to YOUR client, and velocity writes on an assembly you
-        -- simulate replicate to the server for everyone to see. The
-        -- engine is therefore ownership-greedy exactly like Chaos:
-        -- every empty vehicle receives its velocity order every
-        -- single frame, forever. Server-held vehicles ignore the
-        -- orders silently, and the instant ownership transfers - most
-        -- deliciously the exact frame a driver steps out of their car
-        -- - the vehicle snaps under control. There is no CFrame
-        -- anywhere in here, so nothing can look moved without really
-        -- being moved on the server.
+        -- Player Troll: real-physics trolling aimed at OTHER PLAYERS.
+        -- Loose parts near your character have their simulation handed
+        -- to YOUR client, so velocity writes on them replicate to the
+        -- server and everyone sees the motion. Volleys are launched
+        -- with exact-landing ballistics - one velocity write that
+        -- compensates gravity and leads the victim's velocity - so
+        -- each part is guaranteed to arrive where the victim WILL be,
+        -- no matter who simulates it mid-flight. Continuous modes
+        -- (swarm, cage) track the victim every frame with the same
+        -- exact-landing controller Chaos uses. Collisions stay ON, so
+        -- every arrival is a real hit, a real body-block, a real
+        -- wall. No CFrame anywhere: nothing can look trolled without
+        -- really being trolled on the server.
         -- ============================================================
 
-        local function updateVehicleTrollStatus(text)
-                local message = tostring(text or "Vehicle Troll off")
+        local function updatePlayerTrollStatus(text)
+                local message = tostring(text or "Player Troll off")
 
-                if VehicleTrollSettings.LastStatus == message then
+                if PlayerTrollSettings.LastStatus == message then
                         return
                 end
 
-                VehicleTrollSettings.LastStatus = message
+                PlayerTrollSettings.LastStatus = message
 
-                if type(VehicleTroll.OnStatusChanged) == "function" then
-                        pcall(VehicleTroll.OnStatusChanged, message)
+                if type(PlayerTroll.OnStatusChanged) == "function" then
+                        pcall(PlayerTroll.OnStatusChanged, message)
                 end
         end
 
-        local function getVehicleTrollRoot()
+        local function getTrollMyRoot()
                 local character = LocalPlayer.Character
                 local root = character and character:FindFirstChild("HumanoidRootPart")
 
@@ -1309,58 +1320,403 @@ do
                 return nil
         end
 
-        local function isVehicleTrollActive()
-                return VehicleTrollSettings.FlingEnabled
-                        or VehicleTrollSettings.LevitateEnabled
-                        or VehicleTrollSettings.StealEnabled
-                        or VehicleTrollSettings.SpinEnabled
+        local function isPlayerTrollActive()
+                return PlayerTrollSettings.BlastEnabled
+                        or PlayerTrollSettings.MeteorEnabled
+                        or PlayerTrollSettings.SwarmEnabled
+                        or PlayerTrollSettings.CageEnabled
         end
 
-        local function getVehicleTrollScanRadius()
+        local function getTrollScanRadius()
                 return math.clamp(
-                        tonumber(VehicleTrollSettings.ScanRadius) or 70,
+                        tonumber(PlayerTrollSettings.ScanRadius) or 90,
                         15,
                         500
                 )
         end
 
-        local function composeVehicleTrollStatus()
-                local total = #VehicleTrollSettings.Vehicles
+        local function trollGetPlayerFromPart(part)
+                local current = part
 
-                if total == 0 then
-                        updateVehicleTrollStatus("No vehicles in range")
-                        return
+                while current and current ~= Workspace do
+                        if current:IsA("Model") then
+                                local player = Players:GetPlayerFromCharacter(current)
+
+                                if player then
+                                        return player
+                                end
+                        end
+
+                        current = current.Parent
                 end
 
-                local moving = tonumber(VehicleTrollSettings.MovingCount) or 0
-                local occupied = tonumber(VehicleTrollSettings.OccupiedCount) or 0
-                local rest = total - moving
-                local label
-
-                if occupied > 0 then
-                        label = "Vehicle Troll: " .. tostring(moving) .. " of "
-                                .. tostring(total) .. " vehicles moving ("
-                                .. tostring(occupied) .. " driver-held"
-                                .. ", yeet armed on exit)"
-                else
-                        label = "Vehicle Troll: " .. tostring(moving) .. " of "
-                                .. tostring(total) .. " vehicles moving"
-                end
-
-                if rest > moving then
-                        label = label .. " (rest waiting on physics)"
-                end
-
-                updateVehicleTrollStatus(label)
+                return nil
         end
 
-        local function refreshVehicleTroll()
-                local myRoot = getVehicleTrollRoot()
+        local function hasTrollDisallowedAncestor(part)
+                local current = part
 
-                if not myRoot then
+                while current and current ~= Workspace do
+                        if current:IsA("Tool") then
+                                return true
+                        end
+
+                        if current:IsA("Model")
+                                and current:FindFirstChildOfClass("Humanoid") then
+                                return true
+                        end
+
+                        current = current.Parent
+                end
+
+                return false
+        end
+
+        local function canTrollPart(part)
+                if not part
+                        or not part:IsA("BasePart")
+                        or not part.Parent
+                        or part.Anchored
+                        or part:IsA("Seat")
+                        or part:IsA("VehicleSeat")
+                        or part.AssemblyRootPart ~= part then
+                        return false
+                end
+
+                if LocalPlayer.Character
+                        and part:IsDescendantOf(LocalPlayer.Character) then
+                        return false
+                end
+
+                if VehicleSettings.CurrentModel
+                        and VehicleSettings.CurrentModel.Parent
+                        and part:IsDescendantOf(VehicleSettings.CurrentModel) then
+                        return false
+                end
+
+                if hasTrollDisallowedAncestor(part) then
+                        return false
+                end
+
+                -- Never fight the Chaos engine over the same parts.
+                if PartRingSettings.Enabled then
+                        for _, ringed in ipairs(PartRingSettings.Parts) do
+                                if ringed == part then
+                                        return false
+                                end
+                        end
+                end
+
+                return true
+        end
+
+        local function getPlayerTrollTargetOption()
+                if PlayerTrollSettings.TargetEveryone then
+                        return "Everyone"
+                end
+
+                local player = PlayerTrollSettings.TargetUserId
+                        and Players:GetPlayerByUserId(PlayerTrollSettings.TargetUserId)
+                        or nil
+
+                return player and player.DisplayName or "Nearest"
+        end
+
+        local function clearTrollPickerHighlight()
+                local highlight = PlayerTrollSettings.PickerHighlight
+                PlayerTrollSettings.PickerHighlight = nil
+                PlayerTrollSettings.HoveredPlayer = nil
+
+                if highlight and highlight.Parent then
+                        pcall(function()
+                                highlight:Destroy()
+                        end)
+                end
+        end
+
+        local function showTrollPickerHighlight(player)
+                local character = player and player.Character
+
+                if not character or not character.Parent then
+                        clearTrollPickerHighlight()
                         return
                 end
 
+                local highlight = PlayerTrollSettings.PickerHighlight
+
+                if not highlight or not highlight.Parent then
+                        highlight = Instance.new("Highlight")
+                        highlight.Name = "__PlayerToolsTrollTarget"
+                        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                        highlight.FillColor = Color3.fromRGB(235, 64, 52)
+                        highlight.FillTransparency = 0.62
+                        highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+                        highlight.OutlineTransparency = 0.08
+                        highlight.Parent = Workspace
+                        PlayerTrollSettings.PickerHighlight = highlight
+                end
+
+                highlight.Adornee = character
+                highlight.Enabled = true
+                PlayerTrollSettings.HoveredPlayer = player
+        end
+
+        PlayerTroll.getHoveredPlayer = function()
+                local camera = Workspace.CurrentCamera
+
+                if not camera then
+                        return nil
+                end
+
+                local mouseLocation = UserInputService:GetMouseLocation()
+                local unitRay = camera:ScreenPointToRay(mouseLocation.X, mouseLocation.Y)
+
+                local filter = {}
+
+                if LocalPlayer.Character then
+                        table.insert(filter, LocalPlayer.Character)
+                end
+
+                local params = RaycastParams.new()
+                params.FilterType = Enum.RaycastFilterType.Exclude
+                params.FilterDescendantsInstances = filter
+                params.IgnoreWater = false
+
+                local result = Workspace:Raycast(
+                        unitRay.Origin,
+                        unitRay.Direction * 10000,
+                        params
+                )
+                local player = trollGetPlayerFromPart(result and result.Instance)
+
+                return player ~= LocalPlayer and player or nil
+        end
+
+        local function updateTrollTargetPicker()
+                if not running or not PlayerTrollSettings.TargetPickerEnabled then
+                        return
+                end
+
+                local player = PlayerTroll.getHoveredPlayer()
+
+                if player then
+                        showTrollPickerHighlight(player)
+                else
+                        clearTrollPickerHighlight()
+                end
+        end
+
+        PlayerTroll.stopTargetPicker = function()
+                disconnect(PlayerTrollSettings.PickerRenderConnection)
+                disconnect(PlayerTrollSettings.PickerInputConnection)
+                PlayerTrollSettings.PickerRenderConnection = nil
+                PlayerTrollSettings.PickerInputConnection = nil
+                clearTrollPickerHighlight()
+        end
+
+        PlayerTroll.setTarget = function(value)
+                if value == "Nearest" or not value then
+                        PlayerTrollSettings.TargetUserId = nil
+                        PlayerTrollSettings.TargetEveryone = false
+                else
+                        local player = nil
+
+                        if typeof(value) == "Instance" and value:IsA("Player") then
+                                player = value
+                        else
+                                player = Players:FindFirstChild(tostring(value))
+                        end
+
+                        if player then
+                                PlayerTrollSettings.TargetUserId = player.UserId
+                                PlayerTrollSettings.TargetEveryone = false
+                        end
+                end
+
+                if type(PlayerTroll.OnTargetChanged) == "function" then
+                        pcall(PlayerTroll.OnTargetChanged, getPlayerTrollTargetOption())
+                end
+
+                if isPlayerTrollActive() then
+                        PlayerTrollSettings.NextRescan = 0
+                end
+        end
+
+        PlayerTroll.setTargetEveryone = function(value)
+                PlayerTrollSettings.TargetEveryone = value and true or false
+
+                if PlayerTrollSettings.TargetEveryone then
+                        PlayerTrollSettings.TargetUserId = nil
+                        PlayerTrollSettings.CycleIndex = 1
+                end
+
+                if type(PlayerTroll.OnTargetChanged) == "function" then
+                        pcall(PlayerTroll.OnTargetChanged, getPlayerTrollTargetOption())
+                end
+        end
+
+        PlayerTroll.setPickerEnabled = function(value)
+                local enabled = value and true or false
+
+                PlayerTroll.stopTargetPicker()
+                PlayerTrollSettings.TargetPickerEnabled = enabled
+
+                if type(PlayerTroll.OnPickerEnabledChanged) == "function" then
+                        pcall(PlayerTroll.OnPickerEnabledChanged, enabled)
+                end
+
+                if not enabled then
+                        return
+                end
+
+                PlayerTrollSettings.PickerRenderConnection = RunService.RenderStepped:Connect(
+                        updateTrollTargetPicker
+                )
+
+                PlayerTrollSettings.PickerInputConnection = UserInputService.InputBegan:Connect(
+                        function(input, gameProcessedEvent)
+                                if gameProcessedEvent
+                                        or not PlayerTrollSettings.TargetPickerEnabled
+                                        or UserInputService:GetFocusedTextBox() then
+                                        return
+                                end
+
+                                if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+                                        return
+                                end
+
+                                local player = PlayerTrollSettings.HoveredPlayer
+                                        or PlayerTroll.getHoveredPlayer()
+
+                                if player then
+                                        PlayerTroll.setTarget(player)
+                                        PlayerTroll.setPickerEnabled(false)
+                                end
+                        end
+                )
+        end
+
+        local function collectTrollVictims()
+                local victims = {}
+
+                for _, player in ipairs(Players:GetPlayers()) do
+                        if player ~= LocalPlayer then
+                                local character = player.Character
+                                local root = character
+                                        and character:FindFirstChild("HumanoidRootPart")
+
+                                if root and root.Parent then
+                                        table.insert(victims, {
+                                                player = player,
+                                                root = root
+                                        })
+                                end
+                        end
+                end
+
+                return victims
+        end
+
+        local function resolveTrollVictim(myRoot, advanceCycle)
+                local victims = collectTrollVictims()
+
+                if #victims == 0 then
+                        PlayerTrollSettings.CurrentTarget = nil
+                        return nil
+                end
+
+                if PlayerTrollSettings.TargetEveryone then
+                        if advanceCycle then
+                                PlayerTrollSettings.CycleIndex = PlayerTrollSettings.CycleIndex + 1
+                        end
+
+                        local pick = ((PlayerTrollSettings.CycleIndex - 1) % #victims) + 1
+                        PlayerTrollSettings.CurrentTarget = victims[pick].player
+
+                        return victims[pick]
+                end
+
+                if PlayerTrollSettings.TargetUserId then
+                        for _, victim in ipairs(victims) do
+                                if victim.player.UserId == PlayerTrollSettings.TargetUserId then
+                                        PlayerTrollSettings.CurrentTarget = victim.player
+
+                                        return victim
+                                end
+                        end
+                end
+
+                -- Nearest living player to me, recomputed every frame.
+                local nearest = nil
+                local nearestDistance = nil
+
+                for _, victim in ipairs(victims) do
+                        local distance = (victim.root.Position - myRoot.Position).Magnitude
+
+                        if not nearestDistance or distance < nearestDistance then
+                                nearestDistance = distance
+                                nearest = victim
+                        end
+                end
+
+                PlayerTrollSettings.CurrentTarget = nearest.player
+
+                return nearest
+        end
+
+        local function makeTrollState()
+                local axis = Vector3.new(
+                        math.random() * 2 - 1,
+                        math.random() * 2 - 1,
+                        math.random() * 2 - 1
+                )
+
+                if axis.Magnitude < 0.05 then
+                        axis = Vector3.new(0, 1, 0)
+                else
+                        axis = axis.Unit
+                end
+
+                return {
+                        Angle = nil,
+                        RadiusScale = 0.55 + math.random() * 0.9,
+                        HeightOffset = (math.random() - 0.5) * 4,
+                        SpeedScale = 0.6 + math.random() * 0.9,
+                        Direction = math.random() < 0.5 and -1 or 1,
+                        SpinAxis = axis,
+                        InFlightUntil = 0,
+                        PrevPos = nil
+                }
+        end
+
+        local function prepareTrollPart(part)
+                if PlayerTrollSettings.CollisionStates[part] == nil then
+                        PlayerTrollSettings.CollisionStates[part] = part.CanCollide
+                end
+
+                if PlayerTrollSettings.States[part] == nil then
+                        PlayerTrollSettings.States[part] = makeTrollState()
+                end
+
+                pcall(function()
+                        part.CanCollide = true
+                end)
+        end
+
+        local function releaseTrollPart(part)
+                local original = PlayerTrollSettings.CollisionStates[part]
+
+                if original ~= nil then
+                        pcall(function()
+                                part.CanCollide = original
+                        end)
+                end
+
+                PlayerTrollSettings.CollisionStates[part] = nil
+                PlayerTrollSettings.States[part] = nil
+        end
+
+        local function refreshPlayerTroll(myRoot)
                 local now = os.clock()
                 local overlap = OverlapParams.new()
                 overlap.FilterType = Enum.RaycastFilterType.Exclude
@@ -1379,96 +1735,194 @@ do
                 pcall(function()
                         nearby = Workspace:GetPartBoundsInRadius(
                                 myRoot.Position,
-                                getVehicleTrollScanRadius(),
+                                getTrollScanRadius(),
                                 overlap
                         )
                 end)
 
-                -- A vehicle is the assembly of any VehicleSeat found in
-                -- range: the seat is welded to the chassis, so its
-                -- assembly root IS the car. Anchored chassis can never be
-                -- moved by any client, so they are filtered out up front;
-                -- your own current vehicle is skipped so you never troll
-                -- yourself mid-drive.
-                local seats = {}
-                local seatSet = {}
+                local candidateSet = {}
 
                 for _, part in ipairs(nearby) do
-                        if part:IsA("VehicleSeat")
-                                and part.Parent
-                                and not seatSet[part]
-                                and part ~= VehicleSettings.CurrentSeat then
-                                local assemblyRoot = part.AssemblyRootPart
-
-                                if assemblyRoot
-                                        and assemblyRoot.Parent
-                                        and not assemblyRoot.Anchored then
-                                        seatSet[part] = true
-                                        table.insert(seats, part)
-                                end
+                        if canTrollPart(part) then
+                                candidateSet[part] = true
                         end
                 end
 
-                table.sort(seats, function(first, second)
+                local nextParts = {}
+
+                for _, part in ipairs(PlayerTrollSettings.Parts) do
+                        if candidateSet[part] and part.Parent then
+                                candidateSet[part] = nil
+                                table.insert(nextParts, part)
+                        else
+                                releaseTrollPart(part)
+                        end
+                end
+
+                local fresh = {}
+
+                for _, part in ipairs(nearby) do
+                        if candidateSet[part] then
+                                table.insert(fresh, part)
+                        end
+                end
+
+                table.sort(fresh, function(first, second)
                         return (first.Position - myRoot.Position).Magnitude
                                 < (second.Position - myRoot.Position).Magnitude
                 end)
 
-                VehicleTrollSettings.Vehicles = seats
-                VehicleTrollSettings.NextRescan = now + VehicleTrollSettings.RescanInterval
-
-                composeVehicleTrollStatus()
-        end
-
-        local function makeVehicleTrollState()
-                local axis = Vector3.new(
-                        math.random() * 2 - 1,
-                        math.random() * 2 - 1,
-                        math.random() * 2 - 1
-                )
-
-                if axis.Magnitude < 0.05 then
-                        axis = Vector3.new(0, 1, 0)
-                else
-                        axis = axis.Unit
+                for _, part in ipairs(fresh) do
+                        table.insert(nextParts, part)
                 end
 
-                return {
-                        Flung = false,
-                        BaseY = nil,
-                        SpinAxis = axis,
-                        PrevPos = nil
-                }
+                PlayerTrollSettings.Parts = nextParts
+
+                for _, part in ipairs(nextParts) do
+                        prepareTrollPart(part)
+                end
+
+                PlayerTrollSettings.NextRescan = now + PlayerTrollSettings.RescanInterval
         end
 
-        local function updateVehicleTroll(deltaTime)
-                if not running or not isVehicleTrollActive() then
+        local function fireTrollVolley(victim, usePower, fixedTime, aimOffset, now)
+                -- Exact-landing ballistics: one velocity write per part,
+                -- launched while this client owns the assembly, that
+                -- lands exactly where the victim WILL be after T
+                -- seconds - gravity fully compensated, the victim's
+                -- velocity fully led. After the write the part is
+                -- ballistic, so it hits no matter who simulates the
+                -- rest of its flight.
+                local victimRoot = victim.root
+                local victimVelocity = victimRoot.AssemblyLinearVelocity
+
+                if victimVelocity.X ~= victimVelocity.X
+                        or victimVelocity.Y ~= victimVelocity.Y
+                        or victimVelocity.Z ~= victimVelocity.Z then
+                        victimVelocity = Vector3.zero
+                elseif victimVelocity.Magnitude > 500 then
+                        victimVelocity = victimVelocity.Unit * 500
+                end
+
+                local victimPosition = victimRoot.Position
+
+                if victimPosition.X ~= victimPosition.X
+                        or victimPosition.Y ~= victimPosition.Y
+                        or victimPosition.Z ~= victimPosition.Z then
+                        return 0
+                end
+
+                local count = 0
+
+                for _, part in ipairs(PlayerTrollSettings.Parts) do
+                        local state = PlayerTrollSettings.States[part]
+
+                        if state
+                                and part.Parent
+                                and now >= (state.InFlightUntil or 0) then
+                                local position = part.Position
+
+                                if position.X == position.X
+                                        and position.Y == position.Y
+                                        and position.Z == position.Z then
+                                        local flightTime = fixedTime
+
+                                        if not flightTime then
+                                                local distance = (victimPosition - position).Magnitude
+
+                                                flightTime = math.clamp(
+                                                        distance / math.max(usePower or 800, 1),
+                                                        0.06,
+                                                        4
+                                                )
+                                        end
+
+                                        local aim = victimPosition
+                                                + victimVelocity * flightTime
+                                                + aimOffset
+                                        local launch = (aim - position) / flightTime
+                                                + Vector3.new(
+                                                        0,
+                                                        0.5 * Workspace.Gravity * flightTime,
+                                                        0
+                                                )
+
+                                        pcall(function()
+                                                part.CanCollide = true
+                                                part.AssemblyLinearVelocity = launch
+                                                part.AssemblyAngularVelocity = state.SpinAxis * 25
+                                        end)
+
+                                        state.InFlightUntil = now + flightTime + 0.4
+                                        count = count + 1
+                                end
+                        end
+                end
+
+                return count
+        end
+
+        local function composePlayerTrollStatus(victim)
+                local total = #PlayerTrollSettings.Parts
+
+                if not victim then
+                        updatePlayerTrollStatus("No players in range")
                         return
                 end
 
-                local myRoot = getVehicleTrollRoot()
+                if total == 0 then
+                        updatePlayerTrollStatus("No loose parts in range")
+                        return
+                end
+
+                local moving = tonumber(PlayerTrollSettings.MovingCount) or 0
+                local name = victim.player.DisplayName
+
+                if moving > 0 then
+                        updatePlayerTrollStatus(
+                                "Trolling " .. name .. ": " .. tostring(total)
+                                        .. " parts (" .. tostring(moving) .. " moving)"
+                        )
+                else
+                        updatePlayerTrollStatus(
+                                "Trolling " .. name .. ": " .. tostring(total)
+                                        .. " parts (rest waiting on physics)"
+                        )
+                end
+        end
+
+        local CAGE_OFFSETS = {
+                Vector3.new(1, 0, 0),
+                Vector3.new(-1, 0, 0),
+                Vector3.new(0, 0, 1),
+                Vector3.new(0, 0, -1),
+                Vector3.new(0, 0.9, 0)
+        }
+
+        local function updatePlayerTroll(deltaTime)
+                if not running or not isPlayerTrollActive() then
+                        return
+                end
+
+                local myRoot = getTrollMyRoot()
 
                 if not myRoot then
-                        if #VehicleTrollSettings.Vehicles > 0 then
-                                VehicleTrollSettings.Vehicles = {}
-                                updateVehicleTrollStatus("Character unavailable")
+                        if #PlayerTrollSettings.Parts > 0 then
+                                for _, part in ipairs(PlayerTrollSettings.Parts) do
+                                        releaseTrollPart(part)
+                                end
+
+                                PlayerTrollSettings.Parts = {}
                         end
 
+                        updatePlayerTrollStatus("Character unavailable")
                         return
                 end
 
                 local now = os.clock()
 
-                if now >= VehicleTrollSettings.NextRescan then
-                        refreshVehicleTroll()
-                end
-
-                local vehicles = VehicleTrollSettings.Vehicles
-                local count = #vehicles
-
-                if count == 0 then
-                        updateVehicleTrollStatus("No vehicles in range")
-                        return
+                if now >= PlayerTrollSettings.NextRescan then
+                        refreshPlayerTroll(myRoot)
                 end
 
                 local stepTime = math.clamp(tonumber(deltaTime) or 0, 0, 0.1)
@@ -1477,45 +1931,92 @@ do
                         return
                 end
 
-                local flingEnabled = VehicleTrollSettings.FlingEnabled
-                local levitateEnabled = VehicleTrollSettings.LevitateEnabled
-                local stealEnabled = VehicleTrollSettings.StealEnabled
-                local spinEnabled = VehicleTrollSettings.SpinEnabled
-                local flingPower = math.clamp(
-                        tonumber(VehicleTrollSettings.FlingPower) or 500,
-                        50,
-                        5000
-                )
-                local floatHeight = math.clamp(
-                        tonumber(VehicleTrollSettings.FloatHeight) or 80,
-                        5,
-                        2000
-                )
-                local riseSpeed = math.clamp(
-                        tonumber(VehicleTrollSettings.RiseSpeed) or 25,
-                        2,
-                        200
-                )
-                local followGap = math.clamp(
-                        tonumber(VehicleTrollSettings.FollowGap) or 10,
-                        4,
-                        60
-                )
-                local spinPower = math.clamp(
-                        tonumber(VehicleTrollSettings.SpinPower) or 40,
-                        0,
-                        300
-                )
+                local blastEnabled = PlayerTrollSettings.BlastEnabled
+                local meteorEnabled = PlayerTrollSettings.MeteorEnabled
+                local swarmEnabled = PlayerTrollSettings.SwarmEnabled
+                local cageEnabled = PlayerTrollSettings.CageEnabled
 
-                local center = myRoot.Position
+                local blastDue = blastEnabled and now >= PlayerTrollSettings.NextBlast
+                local meteorDue = meteorEnabled and now >= PlayerTrollSettings.NextMeteor
 
-                if center.X ~= center.X
-                        or center.Y ~= center.Y
-                        or center.Z ~= center.Z then
+                local victim = resolveTrollVictim(myRoot, blastDue or meteorDue)
+
+                if not victim then
+                        composePlayerTrollStatus(nil)
                         return
                 end
 
-                local carry = myRoot.AssemblyLinearVelocity * 0.5
+                if blastDue then
+                        local power = math.clamp(
+                                tonumber(PlayerTrollSettings.BlastPower) or 800,
+                                50,
+                                3000
+                        )
+                        local fired = fireTrollVolley(
+                                victim,
+                                power,
+                                nil,
+                                Vector3.new(0, 1, 0),
+                                now
+                        )
+
+                        PlayerTrollSettings.NextBlast = now + math.clamp(
+                                tonumber(PlayerTrollSettings.BlastCooldown) or 1,
+                                0.15,
+                                10
+                        )
+
+                        if fired > 0 then
+                                updatePlayerTrollStatus(
+                                        "Blasted " .. tostring(fired) .. " parts at "
+                                                .. victim.player.DisplayName
+                                )
+                        end
+                end
+
+                if meteorDue then
+                        local flightTime = math.clamp(
+                                tonumber(PlayerTrollSettings.MeteorFlightTime) or 1.5,
+                                0.4,
+                                3
+                        )
+                        local fired = fireTrollVolley(
+                                victim,
+                                nil,
+                                flightTime,
+                                Vector3.new(0, 3, 0),
+                                now
+                        )
+
+                        PlayerTrollSettings.NextMeteor = now + math.clamp(
+                                tonumber(PlayerTrollSettings.MeteorInterval) or 1.5,
+                                0.3,
+                                10
+                        )
+
+                        if fired > 0 then
+                                updatePlayerTrollStatus(
+                                        "Rained " .. tostring(fired) .. " meteors on "
+                                                .. victim.player.DisplayName
+                                )
+                        end
+                end
+
+                if not swarmEnabled and not cageEnabled then
+                        composePlayerTrollStatus(victim)
+                        return
+                end
+
+                local victimRoot = victim.root
+                local victimPosition = victimRoot.Position
+
+                if victimPosition.X ~= victimPosition.X
+                        or victimPosition.Y ~= victimPosition.Y
+                        or victimPosition.Z ~= victimPosition.Z then
+                        return
+                end
+
+                local carry = victimRoot.AssemblyLinearVelocity * 0.5
 
                 if carry.X ~= carry.X
                         or carry.Y ~= carry.Y
@@ -1525,53 +2026,103 @@ do
                         carry = carry.Unit * 250
                 end
 
-                local look = myRoot.CFrame.LookVector
-                local flatLook = Vector3.new(look.X, 0, look.Z)
-
-                if flatLook.Magnitude < 0.05 then
-                        flatLook = Vector3.new(0, 0, -1)
-                else
-                        flatLook = flatLook.Unit
-                end
-
+                local swarmRadius = math.clamp(
+                        tonumber(PlayerTrollSettings.SwarmRadius) or 5,
+                        1.5,
+                        15
+                )
+                local swarmSpeed = math.clamp(
+                        tonumber(PlayerTrollSettings.SwarmSpeed) or 14,
+                        0,
+                        40
+                )
+                local cageSize = math.clamp(
+                        tonumber(PlayerTrollSettings.CageSize) or 7,
+                        3,
+                        25
+                )
                 local gravityFeedForward = 0.5 * Workspace.Gravity * stepTime
-                local scanLimit = getVehicleTrollScanRadius() * 1.25
                 local movingCount = 0
-                local occupiedCount = 0
 
-                for index = 1, count do
-                        local seat = vehicles[index]
-                        local root = seat.Parent and seat.AssemblyRootPart or nil
+                for index, part in ipairs(PlayerTrollSettings.Parts) do
+                        local state = PlayerTrollSettings.States[part]
 
-                        if root
-                                and root.Parent
-                                and root == seat.AssemblyRootPart
-                                and not root.Anchored then
-                                if seat.Occupant then
-                                        -- A seated driver means THEIR client
-                                        -- simulates this car right now: every
-                                        -- write we could make would be
-                                        -- silently ignored, so the car is
-                                        -- counted and left alone - but the
-                                        -- engine stays armed, and the exact
-                                        -- frame they step out this loop takes
-                                        -- the vehicle over.
-                                        occupiedCount = occupiedCount + 1
-                                else
-                                        local position = root.Position
+                        if state
+                                and part.Parent
+                                and now >= (state.InFlightUntil or 0) then
+                                local position = part.Position
 
-                                        if position.X == position.X
-                                                and position.Y == position.Y
-                                                and position.Z == position.Z
-                                                and (position - center).Magnitude
-                                                        <= scanLimit then
-                                                local state = VehicleTrollSettings.States[seat]
+                                if position.X == position.X
+                                        and position.Y == position.Y
+                                        and position.Z == position.Z then
+                                        local linearVelocity = nil
 
-                                                if not state then
-                                                        state = makeVehicleTrollState()
-                                                        VehicleTrollSettings.States[seat] = state
+                                        if swarmEnabled then
+                                                -- Tight personal orbits with
+                                                -- collisions ON: a swirling
+                                                -- cloud that body-blocks and
+                                                -- shoves the victim while
+                                                -- tracking them exactly.
+                                                if state.Angle == nil then
+                                                        state.Angle = math.atan2(
+                                                                position.Z - victimPosition.Z,
+                                                                position.X - victimPosition.X
+                                                        ) % TAU
                                                 end
 
+                                                local angularSpeed = swarmSpeed
+                                                        * state.SpeedScale
+                                                        * state.Direction
+                                                local angle = state.Angle
+                                                local nextAngle = angle + angularSpeed * stepTime
+
+                                                state.Angle = nextAngle % TAU
+
+                                                local orbitRadius = math.max(
+                                                        1.5,
+                                                        swarmRadius * state.RadiusScale
+                                                )
+                                                local targetNow = victimPosition + Vector3.new(
+                                                        math.cos(angle) * orbitRadius,
+                                                        state.HeightOffset,
+                                                        math.sin(angle) * orbitRadius
+                                                )
+                                                local targetNext = victimPosition + Vector3.new(
+                                                        math.cos(nextAngle) * orbitRadius,
+                                                        state.HeightOffset,
+                                                        math.sin(nextAngle) * orbitRadius
+                                                )
+                                                local tangentSpeed = orbitRadius * angularSpeed
+                                                local tangentVelocity = Vector3.new(
+                                                        -math.sin(angle) * tangentSpeed,
+                                                        0,
+                                                        math.cos(angle) * tangentSpeed
+                                                )
+                                                local residual = targetNext - position
+                                                        - tangentVelocity * stepTime
+
+                                                linearVelocity = tangentVelocity
+                                                        + residual / stepTime
+                                                        + Vector3.new(0, gravityFeedForward, 0)
+                                                        + carry
+                                        elseif cageEnabled then
+                                                -- Five real walls (four sides
+                                                -- plus a lid) of collidable
+                                                -- parts that follow the
+                                                -- victim: a prison they have
+                                                -- to punch their way out of.
+                                                local offset = CAGE_OFFSETS[
+                                                        ((index - 1) % #CAGE_OFFSETS) + 1
+                                                ] * cageSize
+                                                local target = victimPosition + offset
+                                                local residual = target - position
+
+                                                linearVelocity = residual / stepTime
+                                                        + Vector3.new(0, gravityFeedForward, 0)
+                                                        + carry
+                                        end
+
+                                        if linearVelocity then
                                                 if state.PrevPos then
                                                         local moved = (position - state.PrevPos).Magnitude
 
@@ -1584,163 +2135,55 @@ do
                                                         end
                                                 end
 
-                                                local handled = false
-
-                                                if flingEnabled and not state.Flung then
-                                                        -- One-shot launch per
-                                                        -- arming: the car is
-                                                        -- ordered up and
-                                                        -- sideways at full
-                                                        -- uncapped power with
-                                                        -- a wild tumble, then
-                                                        -- left ballistic. No
-                                                        -- cap, no glide, no
-                                                        -- moderation - the
-                                                        -- same raw-yank
-                                                        -- philosophy Chaos
-                                                        -- uses.
-                                                        local angle = math.random() * TAU
-                                                        local horizontal = Vector3.new(
-                                                                math.cos(angle),
-                                                                0,
-                                                                math.sin(angle)
-                                                        ) * (flingPower * 0.6)
-
-                                                        pcall(function()
-                                                                root.AssemblyLinearVelocity = horizontal
-                                                                        + Vector3.new(0, flingPower, 0)
-                                                                root.AssemblyAngularVelocity = state.SpinAxis * 40
-                                                        end)
-
-                                                        state.Flung = true
-                                                        handled = true
-                                                end
-
-                                                if not handled then
-                                                        local linearVelocity = nil
-
-                                                        if stealEnabled then
-                                                                -- Theft mode: every
-                                                                -- empty car in
-                                                                -- range lines up
-                                                                -- behind you in a
-                                                                -- trail and
-                                                                -- chases you
-                                                                -- across the map.
-                                                                -- Exact-landing
-                                                                -- velocity
-                                                                -- (residual per
-                                                                -- step plus
-                                                                -- gravity
-                                                                -- feed-forward,
-                                                                -- plus your
-                                                                -- carry) at raw
-                                                                -- uncapped
-                                                                -- magnitude - a
-                                                                -- car 60 studs
-                                                                -- behind closes
-                                                                -- the whole gap
-                                                                -- in one physics
-                                                                -- step.
-                                                                local target = center - flatLook
-                                                                        * (4 + (index - 1) * followGap)
-                                                                        + Vector3.new(0, 2, 0)
-                                                                local residual = target - position
-
-                                                                linearVelocity = residual / stepTime
-                                                                        + Vector3.new(0, gravityFeedForward, 0)
-                                                                        + carry
-                                                        elseif levitateEnabled then
-                                                                -- UFO mode: the car
-                                                                -- rises straight
-                                                                -- up from where
-                                                                -- it stands and
-                                                                -- hovers at float
-                                                                -- height, pinned
-                                                                -- horizontally.
-                                                                -- Gravity is
-                                                                -- cancelled every
-                                                                -- frame so the
-                                                                -- hover is real
-                                                                -- physics, not a
-                                                                -- CFrame freeze.
-                                                                if state.BaseY == nil then
-                                                                        state.BaseY = position.Y
-                                                                end
-
-                                                                local targetY = state.BaseY + floatHeight
-                                                                local rise = math.clamp(
-                                                                        (targetY - position.Y) * 2,
-                                                                        0,
-                                                                        riseSpeed
-                                                                )
-
-                                                                linearVelocity = Vector3.new(
-                                                                        0,
-                                                                        rise + gravityFeedForward,
-                                                                        0
-                                                                )
-                                                        end
-
-                                                        if linearVelocity then
-                                                                pcall(function()
-                                                                        root.AssemblyLinearVelocity = linearVelocity
-                                                                end)
-                                                        end
-                                                end
-
-                                                if spinEnabled and not handled then
-                                                        -- Beyblade mode:
-                                                        -- pure angular
-                                                        -- orders, composes
-                                                        -- with levitate and
-                                                        -- theft.
-                                                        pcall(function()
-                                                                root.AssemblyAngularVelocity = state.SpinAxis
-                                                                        * spinPower
-                                                        end)
-                                                end
-
-                                                state.PrevPos = position
+                                                pcall(function()
+                                                        part.AssemblyLinearVelocity = linearVelocity
+                                                        part.AssemblyAngularVelocity = state.SpinAxis * 20
+                                                end)
                                         end
+
+                                        state.PrevPos = position
                                 end
                         end
                 end
 
-                VehicleTrollSettings.MovingCount = movingCount
-                VehicleTrollSettings.OccupiedCount = occupiedCount
-                composeVehicleTrollStatus()
+                PlayerTrollSettings.MovingCount = movingCount
+                composePlayerTrollStatus(victim)
         end
 
-        local function stopVehicleTroll()
-                disconnect(VehicleTrollSettings.Connection)
-                VehicleTrollSettings.Connection = nil
-                VehicleTrollSettings.Vehicles = {}
-                VehicleTrollSettings.States = setmetatable({}, {__mode = "k"})
-                VehicleTrollSettings.NextRescan = 0
-                VehicleTrollSettings.MovingCount = 0
-                VehicleTrollSettings.OccupiedCount = 0
-                updateVehicleTrollStatus("Vehicle Troll off")
+        local function stopPlayerTroll()
+                disconnect(PlayerTrollSettings.Connection)
+                PlayerTrollSettings.Connection = nil
+
+                for _, part in ipairs(PlayerTrollSettings.Parts) do
+                        releaseTrollPart(part)
+                end
+
+                PlayerTrollSettings.Parts = {}
+                PlayerTrollSettings.NextRescan = 0
+                PlayerTrollSettings.NextBlast = 0
+                PlayerTrollSettings.NextMeteor = 0
+                PlayerTrollSettings.MovingCount = 0
+                updatePlayerTrollStatus("Player Troll off")
         end
 
-        VehicleTroll.syncConnection = function()
-                if isVehicleTrollActive() then
-                        if not VehicleTrollSettings.Connection then
-                                refreshVehicleTroll()
+        PlayerTroll.syncConnection = function()
+                if isPlayerTrollActive() then
+                        if not PlayerTrollSettings.Connection then
+                                PlayerTrollSettings.NextRescan = 0
 
-                                VehicleTrollSettings.Connection = RunService.Heartbeat:Connect(
+                                PlayerTrollSettings.Connection = RunService.Heartbeat:Connect(
                                         function(stepTime)
-                                                local ok, err = pcall(updateVehicleTroll, stepTime)
+                                                local ok, err = pcall(updatePlayerTroll, stepTime)
 
                                                 if ok then
-                                                        VehicleTrollSettings.ErrorCount = 0
+                                                        PlayerTrollSettings.ErrorCount = 0
                                                         return
                                                 end
 
-                                                VehicleTrollSettings.ErrorCount = VehicleTrollSettings.ErrorCount + 1
+                                                PlayerTrollSettings.ErrorCount = PlayerTrollSettings.ErrorCount + 1
 
-                                                if VehicleTrollSettings.ErrorCount == 5 then
-                                                        updateVehicleTrollStatus(
+                                                if PlayerTrollSettings.ErrorCount == 5 then
+                                                        updatePlayerTrollStatus(
                                                                 "Engine error: "
                                                                         .. tostring(err):sub(1, 80)
                                                         )
@@ -1749,12 +2192,19 @@ do
                                 )
                         end
                 else
-                        stopVehicleTroll()
+                        stopPlayerTroll()
                 end
         end
 
-        VehicleTroll.refresh = refreshVehicleTroll
+        PlayerTroll.refresh = function()
+                local myRoot = getTrollMyRoot()
+
+                if myRoot then
+                        refreshPlayerTroll(myRoot)
+                end
+        end
 end
+
 
 local function isAimTeammate(player)
         return AimlockSettings.TeamCheck
@@ -4396,12 +4846,16 @@ local function cleanup()
         stopVehicleFlyRuntime()
         VehicleFlingSettings.Enabled = false
         VehicleFlingSettings.WorkerToken += 1
-        VehicleTrollSettings.FlingEnabled = false
-        VehicleTrollSettings.LevitateEnabled = false
-        VehicleTrollSettings.StealEnabled = false
-        VehicleTrollSettings.SpinEnabled = false
+        PlayerTrollSettings.BlastEnabled = false
+        PlayerTrollSettings.MeteorEnabled = false
+        PlayerTrollSettings.SwarmEnabled = false
+        PlayerTrollSettings.CageEnabled = false
+        PlayerTrollSettings.TargetPickerEnabled = false
         pcall(function()
-                VehicleTroll.syncConnection()
+                PlayerTroll.syncConnection()
+        end)
+        pcall(function()
+                PlayerTroll.stopTargetPicker()
         end)
         VehicleSpeedBoostSettings.ActiveUntil = 0
         VehicleTeleportSettings.Enabled = false
@@ -5068,116 +5522,187 @@ VehicleTeleportSection:Toggle({
 end
 
 do
-local VehicleTrollSection = VehicleMovementTab:Section("Vehicle Troll")
+local PlayerTrollSection = FunTab:Section("Player Troll")
 
-local vehicleTrollStatusLabel = VehicleTrollSection:Paragraph({
-        Text = "Vehicle Troll off"
+local playerTrollStatusLabel = PlayerTrollSection:Paragraph({
+        Text = "Player Troll off"
 })
 
-VehicleTroll.OnStatusChanged = function(status)
-        vehicleTrollStatusLabel:Set(tostring(status or "Vehicle Troll off"))
+PlayerTroll.OnStatusChanged = function(status)
+        playerTrollStatusLabel:Set(tostring(status or "Player Troll off"))
 end
 
-VehicleTrollSection:Toggle({
-        Text = "Yeet Vehicles",
+local playerTrollTargetLabel = PlayerTrollSection:Paragraph({
+        Text = "Target: Nearest"
+})
+
+PlayerTroll.OnTargetChanged = function(name)
+        playerTrollTargetLabel:Set("Target: " .. tostring(name or "Nearest"))
+end
+
+local playerTrollPickerValue = false
+local playerTrollPickerToggle = PlayerTrollSection:Toggle({
+        Text = "Select Troll Target",
         Value = false,
         Callback = function(value)
-                VehicleTrollSettings.FlingEnabled = value and true or false
-                VehicleTroll.syncConnection()
+                playerTrollPickerValue = value and true or false
+                PlayerTroll.setPickerEnabled(playerTrollPickerValue)
         end
 })
 
-VehicleTrollSection:Slider({
-        Text = "Yeet Power",
+PlayerTroll.OnPickerEnabledChanged = function(enabled)
+        local desiredValue = enabled and true or false
+
+        if playerTrollPickerValue == desiredValue then
+                return
+        end
+
+        playerTrollPickerValue = desiredValue
+        playerTrollPickerToggle:Set(desiredValue)
+end
+
+PlayerTrollSection:Paragraph({
+        Text = "Hover a player and left-click them to set the troll target."
+})
+
+PlayerTrollSection:Button({
+        Text = "Target Nearest",
+        Callback = function()
+                PlayerTroll.setTarget("Nearest")
+        end
+})
+
+PlayerTrollSection:Toggle({
+        Text = "Target Everyone",
+        Value = false,
+        Callback = function(value)
+                PlayerTroll.setTargetEveryone(value)
+        end
+})
+
+PlayerTrollSection:Toggle({
+        Text = "Blast Players",
+        Value = false,
+        Callback = function(value)
+                PlayerTrollSettings.BlastEnabled = value and true or false
+                PlayerTroll.syncConnection()
+        end
+})
+
+PlayerTrollSection:Slider({
+        Text = "Blast Power",
         Min = 100,
         Max = 2500,
-        Value = VehicleTrollSettings.FlingPower,
+        Value = PlayerTrollSettings.BlastPower,
         Callback = function(value)
-                VehicleTrollSettings.FlingPower = value
+                PlayerTrollSettings.BlastPower = value
         end
 })
 
-VehicleTrollSection:Toggle({
-        Text = "Levitate Vehicles (UFO)",
-        Value = false,
+PlayerTrollSection:Slider({
+        Text = "Blast Cooldown",
+        Min = 0.2,
+        Max = 5,
+        Step = 0.1,
+        Value = PlayerTrollSettings.BlastCooldown,
         Callback = function(value)
-                VehicleTrollSettings.LevitateEnabled = value and true or false
-                VehicleTroll.syncConnection()
-        end
-})
-
-VehicleTrollSection:Slider({
-        Text = "Float Height",
-        Min = 10,
-        Max = 500,
-        Value = VehicleTrollSettings.FloatHeight,
-        Callback = function(value)
-                VehicleTrollSettings.FloatHeight = value
-        end
-})
-
-VehicleTrollSection:Slider({
-        Text = "Rise Speed",
-        Min = 5,
-        Max = 100,
-        Value = VehicleTrollSettings.RiseSpeed,
-        Callback = function(value)
-                VehicleTrollSettings.RiseSpeed = value
+                PlayerTrollSettings.BlastCooldown = value
         end
 })
 end
 
 do
-local VehicleTrollPowerSection = VehicleMovementTab:Section("Vehicle Troll Power")
+local PlayerTrollPowerSection = FunTab:Section("Player Troll Power")
 
-VehicleTrollPowerSection:Toggle({
-        Text = "Steal Vehicles (Follow Me)",
+PlayerTrollPowerSection:Toggle({
+        Text = "Meteor Players",
         Value = false,
         Callback = function(value)
-                VehicleTrollSettings.StealEnabled = value and true or false
-                VehicleTroll.syncConnection()
+                PlayerTrollSettings.MeteorEnabled = value and true or false
+                PlayerTroll.syncConnection()
         end
 })
 
-VehicleTrollPowerSection:Slider({
-        Text = "Follow Gap",
-        Min = 5,
+PlayerTrollPowerSection:Slider({
+        Text = "Meteor Flight Time",
+        Min = 0.5,
+        Max = 3,
+        Step = 0.1,
+        Value = PlayerTrollSettings.MeteorFlightTime,
+        Callback = function(value)
+                PlayerTrollSettings.MeteorFlightTime = value
+        end
+})
+
+PlayerTrollPowerSection:Slider({
+        Text = "Meteor Interval",
+        Min = 0.5,
+        Max = 5,
+        Step = 0.1,
+        Value = PlayerTrollSettings.MeteorInterval,
+        Callback = function(value)
+                PlayerTrollSettings.MeteorInterval = value
+        end
+})
+
+PlayerTrollPowerSection:Toggle({
+        Text = "Swarm Players",
+        Value = false,
+        Callback = function(value)
+                PlayerTrollSettings.SwarmEnabled = value and true or false
+                PlayerTroll.syncConnection()
+        end
+})
+
+PlayerTrollPowerSection:Slider({
+        Text = "Swarm Radius",
+        Min = 2,
+        Max = 12,
+        Value = PlayerTrollSettings.SwarmRadius,
+        Callback = function(value)
+                PlayerTrollSettings.SwarmRadius = value
+        end
+})
+
+PlayerTrollPowerSection:Slider({
+        Text = "Swarm Speed",
+        Min = 2,
         Max = 40,
-        Value = VehicleTrollSettings.FollowGap,
+        Value = PlayerTrollSettings.SwarmSpeed,
         Callback = function(value)
-                VehicleTrollSettings.FollowGap = value
+                PlayerTrollSettings.SwarmSpeed = value
         end
 })
 
-VehicleTrollPowerSection:Toggle({
-        Text = "Spin Vehicles (Beyblade)",
+PlayerTrollPowerSection:Toggle({
+        Text = "Cage Players",
         Value = false,
         Callback = function(value)
-                VehicleTrollSettings.SpinEnabled = value and true or false
-                VehicleTroll.syncConnection()
+                PlayerTrollSettings.CageEnabled = value and true or false
+                PlayerTroll.syncConnection()
         end
 })
 
-VehicleTrollPowerSection:Slider({
-        Text = "Spin Power",
-        Min = 5,
-        Max = 150,
-        Value = VehicleTrollSettings.SpinPower,
+PlayerTrollPowerSection:Slider({
+        Text = "Cage Size",
+        Min = 4,
+        Max = 15,
+        Value = PlayerTrollSettings.CageSize,
         Callback = function(value)
-                VehicleTrollSettings.SpinPower = value
+                PlayerTrollSettings.CageSize = value
         end
 })
 
-VehicleTrollPowerSection:Slider({
-        Text = "Vehicle Scan Range",
+PlayerTrollPowerSection:Slider({
+        Text = "Scan Range",
         Min = 20,
-        Max = 200,
-        Value = VehicleTrollSettings.ScanRadius,
+        Max = 300,
+        Value = PlayerTrollSettings.ScanRadius,
         Callback = function(value)
-                VehicleTrollSettings.ScanRadius = value
+                PlayerTrollSettings.ScanRadius = value
 
-                if VehicleTrollSettings.Connection then
-                        VehicleTrollSettings.NextRescan = 0
+                if PlayerTrollSettings.Connection then
+                        PlayerTrollSettings.NextRescan = 0
                 end
         end
 })
