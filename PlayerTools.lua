@@ -4801,10 +4801,6 @@ end
 do
 local RingPowerSection = FunTab:Section("Chaos Power")
 
-RingPowerSection:Paragraph({
-        Text = "Every part gets a real physics order every frame - velocity only, never CFrame, so whatever swarms around you on your screen swarms around you on the server too. There is no cap on how many parts get pulled and no cap on how hard they get pulled: the yank is completely raw, so parts slam in at whatever speed physics allows instead of gliding in. Pull Strength sets the violence of that yank - low values drift parts in loosely, high values over-correct into a hard snap - and Speed drives how fast the swarm moves. Parts the server still holds wait in place and snap into the chaos the moment their physics reaches your client, so walk near parts to sweep them up."
-})
-
 RingPowerSection:Slider({
         Text = "Pull Strength",
         Min = 1,
@@ -5074,10 +5070,6 @@ end
 do
 local VehicleTrollSection = VehicleMovementTab:Section("Vehicle Troll")
 
-VehicleTrollSection:Paragraph({
-        Text = "Yeet and levitate other players' vehicles with real physics. Cars with a driver seated are simulated on the driver's machine - they stay armed here, and the exact frame that driver steps out, the car snaps under your control."
-})
-
 local vehicleTrollStatusLabel = VehicleTrollSection:Paragraph({
         Text = "Vehicle Troll off"
 })
@@ -5137,10 +5129,6 @@ end
 
 do
 local VehicleTrollPowerSection = VehicleMovementTab:Section("Vehicle Troll Power")
-
-VehicleTrollPowerSection:Paragraph({
-        Text = "Steal makes every empty car in range form a trail behind you and chase you across the map; Spin stacks beyblade rotation on top of any other mode; the scan range sets how far the engine reaches. Everything is velocity orders only, never CFrame, so whatever these cars do on your screen they do on the server for everyone - and all four modes can run at once."
-})
 
 VehicleTrollPowerSection:Toggle({
         Text = "Steal Vehicles (Follow Me)",
