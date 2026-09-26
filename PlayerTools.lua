@@ -112,7 +112,26 @@ local PartRingSettings = {
         ErrorCount = 0
 }
 
+local HeadHoverSettings = {
+        Enabled = false,
+        SelectedRoot = nil,
+        HoveredRoot = nil,
+        HoverHeight = 6,
+        PullStrength = 60,
+        Stabilize = true,
+        PickerHighlight = nil,
+        HoldHighlight = nil,
+        PickerRenderConnection = nil,
+        PickerInputConnection = nil,
+        Connection = nil,
+        CollisionStates = setmetatable({}, {__mode = "k"}),
+        LastStatus = nil,
+        ErrorCount = 0
+}
+
 local PartRing = {}
+
+local HeadHover = {}
 
 local AimlockSettings = {
         Enabled = false,
@@ -557,6 +576,10 @@ do
                 if VehicleSettings.CurrentModel
                         and VehicleSettings.CurrentModel.Parent
                         and part:IsDescendantOf(VehicleSettings.CurrentModel) then
+                        return false
+                end
+
+                if HeadHoverSettings.SelectedRoot == part then
                         return false
                 end
 
@@ -1236,6 +1259,532 @@ do
                 )
         end
 
+end
+
+do
+        -- ============================================================
+        -- Object Hover: click a loose object to pin it above your
+        -- head. Same physics contract as Chaos - no CFrame anywhere,
+        -- one exact-landing velocity order every frame, ownership-
+        -- greedy (a server-owned object ignores the order until Roblox
+        -- hands this client the simulation, then it flies up and stays
+        -- pinned). The green mouse-over highlight only ever appears on
+        -- objects that pass the lift rules, so what glows is what can
+        -- actually be held; everything else never lights up.
+        -- ============================================================
+
+        local function updateHeadHoverStatus(text)
+                local message = tostring(text or "Object Hover off")
+
+                if HeadHoverSettings.LastStatus == message then
+                        return
+                end
+
+                HeadHoverSettings.LastStatus = message
+
+                if type(HeadHover.OnStatusChanged) == "function" then
+                        pcall(HeadHover.OnStatusChanged, message)
+                end
+        end
+
+        local function hasHoverDisallowedAncestor(part)
+                local current = part
+
+                while current and current ~= Workspace do
+                        if current:IsA("Tool") then
+                                return true
+                        end
+
+                        if current:IsA("Model")
+                                and current:FindFirstChildOfClass("Humanoid") then
+                                return true
+                        end
+
+                        current = current.Parent
+                end
+
+                return false
+        end
+
+        local function canHoverRoot(root)
+                if not root
+                        or not root:IsA("BasePart")
+                        or not root.Parent
+                        or root.Anchored
+                        or root:IsA("Seat")
+                        or root:IsA("VehicleSeat")
+                        or root.AssemblyRootPart ~= root then
+                        return false
+                end
+
+                if LocalPlayer.Character and root:IsDescendantOf(LocalPlayer.Character) then
+                        return false
+                end
+
+                if VehicleSettings.CurrentModel
+                        and VehicleSettings.CurrentModel.Parent
+                        and root:IsDescendantOf(VehicleSettings.CurrentModel) then
+                        return false
+                end
+
+                for _, ringPart in ipairs(PartRingSettings.Parts) do
+                        if ringPart == root then
+                                return false
+                        end
+                end
+
+                if hasHoverDisallowedAncestor(root) then
+                        return false
+                end
+
+                local maximumAssemblyMass = math.clamp(
+                        tonumber(PartRingSettings.MaximumAssemblyMass) or 5000000,
+                        1,
+                        10000000
+                )
+                local maximumAssemblySize = math.clamp(
+                        tonumber(PartRingSettings.MaximumAssemblySize) or 300,
+                        1,
+                        10000
+                )
+
+                if root.AssemblyMass > maximumAssemblyMass
+                        or root.Size.Magnitude > maximumAssemblySize then
+                        return false
+                end
+
+                return true
+        end
+
+        local function getHoverAssemblyParts(root)
+                local parts = {}
+                local seen = {}
+
+                local function addPart(part)
+                        if not part
+                                or not part:IsA("BasePart")
+                                or not part.Parent
+                                or seen[part]
+                                or part.AssemblyRootPart ~= root then
+                                return
+                        end
+
+                        seen[part] = true
+                        table.insert(parts, part)
+                end
+
+                addPart(root)
+
+                pcall(function()
+                        for _, part in ipairs(root:GetConnectedParts(true)) do
+                                addPart(part)
+                        end
+                end)
+
+                return parts
+        end
+
+        local function clearHoverHighlight()
+                local highlight = HeadHoverSettings.PickerHighlight
+                HeadHoverSettings.PickerHighlight = nil
+                HeadHoverSettings.HoveredRoot = nil
+
+                if highlight and highlight.Parent then
+                        pcall(function()
+                                highlight:Destroy()
+                        end)
+                end
+        end
+
+        local function showHoverHighlight(root)
+                local highlight = HeadHoverSettings.PickerHighlight
+
+                if not highlight or not highlight.Parent then
+                        highlight = Instance.new("Highlight")
+                        highlight.Name = "__PlayerToolsHeadHoverPick"
+                        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                        highlight.FillColor = Color3.fromRGB(64, 205, 98)
+                        highlight.FillTransparency = 0.72
+                        highlight.OutlineColor = Color3.fromRGB(120, 255, 160)
+                        highlight.OutlineTransparency = 0.05
+                        highlight.Parent = Workspace
+                        HeadHoverSettings.PickerHighlight = highlight
+                end
+
+                highlight.Adornee = root
+                highlight.Enabled = true
+        end
+
+        local function clearHoldHighlight()
+                local highlight = HeadHoverSettings.HoldHighlight
+                HeadHoverSettings.HoldHighlight = nil
+
+                if highlight and highlight.Parent then
+                        pcall(function()
+                                highlight:Destroy()
+                        end)
+                end
+        end
+
+        local function showHoldHighlight(root)
+                local highlight = HeadHoverSettings.HoldHighlight
+
+                if not highlight or not highlight.Parent then
+                        highlight = Instance.new("Highlight")
+                        highlight.Name = "__PlayerToolsHeadHoverHold"
+                        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                        highlight.FillColor = Color3.fromRGB(64, 170, 255)
+                        highlight.FillTransparency = 0.78
+                        highlight.OutlineColor = Color3.fromRGB(140, 210, 255)
+                        highlight.OutlineTransparency = 0.05
+                        highlight.Parent = Workspace
+                        HeadHoverSettings.HoldHighlight = highlight
+                end
+
+                highlight.Adornee = root
+                highlight.Enabled = true
+        end
+
+        local function restoreHoverPart(root)
+                -- Hand the object back to the world: collisions return,
+                -- velocity stays whatever the hold left it with, and
+                -- gravity takes it from there - a real drop, not a snap.
+                if not root then
+                        return
+                end
+
+                for _, part in ipairs(getHoverAssemblyParts(root)) do
+                        local originalCollision = HeadHoverSettings.CollisionStates[part]
+
+                        if part and part.Parent then
+                                pcall(function()
+                                        if originalCollision ~= nil then
+                                                part.CanCollide = originalCollision
+                                        end
+                                end)
+                        end
+
+                        HeadHoverSettings.CollisionStates[part] = nil
+                end
+        end
+
+        local function releaseHeadHover(message)
+                local root = HeadHoverSettings.SelectedRoot
+                HeadHoverSettings.SelectedRoot = nil
+                HeadHoverSettings.ErrorCount = 0
+
+                if root then
+                        restoreHoverPart(root)
+                end
+
+                clearHoldHighlight()
+                updateHeadHoverStatus(message or "Released - click an object")
+        end
+
+        local function selectHoverRoot(root)
+                local previous = HeadHoverSettings.SelectedRoot
+
+                if previous and previous ~= root then
+                        restoreHoverPart(previous)
+                end
+
+                HeadHoverSettings.SelectedRoot = root
+                HeadHoverSettings.ErrorCount = 0
+
+                for _, part in ipairs(getHoverAssemblyParts(root)) do
+                        if HeadHoverSettings.CollisionStates[part] == nil then
+                                HeadHoverSettings.CollisionStates[part] = part.CanCollide
+                        end
+
+                        pcall(function()
+                                part.CanCollide = false
+                        end)
+                end
+
+                showHoldHighlight(root)
+                updateHeadHoverStatus(
+                        "Holding: " .. tostring(root.Name):sub(1, 32)
+                )
+        end
+
+        local function getHeadHoverTarget()
+                local camera = Workspace.CurrentCamera
+
+                if not camera then
+                        return nil
+                end
+
+                local mouseLocation = UserInputService:GetMouseLocation()
+                local unitRay = camera:ScreenPointToRay(mouseLocation.X, mouseLocation.Y)
+                local filter = {}
+
+                if LocalPlayer.Character then
+                        table.insert(filter, LocalPlayer.Character)
+                end
+
+                local held = HeadHoverSettings.SelectedRoot
+
+                if held and held.Parent then
+                        table.insert(filter, held)
+
+                        pcall(function()
+                                for _, connected in ipairs(held:GetConnectedParts(true)) do
+                                        if connected.Parent then
+                                                table.insert(filter, connected)
+                                        end
+                                end
+                        end)
+                end
+
+                local params = RaycastParams.new()
+                params.FilterType = Enum.RaycastFilterType.Exclude
+                params.FilterDescendantsInstances = filter
+                params.IgnoreWater = false
+
+                local result = Workspace:Raycast(
+                        unitRay.Origin,
+                        unitRay.Direction * 10000,
+                        params
+                )
+                local part = result and result.Instance
+
+                if not part or not part:IsA("BasePart") then
+                        return nil
+                end
+
+                local root = part.AssemblyRootPart
+
+                if not canHoverRoot(root) then
+                        return nil
+                end
+
+                return root
+        end
+
+        local function updateHeadHoverPicker()
+                if not running or not HeadHoverSettings.Enabled then
+                        return
+                end
+
+                local root = getHeadHoverTarget()
+                HeadHoverSettings.HoveredRoot = root
+
+                if root then
+                        showHoverHighlight(root)
+                else
+                        clearHoverHighlight()
+                end
+        end
+
+        local function applyHoverPlacement(root, targetNow, stepTime, pullGain, carry)
+                -- Exact-landing hold with a static slot: land on the point
+                -- above the head after one physics step, gravity included.
+                -- Same uncapped correction as Chaos - no approach cap, no
+                -- speed ceiling - and the carry term keeps the object
+                -- tracking the head while walking or flying.
+                local currentPosition = root.Position
+                local residual = targetNow - currentPosition
+                local correction = residual / stepTime * pullGain
+                        + Vector3.new(0, 0.5 * Workspace.Gravity * stepTime, 0)
+
+                root.AssemblyLinearVelocity = correction + carry
+
+                if HeadHoverSettings.Stabilize then
+                        root.AssemblyAngularVelocity = Vector3.zero
+                end
+
+                return currentPosition
+        end
+
+        local function updateHeadHover(deltaTime)
+                if not running or not HeadHoverSettings.Enabled then
+                        return
+                end
+
+                local root = HeadHoverSettings.SelectedRoot
+
+                if not root then
+                        updateHeadHoverStatus("Enabled - click an object")
+                        return
+                end
+
+                if not canHoverRoot(root) then
+                        releaseHeadHover("Object lost")
+                        return
+                end
+
+                local character = LocalPlayer.Character
+                local head = character and character:FindFirstChild("Head")
+
+                if not head or not head.Parent or not head:IsA("BasePart") then
+                        releaseHeadHover("Character unavailable - object dropped")
+                        return
+                end
+
+                local stepTime = math.clamp(tonumber(deltaTime) or 0, 0, 0.1)
+
+                if stepTime < 0.0001 then
+                        return
+                end
+
+                local hoverHeight = math.clamp(
+                        tonumber(HeadHoverSettings.HoverHeight) or 6,
+                        1,
+                        40
+                )
+                local pullStrength = math.clamp(
+                        tonumber(HeadHoverSettings.PullStrength) or 60,
+                        1,
+                        100
+                )
+                local pullGain = 0.5 + pullStrength * 0.014
+
+                local headPosition = head.Position
+
+                if headPosition.X ~= headPosition.X
+                        or headPosition.Y ~= headPosition.Y
+                        or headPosition.Z ~= headPosition.Z then
+                        return
+                end
+
+                local targetNow = headPosition + Vector3.new(0, hoverHeight, 0)
+                local carry = head.AssemblyLinearVelocity * 0.5
+
+                if carry.X ~= carry.X
+                        or carry.Y ~= carry.Y
+                        or carry.Z ~= carry.Z then
+                        carry = Vector3.zero
+                elseif carry.Magnitude > 250 then
+                        carry = carry.Unit * 250
+                end
+
+                local ok = pcall(
+                        applyHoverPlacement,
+                        root,
+                        targetNow,
+                        stepTime,
+                        pullGain,
+                        carry
+                )
+
+                if not ok then
+                        HeadHoverSettings.ErrorCount = HeadHoverSettings.ErrorCount + 1
+
+                        if HeadHoverSettings.ErrorCount >= 30 then
+                                releaseHeadHover("Object unwritable - dropped")
+                        end
+
+                        return
+                end
+
+                HeadHoverSettings.ErrorCount = 0
+
+                local slotError = (root.Position - targetNow).Magnitude
+
+                if slotError ~= slotError then
+                        slotError = math.huge
+                end
+
+                if slotError <= 2.5 then
+                        updateHeadHoverStatus(
+                                "Holding: " .. tostring(root.Name):sub(1, 32)
+                        )
+                else
+                        updateHeadHoverStatus(
+                                "Holding: "
+                                        .. tostring(root.Name):sub(1, 32)
+                                        .. " (waiting on physics)"
+                        )
+                end
+        end
+
+        local function stopHeadHover()
+                disconnect(HeadHoverSettings.Connection)
+                HeadHoverSettings.Connection = nil
+                disconnect(HeadHoverSettings.PickerRenderConnection)
+                HeadHoverSettings.PickerRenderConnection = nil
+                disconnect(HeadHoverSettings.PickerInputConnection)
+                HeadHoverSettings.PickerInputConnection = nil
+
+                releaseHeadHover("Object Hover off")
+                clearHoverHighlight()
+                HeadHoverSettings.ErrorCount = 0
+        end
+
+        HeadHover.release = function()
+                if not HeadHoverSettings.Enabled then
+                        return
+                end
+
+                releaseHeadHover("Released - click an object")
+        end
+
+        HeadHover.setEnabled = function(value)
+                local enabled = value and true or false
+
+                stopHeadHover()
+                HeadHoverSettings.Enabled = enabled
+
+                if type(HeadHover.OnEnabledChanged) == "function" then
+                        pcall(HeadHover.OnEnabledChanged, enabled)
+                end
+
+                if not enabled then
+                        return
+                end
+
+                updateHeadHoverStatus("Enabled - click an object")
+
+                HeadHoverSettings.PickerRenderConnection = RunService.RenderStepped:Connect(
+                        function()
+                                local ok, err = pcall(updateHeadHoverPicker)
+
+                                if not ok then
+                                        updateHeadHoverStatus(
+                                                "Picker error: "
+                                                        .. tostring(err):sub(1, 80)
+                                        )
+                                end
+                        end
+                )
+
+                HeadHoverSettings.PickerInputConnection = UserInputService.InputBegan:Connect(
+                        function(input, gameProcessedEvent)
+                                if gameProcessedEvent
+                                        or not running
+                                        or not HeadHoverSettings.Enabled
+                                        or UserInputService:GetFocusedTextBox() then
+                                        return
+                                end
+
+                                if input.UserInputType ~= Enum.UserInputType.MouseButton1
+                                        and input.UserInputType ~= Enum.UserInputType.Touch then
+                                        return
+                                end
+
+                                local root = HeadHoverSettings.HoveredRoot
+                                        or getHeadHoverTarget()
+
+                                if root and canHoverRoot(root) then
+                                        selectHoverRoot(root)
+                                end
+                        end
+                )
+
+                HeadHoverSettings.Connection = RunService.Heartbeat:Connect(
+                        function(stepTime)
+                                local ok, err = pcall(updateHeadHover, stepTime)
+
+                                if ok then
+                                        return
+                                end
+
+                                updateHeadHoverStatus(
+                                        "Engine error: " .. tostring(err):sub(1, 80)
+                                )
+                        end
+                )
+        end
 end
 
 local function isAimTeammate(player)
@@ -3867,6 +4416,10 @@ local function cleanup()
         PartRingSettings.TargetPickerEnabled = false
         PartRing.stop()
         PartRing.stopTargetPicker()
+        HeadHoverSettings.Enabled = false
+        pcall(function()
+                HeadHover.setEnabled(false)
+        end)
         clearPlatform()
         clearNoclip()
         FlingSettings.Enabled = false
@@ -4327,6 +4880,78 @@ RingPowerSection:Slider({
 
 RingPowerSection:Paragraph({
         Text = "Release Fling: 0 freezes parts on release, 1 keeps their orbit momentum, 2-5 flings them outward with extra force."
+})
+end
+
+do
+local ObjectHoverSection = FunTab:Section("Object Hover")
+
+local objectHoverStatusLabel = ObjectHoverSection:Paragraph({
+        Text = "Object Hover off"
+})
+
+HeadHover.OnStatusChanged = function(status)
+        objectHoverStatusLabel:Set(tostring(status or "Object Hover off"))
+end
+
+local headHoverToggleValue = false
+local headHoverToggle = ObjectHoverSection:Toggle({
+        Text = "Enable Object Hover",
+        Value = false,
+        Callback = function(value)
+                headHoverToggleValue = value and true or false
+                HeadHover.setEnabled(headHoverToggleValue)
+        end
+})
+
+HeadHover.OnEnabledChanged = function(enabled)
+        local desiredValue = enabled and true or false
+
+        if headHoverToggleValue == desiredValue then
+                return
+        end
+
+        headHoverToggleValue = desiredValue
+        headHoverToggle:Set(desiredValue)
+end
+
+ObjectHoverSection:Button({
+        Text = "Release Object",
+        Callback = function()
+                HeadHover.release()
+        end
+})
+
+ObjectHoverSection:Slider({
+        Text = "Hover Height",
+        Min = 2,
+        Max = 20,
+        Value = HeadHoverSettings.HoverHeight,
+        Callback = function(value)
+                HeadHoverSettings.HoverHeight = value
+        end
+})
+
+ObjectHoverSection:Slider({
+        Text = "Pull Strength",
+        Min = 1,
+        Max = 100,
+        Value = HeadHoverSettings.PullStrength,
+        Callback = function(value)
+                HeadHoverSettings.PullStrength = value
+        end
+})
+
+ObjectHoverSection:Toggle({
+        Text = "Stabilize Spin",
+        Value = true,
+        Callback = function(value)
+                HeadHoverSettings.Stabilize = value and true or false
+        end
+})
+
+ObjectHoverSection:Paragraph({
+        Text = "Green objects can be held. Click one to pin it over your head."
 })
 end
 
