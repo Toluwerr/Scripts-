@@ -101,6 +101,7 @@ local PartRingSettings = {
         MaximumAssemblySize = 300,
         ReleasePower = 1,
         RescanInterval = 0.4,
+        MaxParts = 300,
         Parts = {},
         PartStates = setmetatable({}, {__mode = "k"}),
         Connection = nil,
@@ -119,12 +120,14 @@ local HeadHoverSettings = {
         HoverHeight = 6,
         PullStrength = 60,
         Stabilize = true,
-        PickerHighlight = nil,
-        HoldHighlight = nil,
+        PickerHighlights = {},
+        HoldHighlights = {},
         PickerRenderConnection = nil,
         PickerInputConnection = nil,
         Connection = nil,
         CollisionStates = setmetatable({}, {__mode = "k"}),
+        NextAssemblyRefresh = 0,
+        SuppressClickUntil = 0,
         LastStatus = nil,
         ErrorCount = 0
 }
@@ -504,7 +507,8 @@ do
                                         return
                                 end
 
-                                if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+                                if input.UserInputType ~= Enum.UserInputType.MouseButton1
+                                        and input.UserInputType ~= Enum.UserInputType.Touch then
                                         return
                                 end
 
@@ -512,6 +516,11 @@ do
                                         or PartRing.getHoveredPlayer()
 
                                 if player then
+                                        -- Object Hover listens for the same click;
+                                        -- suppress it briefly so it does not
+                                        -- grab a random part behind the victim,
+                                        -- regardless of handler order.
+                                        HeadHoverSettings.SuppressClickUntil = os.clock() + 0.1
                                         PartRing.setTarget(player)
                                         PartRing.setPickerEnabled(false)
                                 end
@@ -558,7 +567,20 @@ do
         end
 
 
-        local function canRingPart(part, targetRoot)
+        local function getPartRingKeepLimit(radius)
+                -- A commanded slot can sit farther out than the scan ring:
+                -- chaos orbits reach radius * 1.7 plus wobble, so the
+                -- keep/drop distance must respect the widest orbit the
+                -- engine can order. Without this, big-radius setups
+                -- order parts to slots outside the old drop limit and
+                -- churn them in and out of the ring forever.
+                return math.max(
+                        getPartRingSearchRadius() * 1.02,
+                        radius * 1.75 + 10
+                )
+        end
+
+        local function canRingPart(part, targetRoot, distanceLimit)
                 if not part
                         or not part:IsA("BasePart")
                         or not part.Parent
@@ -604,7 +626,7 @@ do
                 end
 
                 return (part.Position - targetRoot.Position).Magnitude
-                        <= getPartRingSearchRadius()
+                        <= (distanceLimit or getPartRingSearchRadius())
         end
 
         local function getPartRingAssemblyParts(root)
@@ -666,6 +688,12 @@ do
                         FailCount = 0,
                         PrevPos = nil,
                         LastSlot = nil,
+                        -- Freshly captured parts fly in on an over-corrected
+                        -- arc that can overshoot the slot by a third of the
+                        -- distance (or swing wildly at pull 100). Distance
+                        -- drops are suspended for the first second so the
+                        -- capture arc itself never churns the part back out.
+                        GraceUntil = os.clock() + 1,
                         RadiusScale = 0.3 + math.random() * 1.4,
                         HeightOffset = (math.random() - 0.5) * 10,
                         SpeedScale = 0.45 + math.random() * 1.3,
@@ -763,16 +791,24 @@ do
                 end
         end
 
-        local function isPartRingViable(part, targetRoot, distanceLimit)
+        local function isPartRingViable(part, targetRoot, distanceLimit, inGrace)
                 -- Cheap per-frame validity. The full rule set runs at rescan
                 -- time; this only catches the ways a part can die between
-                -- rescans: destroyed, merged into another assembly, flung out
-                -- of range, or corrupted to a NaN position (NaN fails every
-                -- comparison, so it drops out automatically).
+                -- rescans: destroyed, anchored by a server script mid-ring,
+                -- merged into another assembly, flung out of range, or
+                -- corrupted to a NaN position (NaN fails every comparison,
+                -- so it drops out automatically). A part still inside its
+                -- capture grace window skips the distance test - its
+                -- over-corrected fly-in arc is allowed to overshoot.
                 if not part
                         or not part.Parent
+                        or part.Anchored
                         or part.AssemblyRootPart ~= part then
                         return false
+                end
+
+                if inGrace then
+                        return true
                 end
 
                 local offset = part.Position - targetRoot.Position
@@ -883,7 +919,16 @@ do
                 end
 
                 overlap.FilterDescendantsInstances = filter
-                overlap.MaxParts = 0
+
+                local maxParts = math.clamp(
+                        tonumber(PartRingSettings.MaxParts) or 300,
+                        10,
+                        2000
+                )
+
+                -- Bound the query itself: on absurdly dense maps the overlap
+                -- scan alone can return tens of thousands of parts.
+                overlap.MaxParts = math.clamp(maxParts + 200, 100, 4000)
 
                 local nearby = {}
 
@@ -916,11 +961,37 @@ do
 
                 local nextParts = {}
                 local selected = {}
+                local radius = math.clamp(
+                        tonumber(PartRingSettings.Radius) or 12,
+                        3,
+                        150
+                )
+                local keepLimit = getPartRingKeepLimit(radius)
 
                 for _, part in ipairs(PartRingSettings.Parts) do
                         if candidateSet[part] then
                                 selected[part] = true
                                 table.insert(nextParts, part)
+                        elseif part and part.Parent then
+                                local state = PartRingSettings.PartStates[part]
+
+                                if state and (state.GraceUntil or 0) > now then
+                                        -- Still inside its capture grace window:
+                                        -- flying in, possibly on a wide
+                                        -- over-corrected arc. Keep commanding.
+                                        selected[part] = true
+                                        table.insert(nextParts, part)
+                                elseif canRingPart(part, targetRoot, keepLimit) then
+                                        -- Held on a slot beyond the scan ring
+                                        -- (big-radius chaos orbits): keep
+                                        -- commanding it instead of churn-
+                                        -- dropping it every rescan. Every
+                                        -- other capture rule still applies.
+                                        selected[part] = true
+                                        table.insert(nextParts, part)
+                                else
+                                        restorePartRingPart(part)
+                                end
                         else
                                 restorePartRingPart(part)
                         end
@@ -934,6 +1005,20 @@ do
                 end
 
                 PartRingSettings.Parts = nextParts
+
+                if #nextParts > maxParts then
+                        -- Cap the swarm: keep the parts nearest the target
+                        -- and hand the overflow back to the world.
+                        table.sort(nextParts, function(first, second)
+                                return (first.Position - targetRoot.Position).Magnitude
+                                        < (second.Position - targetRoot.Position).Magnitude
+                        end)
+
+                        for index = #nextParts, maxParts + 1, -1 do
+                                restorePartRingPart(nextParts[index])
+                                nextParts[index] = nil
+                        end
+                end
 
                 for _, part in ipairs(nextParts) do
                         preparePartForRing(part)
@@ -977,7 +1062,12 @@ do
                 end
 
                 local parts = PartRingSettings.Parts
-                local searchLimit = getPartRingSearchRadius() * 1.02
+                local radius = math.clamp(
+                        tonumber(PartRingSettings.Radius) or 12,
+                        3,
+                        150
+                )
+                local searchLimit = getPartRingKeepLimit(radius)
                 local removedAny = false
 
                 -- The only reasons a part ever leaves the ring are physical:
@@ -997,9 +1087,16 @@ do
                         else
                                 local failedTooOften = state ~= nil
                                         and (state.FailCount or 0) >= 30
+                                local inGrace = state ~= nil
+                                        and (state.GraceUntil or 0) > now
 
                                 if failedTooOften
-                                        or not isPartRingViable(part, targetRoot, searchLimit) then
+                                        or not isPartRingViable(
+                                                part,
+                                                targetRoot,
+                                                searchLimit,
+                                                inGrace
+                                        ) then
                                         restorePartRingPart(part)
 
                                         if failedTooOften then
@@ -1022,11 +1119,6 @@ do
                         return
                 end
 
-                local radius = math.clamp(
-                        tonumber(PartRingSettings.Radius) or 12,
-                        3,
-                        150
-                )
                 local height = math.clamp(
                         tonumber(PartRingSettings.Height) or 4,
                         -10,
@@ -1384,78 +1476,109 @@ do
                 return parts
         end
 
-        local function clearHoverHighlight()
-                local highlight = HeadHoverSettings.PickerHighlight
-                HeadHoverSettings.PickerHighlight = nil
-                HeadHoverSettings.HoveredRoot = nil
+        local MAX_HOVER_GLOW_PARTS = 40
 
-                if highlight and highlight.Parent then
-                        pcall(function()
-                                highlight:Destroy()
-                        end)
+        local function destroyHighlightList(list)
+                for index = #list, 1, -1 do
+                        local highlight = list[index]
+                        list[index] = nil
+
+                        if highlight and highlight.Parent then
+                                pcall(function()
+                                        highlight:Destroy()
+                                end)
+                        end
                 end
+        end
+
+        local function showHighlightList(
+                root,
+                list,
+                name,
+                fillColor,
+                outlineColor,
+                fillTransparency
+        )
+                -- A Highlight adorned to a single BasePart only ever glows
+                -- that one part, so a welded model would look unliftable
+                -- even though the whole assembly is grabbed. Instead the
+                -- glow is spread across every part of the assembly (capped,
+                -- so a 500-part assembly does not spawn 500 highlights).
+                local parts = getHoverAssemblyParts(root)
+                local count = math.min(#parts, MAX_HOVER_GLOW_PARTS)
+
+                while #list > count do
+                        local highlight = table.remove(list)
+
+                        if highlight and highlight.Parent then
+                                pcall(function()
+                                        highlight:Destroy()
+                                end)
+                        end
+                end
+
+                for index = 1, count do
+                        local highlight = list[index]
+
+                        if not highlight or not highlight.Parent then
+                                highlight = Instance.new("Highlight")
+                                highlight.Name = name
+                                highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                                highlight.FillColor = fillColor
+                                highlight.FillTransparency = fillTransparency
+                                highlight.OutlineColor = outlineColor
+                                highlight.OutlineTransparency = 0.05
+                                highlight.Parent = Workspace
+                                list[index] = highlight
+                        end
+
+                        highlight.Adornee = parts[index]
+                        highlight.Enabled = true
+                end
+        end
+
+        local function clearHoverHighlight()
+                destroyHighlightList(HeadHoverSettings.PickerHighlights)
+                HeadHoverSettings.HoveredRoot = nil
         end
 
         local function showHoverHighlight(root)
-                local highlight = HeadHoverSettings.PickerHighlight
-
-                if not highlight or not highlight.Parent then
-                        highlight = Instance.new("Highlight")
-                        highlight.Name = "__PlayerToolsHeadHoverPick"
-                        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                        highlight.FillColor = Color3.fromRGB(64, 205, 98)
-                        highlight.FillTransparency = 0.72
-                        highlight.OutlineColor = Color3.fromRGB(120, 255, 160)
-                        highlight.OutlineTransparency = 0.05
-                        highlight.Parent = Workspace
-                        HeadHoverSettings.PickerHighlight = highlight
-                end
-
-                highlight.Adornee = root
-                highlight.Enabled = true
+                showHighlightList(
+                        root,
+                        HeadHoverSettings.PickerHighlights,
+                        "__PlayerToolsHeadHoverPick",
+                        Color3.fromRGB(64, 205, 98),
+                        Color3.fromRGB(120, 255, 160),
+                        0.72
+                )
         end
 
         local function clearHoldHighlight()
-                local highlight = HeadHoverSettings.HoldHighlight
-                HeadHoverSettings.HoldHighlight = nil
-
-                if highlight and highlight.Parent then
-                        pcall(function()
-                                highlight:Destroy()
-                        end)
-                end
+                destroyHighlightList(HeadHoverSettings.HoldHighlights)
         end
 
         local function showHoldHighlight(root)
-                local highlight = HeadHoverSettings.HoldHighlight
-
-                if not highlight or not highlight.Parent then
-                        highlight = Instance.new("Highlight")
-                        highlight.Name = "__PlayerToolsHeadHoverHold"
-                        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                        highlight.FillColor = Color3.fromRGB(64, 170, 255)
-                        highlight.FillTransparency = 0.78
-                        highlight.OutlineColor = Color3.fromRGB(140, 210, 255)
-                        highlight.OutlineTransparency = 0.05
-                        highlight.Parent = Workspace
-                        HeadHoverSettings.HoldHighlight = highlight
-                end
-
-                highlight.Adornee = root
-                highlight.Enabled = true
+                showHighlightList(
+                        root,
+                        HeadHoverSettings.HoldHighlights,
+                        "__PlayerToolsHeadHoverHold",
+                        Color3.fromRGB(64, 170, 255),
+                        Color3.fromRGB(140, 210, 255),
+                        0.78
+                )
         end
 
-        local function restoreHoverPart(root)
+        local function restoreHoverPart()
                 -- Hand the object back to the world: collisions return,
                 -- velocity stays whatever the hold left it with, and
                 -- gravity takes it from there - a real drop, not a snap.
-                if not root then
-                        return
-                end
-
-                for _, part in ipairs(getHoverAssemblyParts(root)) do
-                        local originalCollision = HeadHoverSettings.CollisionStates[part]
-
+                -- Restoration runs over EVERY part that was ever made
+                -- non-collide during the hold, not just the parts still
+                -- welded to the root: a piece that broke off mid-hold
+                -- (server unwelds it, assembly splits) must get its
+                -- collision back too, or it would fall through the floor
+                -- forever.
+                for part, originalCollision in pairs(HeadHoverSettings.CollisionStates) do
                         if part and part.Parent then
                                 pcall(function()
                                         if originalCollision ~= nil then
@@ -1463,9 +1586,9 @@ do
                                         end
                                 end)
                         end
-
-                        HeadHoverSettings.CollisionStates[part] = nil
                 end
+
+                HeadHoverSettings.CollisionStates = setmetatable({}, {__mode = "k"})
         end
 
         local function releaseHeadHover(message)
@@ -1474,7 +1597,7 @@ do
                 HeadHoverSettings.ErrorCount = 0
 
                 if root then
-                        restoreHoverPart(root)
+                        restoreHoverPart()
                 end
 
                 clearHoldHighlight()
@@ -1485,11 +1608,12 @@ do
                 local previous = HeadHoverSettings.SelectedRoot
 
                 if previous and previous ~= root then
-                        restoreHoverPart(previous)
+                        restoreHoverPart()
                 end
 
                 HeadHoverSettings.SelectedRoot = root
                 HeadHoverSettings.ErrorCount = 0
+                HeadHoverSettings.NextAssemblyRefresh = 0
 
                 for _, part in ipairs(getHoverAssemblyParts(root)) do
                         if HeadHoverSettings.CollisionStates[part] == nil then
@@ -1507,7 +1631,26 @@ do
                 )
         end
 
-        local function getHeadHoverTarget()
+        local function refreshHoverAssembly(root)
+                -- Assemblies are not static: server scripts weld new pieces
+                -- on or break old pieces off while the object is held.
+                -- Anything that joins gets the same no-collision treatment
+                -- (and is remembered for restoration); anything that leaves
+                -- was already remembered, so the drop stays clean.
+                for _, part in ipairs(getHoverAssemblyParts(root)) do
+                        if HeadHoverSettings.CollisionStates[part] == nil then
+                                HeadHoverSettings.CollisionStates[part] = part.CanCollide
+
+                                pcall(function()
+                                        part.CanCollide = false
+                                end)
+                        end
+                end
+
+                showHoldHighlight(root)
+        end
+
+        local function getHeadHoverTarget(includeHeld)
                 local camera = Workspace.CurrentCamera
 
                 if not camera then
@@ -1524,7 +1667,7 @@ do
 
                 local held = HeadHoverSettings.SelectedRoot
 
-                if held and held.Parent then
+                if held and held.Parent and not includeHeld then
                         table.insert(filter, held)
 
                         pcall(function()
@@ -1553,6 +1696,12 @@ do
                 end
 
                 local root = part.AssemblyRootPart
+
+                if root == HeadHoverSettings.SelectedRoot then
+                        -- The held assembly itself: only visible to an
+                        -- unfiltered cast (used by click-to-drop).
+                        return includeHeld and root or nil
+                end
 
                 if not canHoverRoot(root) then
                         return nil
@@ -1619,6 +1768,16 @@ do
                 if not head or not head.Parent or not head:IsA("BasePart") then
                         releaseHeadHover("Character unavailable - object dropped")
                         return
+                end
+
+                local now = os.clock()
+
+                if now >= (HeadHoverSettings.NextAssemblyRefresh or 0) then
+                        -- Pick up welds made or broken by the server while
+                        -- the object is held, so no-collide coverage and the
+                        -- hold glow always match the live assembly.
+                        HeadHoverSettings.NextAssemblyRefresh = now + 0.25
+                        refreshHoverAssembly(root)
                 end
 
                 local stepTime = math.clamp(tonumber(deltaTime) or 0, 0, 0.1)
@@ -1753,6 +1912,7 @@ do
                                 if gameProcessedEvent
                                         or not running
                                         or not HeadHoverSettings.Enabled
+                                        or PartRingSettings.TargetPickerEnabled
                                         or UserInputService:GetFocusedTextBox() then
                                         return
                                 end
@@ -1762,10 +1922,35 @@ do
                                         return
                                 end
 
+                                if os.clock() < (HeadHoverSettings.SuppressClickUntil or 0) then
+                                        -- The Chaos target picker just consumed this
+                                        -- same click; do not grab whatever happens
+                                        -- to sit behind the victim.
+                                        return
+                                end
+
+                                local held = HeadHoverSettings.SelectedRoot
+
+                                if held and held.Parent then
+                                        -- Clicking the held object itself is the
+                                        -- natural way to put it down. This needs
+                                        -- an unfiltered cast: the picker normally
+                                        -- ignores the held assembly so it can
+                                        -- select things behind it.
+                                        local clickedRoot = getHeadHoverTarget(true)
+
+                                        if clickedRoot == held then
+                                                releaseHeadHover("Dropped - click an object")
+                                                return
+                                        end
+                                end
+
                                 local root = HeadHoverSettings.HoveredRoot
                                         or getHeadHoverTarget()
 
-                                if root and canHoverRoot(root) then
+                                if root
+                                        and root ~= HeadHoverSettings.SelectedRoot
+                                        and canHoverRoot(root) then
                                         selectHoverRoot(root)
                                 end
                         end
@@ -4717,7 +4902,7 @@ local partRingTargetPickerToggle = PartRingSection:Toggle({
 })
 
 PartRingSection:Paragraph({
-        Text = "Hover a player and left-click them to set the chaos target."
+        Text = "Hover a player and click or tap them to set the chaos target."
 })
 
 PartRing.OnPickerEnabledChanged = function(enabled)
@@ -4761,6 +4946,20 @@ PartRingSection:Slider({
         Value = PartRingSettings.ScanRadius,
         Callback = function(value)
                 PartRingSettings.ScanRadius = value
+
+                if PartRingSettings.Enabled then
+                        PartRing.refresh()
+                end
+        end
+})
+
+PartRingSection:Slider({
+        Text = "Max Parts",
+        Min = 10,
+        Max = 2000,
+        Value = PartRingSettings.MaxParts,
+        Callback = function(value)
+                PartRingSettings.MaxParts = value
 
                 if PartRingSettings.Enabled then
                         PartRing.refresh()
@@ -4951,7 +5150,7 @@ ObjectHoverSection:Toggle({
 })
 
 ObjectHoverSection:Paragraph({
-        Text = "Green objects can be held. Click one to pin it over your head."
+        Text = "Green objects can be held. Click one to pin it over your head; click it again to drop it."
 })
 end
 
