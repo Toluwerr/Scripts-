@@ -202,10 +202,14 @@ local ObjectHoldSettings = {
         PickerConnection = nil,
         InputConnection = nil,
         HeartbeatConnection = nil,
+        SteppedConnection = nil,
         FollowVelocity = nil,
         LastHeadPosition = nil,
         NextGlowRefresh = 0,
         NextOwnershipAssert = 0,
+        NextWakeNudge = 0,
+        WakeToggle = false,
+        ClaimFailStreak = 0,
         ArrivingShown = false,
         ClickConsumedAt = 0,
         LastStatus = nil,
@@ -3235,6 +3239,8 @@ do
                 ObjectHoldSettings.ErrorCount = 0
                 ObjectHoldSettings.NextGlowRefresh = 0
                 ObjectHoldSettings.NextOwnershipAssert = 0
+                ObjectHoldSettings.NextWakeNudge = 0
+                ObjectHoldSettings.WakeToggle = false
                 ObjectHoldSettings.ArrivingShown = false
                 ObjectHoldSettings.HeldParts = nil
 
@@ -3420,9 +3426,16 @@ do
                 if now >= (ObjectHoldSettings.NextOwnershipAssert or 0) then
                         ObjectHoldSettings.NextOwnershipAssert = now + 1.5
 
-                        pcall(function()
+                        -- Backstop claim on the slow timer: if the
+                        -- per-step claims ever start failing, this
+                        -- keeps trying and can resurrect them.
+                        local backstopOk = pcall(function()
                                 root:SetNetworkOwner(LocalPlayer)
                         end)
+
+                        if backstopOk then
+                                ObjectHoldSettings.ClaimFailStreak = 0
+                        end
 
                         pcall(function()
                                 sethiddenproperty(
@@ -3468,6 +3481,63 @@ do
                         updateHoldStatus(
                                 "Holding: " .. tostring(root.Name):sub(1, 32)
                         )
+                end
+        end
+
+        -- Ownership override + anti-sleep watchdog, run before
+        -- every physics step. Two devforum-proven facts drive this:
+        -- (1) re-setting network ownership on RunService.Stepped
+        -- makes this client the sole owner of the part - no other
+        -- client can take control on their end, so a rider jumping
+        -- on can never steal the assembly; each step re-asserts the
+        -- claim before the solver runs. (2) A hovering assembly
+        -- held in perfect equilibrium can be put to sleep by the
+        -- engine, which freezes replication - everyone else then
+        -- sees the object stuck in the air at an old spot. Only a
+        -- real physics touch can keep an assembly in live
+        -- simulation, so a negligible alternating velocity nudge
+        -- (0.01 studs/s, cancelled by the servo within a step, zero
+        -- net drift) does exactly that.
+        local function assertHoldOwnership()
+                if not running or not ObjectHoldSettings.Enabled then
+                        return
+                end
+
+                local root = ObjectHoldSettings.Root
+
+                if not root
+                        or not root.Parent
+                        or root.Anchored then
+                        return
+                end
+
+                if (ObjectHoldSettings.ClaimFailStreak or 0) < 120 then
+                        local ok = pcall(function()
+                                root:SetNetworkOwner(LocalPlayer)
+                        end)
+
+                        if ok then
+                                ObjectHoldSettings.ClaimFailStreak = 0
+                        else
+                                ObjectHoldSettings.ClaimFailStreak += 1
+                        end
+                end
+
+                local now = os.clock()
+
+                if now >= (ObjectHoldSettings.NextWakeNudge or 0) then
+                        ObjectHoldSettings.NextWakeNudge = now + 0.25
+                        ObjectHoldSettings.WakeToggle =
+                                not ObjectHoldSettings.WakeToggle
+
+                        local nudge = ObjectHoldSettings.WakeToggle
+                                and Vector3.new(0, 0.01, 0)
+                                or Vector3.new(0, -0.01, 0)
+
+                        pcall(function()
+                                root.AssemblyLinearVelocity =
+                                        root.AssemblyLinearVelocity + nudge
+                        end)
                 end
         end
 
@@ -3569,6 +3639,8 @@ do
                 ObjectHoldSettings.InputConnection = nil
                 disconnect(ObjectHoldSettings.HeartbeatConnection)
                 ObjectHoldSettings.HeartbeatConnection = nil
+                disconnect(ObjectHoldSettings.SteppedConnection)
+                ObjectHoldSettings.SteppedConnection = nil
 
                 releaseObject("Object Hover off")
                 clearGlowList(ObjectHoldSettings.PickerHighlights)
@@ -3578,6 +3650,9 @@ do
                 ObjectHoldSettings.ErrorCount = 0
                 ObjectHoldSettings.FollowVelocity = nil
                 ObjectHoldSettings.LastHeadPosition = nil
+                ObjectHoldSettings.ClaimFailStreak = 0
+                ObjectHoldSettings.NextWakeNudge = 0
+                ObjectHoldSettings.WakeToggle = false
         end
 
         ObjectHold.release = function()
@@ -3628,6 +3703,19 @@ do
                                 if not ok then
                                         updateHoldStatus(
                                                 "Input error: "
+                                                        .. tostring(err):sub(1, 80)
+                                        )
+                                end
+                        end
+                )
+
+                ObjectHoldSettings.SteppedConnection = RunService.Stepped:Connect(
+                        function()
+                                local ok, err = pcall(assertHoldOwnership)
+
+                                if not ok then
+                                        updateHoldStatus(
+                                                "Ownership error: "
                                                         .. tostring(err):sub(1, 80)
                                         )
                                 end
