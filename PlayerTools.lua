@@ -187,6 +187,28 @@ local VehicleSpeedBoostSettings = {
         ActiveUntil = 0
 }
 
+local ObjectHoldSettings = {
+        Enabled = false,
+        Height = 6,
+        Responsiveness = 35,
+        MaxSpeed = 150,
+        Root = nil,
+        Rig = nil,
+        HoveredRoot = nil,
+        PickerRoot = nil,
+        PickerHighlights = {},
+        HoldHighlights = {},
+        PickerConnection = nil,
+        InputConnection = nil,
+        HeartbeatConnection = nil,
+        NextGlowRefresh = 0,
+        ClickConsumedAt = 0,
+        LastStatus = nil,
+        ErrorCount = 0
+}
+
+local ObjectHold = {}
+
 local Window
 local stopVehicleFlyRuntime
 local restartVehicleFly
@@ -2836,6 +2858,635 @@ local function setFlingEnabled(value)
         end)
 end
 
+do
+        -- ============================================================
+        -- Object Hover: real-physics hold built on AlignPosition and
+        -- AlignOrientation mover constraints - the modern successors
+        -- to the deprecated BodyPosition/BodyGyro movers.
+        --
+        -- How it works: grabbing an assembly attaches a small local
+        -- rig to its root part - one Attachment, one AlignPosition in
+        -- OneAttachment mode chasing a goal position above the head,
+        -- and one AlignOrientation holding the object level. The
+        -- constraints apply continuous force and the physics solver
+        -- integrates it: nothing is teleported, no velocity is
+        -- snapped, no CFrame is ever written. The object collides
+        -- with the world, supports riders (MaxForce is unlimited, so
+        -- added weight simply produces added counter-force), snags
+        -- and slides against geometry like real matter, and keeps
+        -- its momentum as a genuine toss on release.
+        --
+        -- Replication: per the official Network Ownership docs, the
+        -- engine automatically hands simulation of unanchored parts
+        -- near a player's character to that player's client, and a
+        -- client-owned assembly's simulated physics replicates to
+        -- the server and every other player. The slot floats right
+        -- above the holder's head, so ownership - and therefore
+        -- replication - is the steady state. A server-owned grab
+        -- from far away simply becomes client-owned as the object
+        -- approaches, and the hold continues seamlessly.
+        -- ============================================================
+
+        local function updateHoldStatus(text)
+                local message = tostring(text or "Object Hover off")
+
+                if ObjectHoldSettings.LastStatus == message then
+                        return
+                end
+
+                ObjectHoldSettings.LastStatus = message
+
+                if type(ObjectHold.OnStatusChanged) == "function" then
+                        pcall(ObjectHold.OnStatusChanged, message)
+                end
+        end
+
+        local function hasHoldBlockedAncestor(instance)
+                local current = instance
+
+                while current and current ~= Workspace do
+                        if current:IsA("Tool") then
+                                return true
+                        end
+
+                        if current:IsA("Model")
+                                and current:FindFirstChildOfClass("Humanoid") then
+                                return true
+                        end
+
+                        current = current.Parent
+                end
+
+                return false
+        end
+
+        local function isHoldableRoot(root)
+                if not root
+                        or not root:IsA("BasePart")
+                        or not root.Parent
+                        or root.Anchored
+                        or root:IsA("Seat")
+                        or root:IsA("VehicleSeat")
+                        or root.AssemblyRootPart ~= root then
+                        return false
+                end
+
+                if LocalPlayer.Character
+                        and root:IsDescendantOf(LocalPlayer.Character) then
+                        return false
+                end
+
+                if VehicleSettings.CurrentModel
+                        and VehicleSettings.CurrentModel.Parent
+                        and root:IsDescendantOf(VehicleSettings.CurrentModel) then
+                        return false
+                end
+
+                if hasHoldBlockedAncestor(root) then
+                        return false
+                end
+
+                return true
+        end
+
+        local function getHoldAssemblyParts(root)
+                local parts = { root }
+                local seen = { [root] = true }
+
+                pcall(function()
+                        for _, part in ipairs(root:GetConnectedParts(true)) do
+                                if part:IsA("BasePart")
+                                        and part.Parent
+                                        and not seen[part] then
+                                        seen[part] = true
+                                        table.insert(parts, part)
+                                end
+                        end
+                end)
+
+                return parts
+        end
+
+        local MAX_GLOW_PARTS = 40
+
+        local function clearGlowList(list)
+                for index = #list, 1, -1 do
+                        local highlight = list[index]
+                        list[index] = nil
+
+                        if highlight then
+                                pcall(function()
+                                        highlight:Destroy()
+                                end)
+                        end
+                end
+        end
+
+        local function glowAssembly(
+                root,
+                list,
+                name,
+                fillColor,
+                outlineColor,
+                fillTransparency
+        )
+                clearGlowList(list)
+
+                local parts = getHoldAssemblyParts(root)
+                local count = math.min(#parts, MAX_GLOW_PARTS)
+
+                for index = 1, count do
+                        local highlight = Instance.new("Highlight")
+                        highlight.Name = name
+                        highlight.Adornee = parts[index]
+                        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                        highlight.FillColor = fillColor
+                        highlight.FillTransparency = fillTransparency
+                        highlight.OutlineColor = outlineColor
+                        highlight.OutlineTransparency = 0.05
+                        highlight.Parent = Workspace
+                        list[index] = highlight
+                end
+        end
+
+        local function castForHoldTarget(includeHeld)
+                local camera = Workspace.CurrentCamera
+
+                if not camera then
+                        return nil
+                end
+
+                local mouseLocation = UserInputService:GetMouseLocation()
+                local unitRay = camera:ScreenPointToRay(
+                        mouseLocation.X,
+                        mouseLocation.Y
+                )
+                local filter = {}
+
+                if LocalPlayer.Character then
+                        table.insert(filter, LocalPlayer.Character)
+                end
+
+                local held = ObjectHoldSettings.Root
+
+                if held and held.Parent and not includeHeld then
+                        table.insert(filter, held)
+
+                        pcall(function()
+                                for _, connected in ipairs(held:GetConnectedParts(true)) do
+                                        if connected.Parent then
+                                                table.insert(filter, connected)
+                                        end
+                                end
+                        end)
+                end
+
+                local params = RaycastParams.new()
+                params.FilterType = Enum.RaycastFilterType.Exclude
+                params.FilterDescendantsInstances = filter
+                params.IgnoreWater = false
+
+                local direction = unitRay.Direction * 10000
+
+                -- Cast through anything that can never be picked: a
+                -- player standing on the liftable object eats the first
+                -- hit, so each dead end joins the filter and the ray
+                -- continues behind it.
+                for _ = 1, 6 do
+                        local result = Workspace:Raycast(
+                                unitRay.Origin,
+                                direction,
+                                params
+                        )
+                        local part = result and result.Instance
+
+                        if not part or not part:IsA("BasePart") then
+                                return nil
+                        end
+
+                        local root = part.AssemblyRootPart
+
+                        if root == ObjectHoldSettings.Root then
+                                return includeHeld and root or nil
+                        end
+
+                        if isHoldableRoot(root) then
+                                return root
+                        end
+
+                        pcall(function()
+                                table.insert(filter, root or part)
+
+                                if root and root.Parent then
+                                        for _, connected in ipairs(root:GetConnectedParts(true)) do
+                                                if connected.Parent then
+                                                        table.insert(filter, connected)
+                                                end
+                                        end
+                                end
+                        end)
+
+                        params.FilterDescendantsInstances = filter
+                end
+
+                return nil
+        end
+
+        local function computeLevelHoldCFrame(root)
+                local look = root.CFrame.LookVector
+                local horizontal = Vector3.new(look.X, 0, look.Z)
+
+                if horizontal.Magnitude < 0.05 then
+                        return CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, -1))
+                end
+
+                return CFrame.lookAt(Vector3.zero, horizontal.Unit)
+        end
+
+        local function buildHoldRig(root, holdCFrame)
+                local attachment = Instance.new("Attachment")
+                attachment.Name = "__PlayerToolsHoldAttachment"
+                attachment.Parent = root
+
+                local alignPosition = Instance.new("AlignPosition")
+                alignPosition.Name = "__PlayerToolsHoldPosition"
+                alignPosition.Mode = Enum.PositionAlignmentMode.OneAttachment
+                alignPosition.Attachment0 = attachment
+                alignPosition.ApplyAtCenterOfMass = true
+                alignPosition.MaxForce = math.huge
+                alignPosition.MaxVelocity = math.clamp(
+                        tonumber(ObjectHoldSettings.MaxSpeed) or 150,
+                        10,
+                        1000
+                )
+                alignPosition.Responsiveness = math.clamp(
+                        tonumber(ObjectHoldSettings.Responsiveness) or 35,
+                        5,
+                        100
+                )
+                alignPosition.RigidityEnabled = false
+                alignPosition.Position = root.Position
+                alignPosition.Parent = root
+
+                local alignOrientation = Instance.new("AlignOrientation")
+                alignOrientation.Name = "__PlayerToolsHoldOrientation"
+                alignOrientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+                alignOrientation.Attachment0 = attachment
+                alignOrientation.MaxTorque = math.huge
+                alignOrientation.Responsiveness = 25
+                alignOrientation.RigidityEnabled = false
+                alignOrientation.CFrame = holdCFrame
+                alignOrientation.Parent = root
+
+                return {
+                        Attachment = attachment,
+                        AlignPosition = alignPosition,
+                        AlignOrientation = alignOrientation
+                }
+        end
+
+        local function destroyHoldRig()
+                local rig = ObjectHoldSettings.Rig
+                ObjectHoldSettings.Rig = nil
+
+                if not rig then
+                        return
+                end
+
+                for _, object in ipairs({
+                        rig.AlignPosition,
+                        rig.AlignOrientation,
+                        rig.Attachment
+                }) do
+                        if object then
+                                pcall(function()
+                                        object:Destroy()
+                                end)
+                        end
+                end
+        end
+
+        local function releaseObject(message)
+                destroyHoldRig()
+
+                ObjectHoldSettings.Root = nil
+                ObjectHoldSettings.ErrorCount = 0
+                ObjectHoldSettings.NextGlowRefresh = 0
+
+                clearGlowList(ObjectHoldSettings.HoldHighlights)
+                updateHoldStatus(message or "Released - click an object")
+        end
+
+        local function grabObject(root)
+                releaseObject()
+
+                ObjectHoldSettings.Root = root
+                ObjectHoldSettings.ErrorCount = 0
+                ObjectHoldSettings.Rig = buildHoldRig(
+                        root,
+                        computeLevelHoldCFrame(root)
+                )
+
+                -- Ownership assist, all best-effort: the engine already
+                -- auto-assigns nearby unanchored parts to this client
+                -- (which is what makes the hold replicate), but where
+                -- the environment allows it, claim ownership directly
+                -- and widen the simulation radius so far-away grabs
+                -- engage replication immediately too.
+                pcall(function()
+                        root:SetNetworkOwner(LocalPlayer)
+                end)
+
+                pcall(function()
+                        sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
+                end)
+
+                pcall(function()
+                        setsimulationradius(math.huge, math.huge)
+                end)
+
+                glowAssembly(
+                        root,
+                        ObjectHoldSettings.HoldHighlights,
+                        "__PlayerToolsHoldGlow",
+                        Color3.fromRGB(64, 170, 255),
+                        Color3.fromRGB(140, 210, 255),
+                        0.78
+                )
+
+                updateHoldStatus("Holding: " .. tostring(root.Name):sub(1, 32))
+        end
+
+        local function updateObjectHold()
+                if not running or not ObjectHoldSettings.Enabled then
+                        return
+                end
+
+                local root = ObjectHoldSettings.Root
+
+                if not root then
+                        updateHoldStatus("Enabled - click an object")
+                        return
+                end
+
+                if not root.Parent
+                        or root.Anchored
+                        or root.AssemblyRootPart ~= root then
+                        releaseObject("Object lost")
+                        return
+                end
+
+                local character = LocalPlayer.Character
+                local head = character and character:FindFirstChild("Head")
+
+                if not head or not head.Parent or not head:IsA("BasePart") then
+                        releaseObject("Character unavailable - object dropped")
+                        return
+                end
+
+                local rig = ObjectHoldSettings.Rig
+
+                if not rig
+                        or not rig.AlignPosition
+                        or not rig.AlignPosition.Parent then
+                        releaseObject("Hold rig lost")
+                        return
+                end
+
+                local height = math.clamp(
+                        tonumber(ObjectHoldSettings.Height) or 6,
+                        1,
+                        40
+                )
+                local goal = head.Position + Vector3.new(0, height, 0)
+
+                if goal.X ~= goal.X or goal.Y ~= goal.Y or goal.Z ~= goal.Z then
+                        return
+                end
+
+                -- The single per-frame order: move the goal the
+                -- constraint chases. Force, solver, replication - the
+                -- engine does the rest.
+                local ok = pcall(function()
+                        rig.AlignPosition.Position = goal
+                end)
+
+                if not ok then
+                        ObjectHoldSettings.ErrorCount += 1
+
+                        if ObjectHoldSettings.ErrorCount >= 30 then
+                                releaseObject("Object unwritable - dropped")
+                        end
+
+                        return
+                end
+
+                ObjectHoldSettings.ErrorCount = 0
+
+                local now = os.clock()
+
+                if now >= (ObjectHoldSettings.NextGlowRefresh or 0) then
+                        ObjectHoldSettings.NextGlowRefresh = now + 0.5
+                        glowAssembly(
+                                root,
+                                ObjectHoldSettings.HoldHighlights,
+                                "__PlayerToolsHoldGlow",
+                                Color3.fromRGB(64, 170, 255),
+                                Color3.fromRGB(140, 210, 255),
+                                0.78
+                        )
+                end
+
+                local distance = (root.Position - goal).Magnitude
+
+                if distance == distance and distance > 4 then
+                        updateHoldStatus(
+                                "Holding: "
+                                        .. tostring(root.Name):sub(1, 32)
+                                        .. " (arriving)"
+                        )
+                else
+                        updateHoldStatus(
+                                "Holding: " .. tostring(root.Name):sub(1, 32)
+                        )
+                end
+        end
+
+        local function updateHoldPicker()
+                if not running or not ObjectHoldSettings.Enabled then
+                        return
+                end
+
+                local root = castForHoldTarget(false)
+                ObjectHoldSettings.HoveredRoot = root
+
+                if root then
+                        if ObjectHoldSettings.PickerRoot ~= root then
+                                ObjectHoldSettings.PickerRoot = root
+                                glowAssembly(
+                                        root,
+                                        ObjectHoldSettings.PickerHighlights,
+                                        "__PlayerToolsHoldPick",
+                                        Color3.fromRGB(64, 205, 98),
+                                        Color3.fromRGB(120, 255, 160),
+                                        0.72
+                                )
+                        end
+                else
+                        ObjectHoldSettings.PickerRoot = nil
+                        clearGlowList(ObjectHoldSettings.PickerHighlights)
+                end
+        end
+
+        local function isPointerOverInterface()
+                local position = UserInputService:GetMouseLocation()
+                local ok, objects = pcall(function()
+                        return UserInputService:GetGuiObjectsAtPosition(
+                                position.X,
+                                position.Y
+                        )
+                end)
+
+                if ok and objects and Window and Window.Gui then
+                        for _, object in ipairs(objects) do
+                                if object:IsDescendantOf(Window.Gui)
+                                        or (Reborn._toastGui
+                                                and object:IsDescendantOf(Reborn._toastGui)) then
+                                        return true
+                                end
+                        end
+                end
+
+                return false
+        end
+
+        local function onHoldInput(input, gameProcessedEvent)
+                if gameProcessedEvent
+                        or not running
+                        or not ObjectHoldSettings.Enabled
+                        or UserInputService:GetFocusedTextBox() then
+                        return
+                end
+
+                if input.UserInputType ~= Enum.UserInputType.MouseButton1
+                        and input.UserInputType ~= Enum.UserInputType.Touch then
+                        return
+                end
+
+                if isPointerOverInterface() then
+                        return
+                end
+
+                local held = ObjectHoldSettings.Root
+
+                if held and held.Parent then
+                        -- Clicking the held object itself drops it; the
+                        -- cast must include the held assembly to see it.
+                        local clicked = castForHoldTarget(true)
+
+                        if clicked == held then
+                                ObjectHoldSettings.ClickConsumedAt = os.clock()
+                                releaseObject("Dropped - click an object")
+                                return
+                        end
+                end
+
+                local root = ObjectHoldSettings.HoveredRoot
+                        or castForHoldTarget(false)
+
+                if root
+                        and root ~= ObjectHoldSettings.Root
+                        and isHoldableRoot(root) then
+                        ObjectHoldSettings.ClickConsumedAt = os.clock()
+                        grabObject(root)
+                end
+        end
+
+        local function stopObjectHold()
+                disconnect(ObjectHoldSettings.PickerConnection)
+                ObjectHoldSettings.PickerConnection = nil
+                disconnect(ObjectHoldSettings.InputConnection)
+                ObjectHoldSettings.InputConnection = nil
+                disconnect(ObjectHoldSettings.HeartbeatConnection)
+                ObjectHoldSettings.HeartbeatConnection = nil
+
+                releaseObject("Object Hover off")
+                clearGlowList(ObjectHoldSettings.PickerHighlights)
+
+                ObjectHoldSettings.HoveredRoot = nil
+                ObjectHoldSettings.PickerRoot = nil
+                ObjectHoldSettings.ErrorCount = 0
+        end
+
+        ObjectHold.release = function()
+                if not ObjectHoldSettings.Enabled then
+                        return
+                end
+
+                releaseObject("Released - click an object")
+        end
+
+        ObjectHold.setEnabled = function(value)
+                local enabled = value and true or false
+
+                stopObjectHold()
+                ObjectHoldSettings.Enabled = enabled
+
+                if type(ObjectHold.OnEnabledChanged) == "function" then
+                        pcall(ObjectHold.OnEnabledChanged, enabled)
+                end
+
+                if not enabled then
+                        return
+                end
+
+                updateHoldStatus("Enabled - click an object")
+
+                ObjectHoldSettings.PickerConnection = RunService.RenderStepped:Connect(
+                        function()
+                                local ok, err = pcall(updateHoldPicker)
+
+                                if not ok then
+                                        updateHoldStatus(
+                                                "Picker error: "
+                                                        .. tostring(err):sub(1, 80)
+                                        )
+                                end
+                        end
+                )
+
+                ObjectHoldSettings.InputConnection = UserInputService.InputBegan:Connect(
+                        function(input, gameProcessedEvent)
+                                local ok, err = pcall(
+                                        onHoldInput,
+                                        input,
+                                        gameProcessedEvent
+                                )
+
+                                if not ok then
+                                        updateHoldStatus(
+                                                "Input error: "
+                                                        .. tostring(err):sub(1, 80)
+                                        )
+                                end
+                        end
+                )
+
+                ObjectHoldSettings.HeartbeatConnection = RunService.Heartbeat:Connect(
+                        function()
+                                local ok, err = pcall(updateObjectHold)
+
+                                if not ok then
+                                        updateHoldStatus(
+                                                "Engine error: "
+                                                        .. tostring(err):sub(1, 80)
+                                        )
+                                end
+                        end
+                )
+        end
+end
+
 local function cleanup()
         if not running then
                 return
@@ -2848,6 +3499,10 @@ local function cleanup()
         ClickTeleportSettings.Enabled = false
         PlatformSettings.Enabled = false
         clearPlatform()
+        ObjectHoldSettings.Enabled = false
+        pcall(function()
+                ObjectHold.setEnabled(false)
+        end)
         clearNoclip()
         FlingSettings.Enabled = false
         FlingSettings.WorkerToken += 1
@@ -2925,6 +3580,7 @@ Window = Reborn:CreateWindow({
 local ESPTab = Window:Tab("ESP", "eye")
 local MovementTab = Window:Tab("Movement", "user")
 local VehicleMovementTab = Window:Tab("Vehicle Movement", "gauge")
+local FunTab = Window:Tab("Fun", "star")
 
 ESPTab:SetColumns(2)
 MovementTab:SetColumns(2)
@@ -3101,6 +3757,104 @@ PlatformSection:Toggle({
         Callback = function(value)
                 setPlatformEnabled(value)
         end
+})
+end
+
+do
+local ObjectHoverSection = FunTab:Section("Object Hover")
+
+local objectHoverStatusLabel = ObjectHoverSection:Paragraph({
+        Text = "Object Hover off"
+})
+
+ObjectHold.OnStatusChanged = function(status)
+        objectHoverStatusLabel:Set(tostring(status or "Object Hover off"))
+end
+
+local objectHoverToggleValue = false
+local objectHoverToggle = ObjectHoverSection:Toggle({
+        Text = "Enable Object Hover",
+        Value = false,
+        Callback = function(value)
+                objectHoverToggleValue = value and true or false
+                ObjectHold.setEnabled(objectHoverToggleValue)
+        end
+})
+
+ObjectHold.OnEnabledChanged = function(enabled)
+        local desiredValue = enabled and true or false
+
+        if objectHoverToggleValue == desiredValue then
+                return
+        end
+
+        objectHoverToggleValue = desiredValue
+        objectHoverToggle:Set(desiredValue)
+end
+
+ObjectHoverSection:Button({
+        Text = "Release Object",
+        Callback = function()
+                ObjectHold.release()
+        end
+})
+
+ObjectHoverSection:Slider({
+        Text = "Hover Height",
+        Min = 2,
+        Max = 20,
+        Value = ObjectHoldSettings.Height,
+        Callback = function(value)
+                ObjectHoldSettings.Height = value
+        end
+})
+
+ObjectHoverSection:Slider({
+        Text = "Hold Snappiness",
+        Min = 10,
+        Max = 60,
+        Value = ObjectHoldSettings.Responsiveness,
+        Callback = function(value)
+                ObjectHoldSettings.Responsiveness = value
+
+                local rig = ObjectHoldSettings.Rig
+
+                if rig and rig.AlignPosition then
+                        pcall(function()
+                                rig.AlignPosition.Responsiveness = math.clamp(
+                                        tonumber(value) or 35,
+                                        5,
+                                        100
+                                )
+                        end)
+                end
+        end
+})
+
+ObjectHoverSection:Slider({
+        Text = "Max Fly Speed",
+        Min = 40,
+        Max = 300,
+        Value = ObjectHoldSettings.MaxSpeed,
+        Callback = function(value)
+                ObjectHoldSettings.MaxSpeed = value
+
+                local rig = ObjectHoldSettings.Rig
+
+                if rig and rig.AlignPosition then
+                        pcall(function()
+                                rig.AlignPosition.MaxVelocity = math.clamp(
+                                        tonumber(value) or 150,
+                                        10,
+                                        1000
+                                )
+                        end)
+                end
+        end
+})
+
+ObjectHoverSection:Paragraph({
+        Text = "Green objects are liftable. Click one and it flies in on real physics and floats over your head - collisions, riders and the release toss are all genuine and visible to every player. Click it again or hit Release to drop it. Snappiness controls how hard it chases the slot; Max Fly Speed caps how fast a far grab comes in."
 })
 end
 
@@ -3435,6 +4189,13 @@ track(Mouse.Button1Down:Connect(function()
         end
 
         if overInterface then
+                return
+        end
+
+        if ObjectHoldSettings.Enabled
+                and os.clock() - (ObjectHoldSettings.ClickConsumedAt or 0) < 0.05 then
+                -- Object Hover consumed this click (grab or drop);
+                -- do not also teleport on it.
                 return
         end
 
