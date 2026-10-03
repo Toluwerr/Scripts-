@@ -191,17 +191,22 @@ local ObjectHoldSettings = {
         Enabled = false,
         Height = 6,
         Responsiveness = 35,
-        MaxSpeed = 150,
         Root = nil,
         Rig = nil,
         HoveredRoot = nil,
         PickerRoot = nil,
         PickerHighlights = {},
         HoldHighlights = {},
+        HoldGlowParts = {},
+        HeldParts = nil,
         PickerConnection = nil,
         InputConnection = nil,
         HeartbeatConnection = nil,
+        FollowVelocity = nil,
+        LastHeadPosition = nil,
         NextGlowRefresh = 0,
+        NextOwnershipAssert = 0,
+        ArrivingShown = false,
         ClickConsumedAt = 0,
         LastStatus = nil,
         ErrorCount = 0
@@ -2967,7 +2972,10 @@ do
                 return parts
         end
 
-        local MAX_GLOW_PARTS = 40
+        -- Cap well under the engine's 31-live-Highlight rendering
+        -- limit (hold glow + picker glow together): going over it
+        -- makes highlights drop out and churns render cost.
+        local MAX_GLOW_PARTS = 8
 
         local function clearGlowList(list)
                 for index = #list, 1, -1 do
@@ -2988,7 +2996,8 @@ do
                 name,
                 fillColor,
                 outlineColor,
-                fillTransparency
+                fillTransparency,
+                depthMode
         )
                 clearGlowList(list)
 
@@ -2999,13 +3008,59 @@ do
                         local highlight = Instance.new("Highlight")
                         highlight.Name = name
                         highlight.Adornee = parts[index]
-                        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                        highlight.DepthMode = depthMode
+                                or Enum.HighlightDepthMode.AlwaysOnTop
                         highlight.FillColor = fillColor
                         highlight.FillTransparency = fillTransparency
                         highlight.OutlineColor = outlineColor
                         highlight.OutlineTransparency = 0.05
                         highlight.Parent = Workspace
                         list[index] = highlight
+                end
+        end
+
+        local function glowPartsMatch(cached, parts, count)
+                if #cached ~= count then
+                        return false
+                end
+
+                for index = 1, count do
+                        if cached[index] ~= parts[index] then
+                                return false
+                        end
+                end
+
+                return true
+        end
+
+        -- Rebuild the hold glow only when the assembly's part set
+        -- actually changed: steady state costs zero instance churn,
+        -- which is what keeps the framerate healthy on long holds.
+        local function refreshHoldGlow(root)
+                local parts = getHoldAssemblyParts(root)
+                local count = math.min(#parts, MAX_GLOW_PARTS)
+                local cached = ObjectHoldSettings.HoldGlowParts
+
+                ObjectHoldSettings.HeldParts = parts
+
+                if glowPartsMatch(cached, parts, count) then
+                        return
+                end
+
+                glowAssembly(
+                        root,
+                        ObjectHoldSettings.HoldHighlights,
+                        "__PlayerToolsHoldGlow",
+                        Color3.fromRGB(64, 170, 255),
+                        Color3.fromRGB(140, 210, 255),
+                        0.78,
+                        Enum.HighlightDepthMode.Occluded
+                )
+
+                table.clear(cached)
+
+                for index = 1, count do
+                        cached[index] = parts[index]
                 end
         end
 
@@ -3032,13 +3087,20 @@ do
                 if held and held.Parent and not includeHeld then
                         table.insert(filter, held)
 
-                        pcall(function()
-                                for _, connected in ipairs(held:GetConnectedParts(true)) do
-                                        if connected.Parent then
+                        -- Cached at grab time and refreshed on the
+                        -- slow glow tick: walking GetConnectedParts on
+                        -- a big held assembly every frame was a real
+                        -- framerate killer.
+                        local heldParts = ObjectHoldSettings.HeldParts
+
+                        if heldParts then
+                                for _, connected in ipairs(heldParts) do
+                                        if connected ~= held
+                                                and connected.Parent then
                                                 table.insert(filter, connected)
                                         end
                                 end
-                        end)
+                        end
                 end
 
                 local params = RaycastParams.new()
@@ -3114,11 +3176,11 @@ do
                 alignPosition.Attachment0 = attachment
                 alignPosition.ApplyAtCenterOfMass = true
                 alignPosition.MaxForce = math.huge
-                alignPosition.MaxVelocity = math.clamp(
-                        tonumber(ObjectHoldSettings.MaxSpeed) or 150,
-                        10,
-                        1000
-                )
+                -- No speed cap: a capped AlignPosition can never keep
+                -- up with a player moving faster than the cap, which
+                -- is exactly the trailing-behind bug. The velocity
+                -- lead in updateObjectHold keeps it tight instead.
+                alignPosition.MaxVelocity = math.huge
                 alignPosition.Responsiveness = math.clamp(
                         tonumber(ObjectHoldSettings.Responsiveness) or 35,
                         5,
@@ -3172,6 +3234,11 @@ do
                 ObjectHoldSettings.Root = nil
                 ObjectHoldSettings.ErrorCount = 0
                 ObjectHoldSettings.NextGlowRefresh = 0
+                ObjectHoldSettings.NextOwnershipAssert = 0
+                ObjectHoldSettings.ArrivingShown = false
+                ObjectHoldSettings.HeldParts = nil
+
+                table.clear(ObjectHoldSettings.HoldGlowParts)
 
                 clearGlowList(ObjectHoldSettings.HoldHighlights)
                 updateHoldStatus(message or "Released - click an object")
@@ -3205,19 +3272,12 @@ do
                         setsimulationradius(math.huge, math.huge)
                 end)
 
-                glowAssembly(
-                        root,
-                        ObjectHoldSettings.HoldHighlights,
-                        "__PlayerToolsHoldGlow",
-                        Color3.fromRGB(64, 170, 255),
-                        Color3.fromRGB(140, 210, 255),
-                        0.78
-                )
+                refreshHoldGlow(root)
 
                 updateHoldStatus("Holding: " .. tostring(root.Name):sub(1, 32))
         end
 
-        local function updateObjectHold()
+        local function updateObjectHold(stepTime)
                 if not running or not ObjectHoldSettings.Enabled then
                         return
                 end
@@ -3258,7 +3318,73 @@ do
                         1,
                         40
                 )
-                local goal = head.Position + Vector3.new(0, height, 0)
+                local headPosition = head.Position
+
+                -- Speed matching, part one: measure how fast the
+                -- character is actually moving from frame-to-frame
+                -- head positions. This works the same whether the
+                -- player walks, sprints, uses Fly or rides a vehicle
+                -- - no matter what moves the character, the measured
+                -- velocity is the truth.
+                local step = tonumber(stepTime)
+
+                if step and step > 0 and step < 0.5 then
+                        local last = ObjectHoldSettings.LastHeadPosition
+
+                        if last then
+                                local delta = headPosition - last
+
+                                if delta.Magnitude < 100 then
+                                        local instant = delta / step
+                                        local smoothed =
+                                                ObjectHoldSettings.FollowVelocity
+
+                                        if smoothed then
+                                                ObjectHoldSettings.FollowVelocity =
+                                                        smoothed:Lerp(instant, 0.35)
+                                        else
+                                                ObjectHoldSettings.FollowVelocity =
+                                                        instant
+                                        end
+                                else
+                                        -- Position jumped (teleport):
+                                        -- no honest velocity this frame.
+                                        ObjectHoldSettings.FollowVelocity = nil
+                                end
+                        end
+                end
+
+                ObjectHoldSettings.LastHeadPosition = headPosition
+
+                -- Speed matching, part two: a critically damped
+                -- AlignPosition trails a moving goal by roughly
+                -- 2 * speed / responsiveness studs. Leading the goal
+                -- by exactly that cancels the trail at ANY speed, so
+                -- the object rides level with the player instead of
+                -- perpetually catching up. No slider, no cap - it
+                -- just matches whatever speed the player goes.
+                local responsiveness = tonumber(rig.AlignPosition.Responsiveness)
+                        or 35
+                local lead = Vector3.zero
+                local velocity = ObjectHoldSettings.FollowVelocity
+
+                if velocity then
+                        local leadTime = math.clamp(
+                                2 / responsiveness,
+                                0.02,
+                                0.12
+                        )
+
+                        lead = velocity * leadTime
+
+                        if lead.Magnitude > 20 then
+                                lead = lead.Unit * 20
+                        end
+                end
+
+                local goal = headPosition
+                        + Vector3.new(0, height, 0)
+                        + lead
 
                 if goal.X ~= goal.X or goal.Y ~= goal.Y or goal.Z ~= goal.Z then
                         return
@@ -3285,21 +3411,54 @@ do
 
                 local now = os.clock()
 
+                -- Ownership keep: when another player jumps onto the
+                -- object, the server can hand its simulation over to
+                -- them, which freezes or drops the hold. Re-claiming
+                -- on a short interval keeps the assembly simulated
+                -- here, so riders get carried instead of breaking
+                -- the hold.
+                if now >= (ObjectHoldSettings.NextOwnershipAssert or 0) then
+                        ObjectHoldSettings.NextOwnershipAssert = now + 1.5
+
+                        pcall(function()
+                                root:SetNetworkOwner(LocalPlayer)
+                        end)
+
+                        pcall(function()
+                                sethiddenproperty(
+                                        LocalPlayer,
+                                        "SimulationRadius",
+                                        math.huge
+                                )
+                        end)
+
+                        pcall(function()
+                                setsimulationradius(math.huge, math.huge)
+                        end)
+                end
+
                 if now >= (ObjectHoldSettings.NextGlowRefresh or 0) then
-                        ObjectHoldSettings.NextGlowRefresh = now + 0.5
-                        glowAssembly(
-                                root,
-                                ObjectHoldSettings.HoldHighlights,
-                                "__PlayerToolsHoldGlow",
-                                Color3.fromRGB(64, 170, 255),
-                                Color3.fromRGB(140, 210, 255),
-                                0.78
-                        )
+                        ObjectHoldSettings.NextGlowRefresh = now + 1.25
+                        refreshHoldGlow(root)
                 end
 
                 local distance = (root.Position - goal).Magnitude
 
-                if distance == distance and distance > 4 then
+                if distance == distance then
+                        local arriving = ObjectHoldSettings.ArrivingShown
+
+                        if arriving then
+                                if distance < 5 then
+                                        arriving = false
+                                end
+                        elseif distance > 10 then
+                                arriving = true
+                        end
+
+                        ObjectHoldSettings.ArrivingShown = arriving
+                end
+
+                if ObjectHoldSettings.ArrivingShown then
                         updateHoldStatus(
                                 "Holding: "
                                         .. tostring(root.Name):sub(1, 32)
@@ -3329,7 +3488,8 @@ do
                                         "__PlayerToolsHoldPick",
                                         Color3.fromRGB(64, 205, 98),
                                         Color3.fromRGB(120, 255, 160),
-                                        0.72
+                                        0.72,
+                                        Enum.HighlightDepthMode.AlwaysOnTop
                                 )
                         end
                 else
@@ -3416,6 +3576,8 @@ do
                 ObjectHoldSettings.HoveredRoot = nil
                 ObjectHoldSettings.PickerRoot = nil
                 ObjectHoldSettings.ErrorCount = 0
+                ObjectHoldSettings.FollowVelocity = nil
+                ObjectHoldSettings.LastHeadPosition = nil
         end
 
         ObjectHold.release = function()
@@ -3473,8 +3635,8 @@ do
                 )
 
                 ObjectHoldSettings.HeartbeatConnection = RunService.Heartbeat:Connect(
-                        function()
-                                local ok, err = pcall(updateObjectHold)
+                        function(deltaTime)
+                                local ok, err = pcall(updateObjectHold, deltaTime)
 
                                 if not ok then
                                         updateHoldStatus(
@@ -3831,30 +3993,8 @@ ObjectHoverSection:Slider({
         end
 })
 
-ObjectHoverSection:Slider({
-        Text = "Max Fly Speed",
-        Min = 40,
-        Max = 300,
-        Value = ObjectHoldSettings.MaxSpeed,
-        Callback = function(value)
-                ObjectHoldSettings.MaxSpeed = value
-
-                local rig = ObjectHoldSettings.Rig
-
-                if rig and rig.AlignPosition then
-                        pcall(function()
-                                rig.AlignPosition.MaxVelocity = math.clamp(
-                                        tonumber(value) or 150,
-                                        10,
-                                        1000
-                                )
-                        end)
-                end
-        end
-})
-
 ObjectHoverSection:Paragraph({
-        Text = "Green objects are liftable. Click one and it flies in on real physics and floats over your head - collisions, riders and the release toss are all genuine and visible to every player. Click it again or hit Release to drop it. Snappiness controls how hard it chases the slot; Max Fly Speed caps how fast a far grab comes in."
+        Text = "Green objects are liftable. Click one and it flies in on real physics and floats over your head - collisions, riders and the release toss are all genuine and visible to every player. Click it again or hit Release to drop it. It automatically matches your speed, so walk, sprint, fly or drive and it stays level with you. Snappiness controls how hard it chases the slot."
 })
 end
 
