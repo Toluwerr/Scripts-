@@ -129,6 +129,10 @@ local HeadHoverSettings = {
         NextAssemblyRefresh = 0,
         SuppressClickUntil = 0,
         CarryVelocity = nil,
+        Solid = true,
+        HoldOrientation = nil,
+        LastLinearCommand = nil,
+        LastAngularCommand = nil,
         LastStatus = nil,
         ErrorCount = 0
 }
@@ -1485,6 +1489,51 @@ do
         -- per-step velocity spikes that read as jitter.
         local HOVER_CARRY_SMOOTH_RATE = 8
 
+        -- Rider-load pre-compensation: whatever external forces (a
+        -- player standing or jumping on the object, a shove, wall
+        -- contact) did to the velocity during the last step is
+        -- measured and fed back inverted. 0.5 is the position-exact
+        -- gain: a constant load shifts displacement by half
+        -- accel*dt^2, so half of the measured velocity injection
+        -- cancels a sustained rider's weight exactly, leaving zero
+        -- steady sag instead of sinking under them.
+        local HOVER_LOAD_GAIN = 0.5
+        local HOVER_LOAD_MAX_DELTA = 120
+
+        -- Total commanded speed cap: with a solid, ridable object a
+        -- contact fight (grinding a ceiling while walking) must never
+        -- accumulate uncapped error into a slingshot release.
+        local HOVER_MAX_SPEED = 250
+
+        -- Orientation servo: the object levels itself upright on pick
+        -- (facing kept, pitch/roll removed) and actively restores
+        -- against rider-induced tipping instead of merely freezing
+        -- angular velocity.
+        local HOVER_ORIENT_RATE = 14
+        local HOVER_MAX_ANGULAR = 12
+        local HOVER_ANG_LOAD_GAIN = 0.5
+
+        local function computeUprightHoldRotation(root)
+                -- Level reference for the orientation servo: keep the
+                -- object's facing, strip pitch and roll, so a plank
+                -- grabbed off the ground rides flat and an off-center
+                -- rider tips against a level target instead of a
+                -- random one.
+                local look = root.CFrame.LookVector
+                local horizontal = Vector3.new(look.X, 0, look.Z)
+
+                if horizontal.Magnitude < 0.1 then
+                        local right = root.CFrame.RightVector
+                        horizontal = Vector3.new(0, 1, 0):Cross(right)
+
+                        if horizontal.Magnitude < 0.1 then
+                                horizontal = Vector3.new(0, 0, -1)
+                        end
+                end
+
+                return CFrame.lookAt(Vector3.zero, horizontal.Unit)
+        end
+
         local function destroyHighlightList(list)
                 for index = #list, 1, -1 do
                         local highlight = list[index]
@@ -1603,6 +1652,9 @@ do
                 HeadHoverSettings.SelectedRoot = nil
                 HeadHoverSettings.ErrorCount = 0
                 HeadHoverSettings.CarryVelocity = nil
+                HeadHoverSettings.HoldOrientation = nil
+                HeadHoverSettings.LastLinearCommand = nil
+                HeadHoverSettings.LastAngularCommand = nil
 
                 if root then
                         restoreHoverPart()
@@ -1623,15 +1675,23 @@ do
                 HeadHoverSettings.ErrorCount = 0
                 HeadHoverSettings.NextAssemblyRefresh = 0
                 HeadHoverSettings.CarryVelocity = Vector3.zero
+                HeadHoverSettings.HoldOrientation = computeUprightHoldRotation(root)
+                HeadHoverSettings.LastLinearCommand = nil
+                HeadHoverSettings.LastAngularCommand = nil
 
                 for _, part in ipairs(getHoverAssemblyParts(root)) do
                         if HeadHoverSettings.CollisionStates[part] == nil then
                                 HeadHoverSettings.CollisionStates[part] = part.CanCollide
                         end
 
-                        pcall(function()
-                                part.CanCollide = false
-                        end)
+                        -- Phantom mode drops collision for a clean flight
+                        -- through geometry; Solid mode keeps each part's
+                        -- original collision so players can stand on it.
+                        if not HeadHoverSettings.Solid then
+                                pcall(function()
+                                        part.CanCollide = false
+                                end)
+                        end
                 end
 
                 showHoldHighlight(root)
@@ -1643,20 +1703,69 @@ do
         local function refreshHoverAssembly(root)
                 -- Assemblies are not static: server scripts weld new pieces
                 -- on or break old pieces off while the object is held.
-                -- Anything that joins gets the same no-collision treatment
-                -- (and is remembered for restoration); anything that leaves
-                -- was already remembered, so the drop stays clean.
+                -- Joiners get the hold treatment (remembered, and
+                -- no-collide only in phantom mode); leavers get their
+                -- collision restored immediately so a piece that snaps
+                -- off mid-hold does not fall through the floor until
+                -- the whole object is released.
+                local current = {}
+
                 for _, part in ipairs(getHoverAssemblyParts(root)) do
+                        current[part] = true
+
                         if HeadHoverSettings.CollisionStates[part] == nil then
                                 HeadHoverSettings.CollisionStates[part] = part.CanCollide
+
+                                if not HeadHoverSettings.Solid then
+                                        pcall(function()
+                                                part.CanCollide = false
+                                        end)
+                                end
+                        end
+                end
+
+                for part, original in pairs(HeadHoverSettings.CollisionStates) do
+                        if not current[part] and part.Parent then
+                                pcall(function()
+                                        part.CanCollide = original and true or false
+                                end)
+
+                                HeadHoverSettings.CollisionStates[part] = nil
+                        end
+                end
+
+                showHoldHighlight(root)
+        end
+
+        local function applyHeadHoverSolid()
+                -- Live Solid toggle: flip collision on the held assembly
+                -- (and everything still remembered from it) without
+                -- dropping the hold.
+                local root = HeadHoverSettings.SelectedRoot
+
+                if not root or not root.Parent then
+                        return
+                end
+
+                if HeadHoverSettings.Solid then
+                        for part, original in pairs(HeadHoverSettings.CollisionStates) do
+                                if part.Parent then
+                                        pcall(function()
+                                                part.CanCollide = original and true or false
+                                        end)
+                                end
+                        end
+                else
+                        for _, part in ipairs(getHoverAssemblyParts(root)) do
+                                if HeadHoverSettings.CollisionStates[part] == nil then
+                                        HeadHoverSettings.CollisionStates[part] = part.CanCollide
+                                end
 
                                 pcall(function()
                                         part.CanCollide = false
                                 end)
                         end
                 end
-
-                showHoldHighlight(root)
         end
 
         local function getHeadHoverTarget(includeHeld)
@@ -1693,30 +1802,49 @@ do
                 params.FilterDescendantsInstances = filter
                 params.IgnoreWater = false
 
-                local result = Workspace:Raycast(
-                        unitRay.Origin,
-                        unitRay.Direction * 10000,
-                        params
-                )
-                local part = result and result.Instance
+                local direction = unitRay.Direction * 10000
 
-                if not part or not part:IsA("BasePart") then
-                        return nil
+                -- Cast through anything that can never be picked: a
+                -- player standing on the liftable object eats the first
+                -- hit, so each dead end (their whole assembly) joins
+                -- the filter and the ray continues behind it. A few
+                -- hops cover a crowd stacked on the same object.
+                for _ = 1, 6 do
+                        local result = Workspace:Raycast(unitRay.Origin, direction, params)
+                        local part = result and result.Instance
+
+                        if not part or not part:IsA("BasePart") then
+                                return nil
+                        end
+
+                        local root = part.AssemblyRootPart
+
+                        if root == HeadHoverSettings.SelectedRoot then
+                                -- The held assembly itself: only visible to an
+                                -- unfiltered cast (used by click-to-drop).
+                                return includeHeld and root or nil
+                        end
+
+                        if canHoverRoot(root) then
+                                return root
+                        end
+
+                        pcall(function()
+                                table.insert(filter, root or part)
+
+                                if root and root.Parent then
+                                        for _, connected in ipairs(root:GetConnectedParts(true)) do
+                                                if connected.Parent then
+                                                        table.insert(filter, connected)
+                                                end
+                                        end
+                                end
+                        end)
+
+                        params.FilterDescendantsInstances = filter
                 end
 
-                local root = part.AssemblyRootPart
-
-                if root == HeadHoverSettings.SelectedRoot then
-                        -- The held assembly itself: only visible to an
-                        -- unfiltered cast (used by click-to-drop).
-                        return includeHeld and root or nil
-                end
-
-                if not canHoverRoot(root) then
-                        return nil
-                end
-
-                return root
+                return nil
         end
 
         local function updateHeadHoverPicker()
@@ -1741,22 +1869,132 @@ do
                 -- is always below 1, so the object physically cannot
                 -- overshoot the slot and vibrate around it; the same
                 -- exponential low-passes head-motion noise and stays
-                -- stable when the frame time wobbles. Gravity feed-forward
-                -- and the smoothed carry keep the hold tracking while
-                -- walking or flying.
+                -- stable when the frame time wobbles.
+                --
+                -- Rider-load pre-compensation: the velocity change since
+                -- the last write, minus what gravity explains, is exactly
+                -- the external disturbance (a player standing or jumping
+                -- on the object, a shove, contact grinding). Feeding it
+                -- back inverted cancels sustained weight after a frame
+                -- or two, so the object holds height under riders
+                -- instead of sinking to their weight. The total command
+                -- is capped so contact fights can never slingshot.
                 local currentPosition = root.Position
                 local residual = targetNow - currentPosition
                 local closeFraction = 1 - math.exp(-pullGain * stepTime)
-                local correction = residual * (closeFraction / stepTime)
+                local desired = residual * (closeFraction / stepTime)
                         + Vector3.new(0, 0.5 * Workspace.Gravity * stepTime, 0)
+                        + carry
 
-                root.AssemblyLinearVelocity = correction + carry
+                local measuredVelocity = root.AssemblyLinearVelocity
 
-                if HeadHoverSettings.Stabilize then
-                        root.AssemblyAngularVelocity = Vector3.zero
+                if measuredVelocity.X ~= measuredVelocity.X
+                        or measuredVelocity.Y ~= measuredVelocity.Y
+                        or measuredVelocity.Z ~= measuredVelocity.Z then
+                        measuredVelocity = Vector3.zero
                 end
 
+                local previousCommand = HeadHoverSettings.LastLinearCommand
+                local loadCompensation = Vector3.zero
+
+                if typeof(previousCommand) == "Vector3" then
+                        local externalDelta = measuredVelocity - previousCommand
+                                + Vector3.new(0, Workspace.Gravity * stepTime, 0)
+
+                        if externalDelta.X ~= externalDelta.X
+                                or externalDelta.Y ~= externalDelta.Y
+                                or externalDelta.Z ~= externalDelta.Z then
+                                externalDelta = Vector3.zero
+                        elseif externalDelta.Magnitude > HOVER_LOAD_MAX_DELTA then
+                                externalDelta = externalDelta.Unit * HOVER_LOAD_MAX_DELTA
+                        end
+
+                        loadCompensation = externalDelta * -HOVER_LOAD_GAIN
+                end
+
+                local command = desired + loadCompensation
+
+                if command.X ~= command.X
+                        or command.Y ~= command.Y
+                        or command.Z ~= command.Z then
+                        return currentPosition
+                elseif command.Magnitude > HOVER_MAX_SPEED then
+                        command = command.Unit * HOVER_MAX_SPEED
+                end
+
+                root.AssemblyLinearVelocity = command
+                HeadHoverSettings.LastLinearCommand = command
+
                 return currentPosition
+        end
+
+        local function applyHoverOrientation(root, stepTime)
+                -- Orientation servo: restore the upright hold rotation
+                -- every frame with a bounded angular velocity, instead
+                -- of merely freezing spin. A rider standing off-center
+                -- exerts a sustained contact torque; freezing angular
+                -- velocity never undoes the tilt they accumulate, so
+                -- the plank tips under their weight until they slide
+                -- off. The servo both restores tilt and pre-compensates
+                -- measured torque the same way the linear side does
+                -- (gravity exerts no torque about the center of mass,
+                -- so there is no gravity term here).
+                if not HeadHoverSettings.Stabilize then
+                        HeadHoverSettings.LastAngularCommand = nil
+                        return
+                end
+
+                local holdRotation = HeadHoverSettings.HoldOrientation
+
+                if typeof(holdRotation) ~= "CFrame" then
+                        holdRotation = computeUprightHoldRotation(root)
+                        HeadHoverSettings.HoldOrientation = holdRotation
+                end
+
+                local current = root.CFrame.Rotation
+                local crossSum = current.RightVector:Cross(holdRotation.RightVector)
+                        + current.UpVector:Cross(holdRotation.UpVector)
+                        + current.LookVector:Cross(holdRotation.LookVector)
+                local dotSum = current.RightVector:Dot(holdRotation.RightVector)
+                        + current.UpVector:Dot(holdRotation.UpVector)
+                        + current.LookVector:Dot(holdRotation.LookVector)
+                local angle = math.acos(math.clamp((dotSum - 1) / 2, -1, 1))
+
+                local command = Vector3.zero
+                local axisMagnitude = crossSum.Magnitude
+
+                if axisMagnitude > 1e-4 and angle > 1e-3 then
+                        local axis = crossSum / axisMagnitude
+                        command = axis
+                                * math.min(angle * HOVER_ORIENT_RATE, HOVER_MAX_ANGULAR)
+                end
+
+                local previousCommand = HeadHoverSettings.LastAngularCommand
+
+                if typeof(previousCommand) == "Vector3" then
+                        local measured = root.AssemblyAngularVelocity
+
+                        if measured.X ~= measured.X
+                                or measured.Y ~= measured.Y
+                                or measured.Z ~= measured.Z then
+                                measured = Vector3.zero
+                        end
+
+                        local torqueDelta = previousCommand - measured
+
+                        if torqueDelta.Magnitude > HOVER_MAX_ANGULAR then
+                                torqueDelta = torqueDelta.Unit * HOVER_MAX_ANGULAR
+                        end
+
+                        command = command + torqueDelta * HOVER_ANG_LOAD_GAIN
+                end
+
+                if command.Magnitude > HOVER_MAX_ANGULAR then
+                        command = command.Unit * HOVER_MAX_ANGULAR
+                end
+
+                root.AssemblyAngularVelocity = command
+                HeadHoverSettings.LastAngularCommand = command
         end
 
         local function updateHeadHover(deltaTime)
@@ -1859,14 +2097,10 @@ do
 
                 HeadHoverSettings.CarryVelocity = carry
 
-                local ok = pcall(
-                        applyHoverPlacement,
-                        root,
-                        targetNow,
-                        stepTime,
-                        pullGain,
-                        carry
-                )
+                local ok = pcall(function()
+                        applyHoverPlacement(root, targetNow, stepTime, pullGain, carry)
+                        applyHoverOrientation(root, stepTime)
+                end)
 
                 if not ok then
                         HeadHoverSettings.ErrorCount = HeadHoverSettings.ErrorCount + 1
@@ -1918,6 +2152,11 @@ do
                 end
 
                 releaseHeadHover("Released - click an object")
+        end
+
+        HeadHover.setSolid = function(value)
+                HeadHoverSettings.Solid = value and true or false
+                applyHeadHoverSolid()
         end
 
         HeadHover.setEnabled = function(value)
@@ -5163,6 +5402,14 @@ ObjectHoverSection:Button({
         end
 })
 
+ObjectHoverSection:Toggle({
+        Text = "Solid (players can stand on it)",
+        Value = true,
+        Callback = function(value)
+                HeadHover.setSolid(value and true or false)
+        end
+})
+
 ObjectHoverSection:Slider({
         Text = "Hover Height",
         Min = 2,
@@ -5184,7 +5431,7 @@ ObjectHoverSection:Slider({
 })
 
 ObjectHoverSection:Toggle({
-        Text = "Stabilize Spin",
+        Text = "Stabilize (auto-level)",
         Value = true,
         Callback = function(value)
                 HeadHoverSettings.Stabilize = value and true or false
@@ -5192,7 +5439,7 @@ ObjectHoverSection:Toggle({
 })
 
 ObjectHoverSection:Paragraph({
-        Text = "Green objects can be held. Click one to pin it over your head; click it again to drop it."
+        Text = "Green objects are liftable. Click one to hold it over your head; click it again or hit Release to drop it. Solid keeps collision on so players can ride it, and the hold actively holds height and level under their weight."
 })
 end
 
