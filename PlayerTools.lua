@@ -97,11 +97,8 @@ local PartRingSettings = {
         Speed = 3.5,
         RotationSpeed = 30,
         PullStrength = 60,
-        MaximumAssemblyMass = 5000000,
-        MaximumAssemblySize = 300,
         ReleasePower = 1,
         RescanInterval = 0.4,
-        MaxParts = 300,
         Parts = {},
         PartStates = setmetatable({}, {__mode = "k"}),
         Connection = nil,
@@ -126,9 +123,6 @@ local HeadHoverSettings = {
         NextAssemblyRefresh = 0,
         SuppressClickUntil = 0,
         HoldOrientation = nil,
-        Capturing = false,
-        LastSlot = nil,
-        LastTarget = nil,
         LastStatus = nil,
         ErrorCount = 0
 }
@@ -610,22 +604,9 @@ do
                         return false
                 end
 
-                local maximumAssemblyMass = math.clamp(
-                        tonumber(PartRingSettings.MaximumAssemblyMass) or 5000000,
-                        1,
-                        10000000
-                )
-                local maximumAssemblySize = math.clamp(
-                        tonumber(PartRingSettings.MaximumAssemblySize) or 300,
-                        1,
-                        10000
-                )
-
-                if part.AssemblyMass > maximumAssemblyMass
-                        or part.Size.Magnitude > maximumAssemblySize then
-                        return false
-                end
-
+                -- Unlimited pull: no mass gate and no size gate. Any
+                -- unanchored assembly in range is a candidate, from a
+                -- coin to a cargo container, however heavy or huge.
                 return (part.Position - targetRoot.Position).Magnitude
                         <= (distanceLimit or getPartRingSearchRadius())
         end
@@ -921,15 +902,12 @@ do
 
                 overlap.FilterDescendantsInstances = filter
 
-                local maxParts = math.clamp(
-                        tonumber(PartRingSettings.MaxParts) or 300,
-                        10,
-                        2000
-                )
-
-                -- Bound the query itself: on absurdly dense maps the overlap
-                -- scan alone can return tens of thousands of parts.
-                overlap.MaxParts = math.clamp(maxParts + 200, 100, 4000)
+                -- Unlimited pull: the query bound is set far beyond any
+                -- real map density, so every liftable part inside the
+                -- scan radius comes back. Swarm size is uncapped - if
+                -- the map has ten thousand loose parts in range, all ten
+                -- thousand join the chaos.
+                overlap.MaxParts = 100000000
 
                 local nearby = {}
 
@@ -1006,20 +984,6 @@ do
                 end
 
                 PartRingSettings.Parts = nextParts
-
-                if #nextParts > maxParts then
-                        -- Cap the swarm: keep the parts nearest the target
-                        -- and hand the overflow back to the world.
-                        table.sort(nextParts, function(first, second)
-                                return (first.Position - targetRoot.Position).Magnitude
-                                        < (second.Position - targetRoot.Position).Magnitude
-                        end)
-
-                        for index = #nextParts, maxParts + 1, -1 do
-                                restorePartRingPart(nextParts[index])
-                                nextParts[index] = nil
-                        end
-                end
 
                 for _, part in ipairs(nextParts) do
                         preparePartForRing(part)
@@ -1430,22 +1394,9 @@ do
                         return false
                 end
 
-                local maximumAssemblyMass = math.clamp(
-                        tonumber(PartRingSettings.MaximumAssemblyMass) or 5000000,
-                        1,
-                        10000000
-                )
-                local maximumAssemblySize = math.clamp(
-                        tonumber(PartRingSettings.MaximumAssemblySize) or 300,
-                        1,
-                        10000
-                )
-
-                if root.AssemblyMass > maximumAssemblyMass
-                        or root.Size.Magnitude > maximumAssemblySize then
-                        return false
-                end
-
+                -- Unlimited lift: no mass gate and no size gate. The hold
+                -- commands velocity directly, which is mass-independent,
+                -- so anything unanchored can be held, however huge.
                 return true
         end
 
@@ -1479,40 +1430,29 @@ do
 
         local MAX_HOVER_GLOW_PARTS = 40
 
-        -- Kinematic lock: the held root is written to the slot CFrame
-        -- every single Heartbeat. There is no controller, no gain, no
-        -- filter - nothing to tune, nothing to overshoot, nothing for
-        -- gravity, rider weight, contacts or network corrections to
-        -- fight, which is why the hold cannot jitter, sag, tip, be
-        -- shoved aside, or snag on geometry or players. The part stays
-        -- unanchored and network-owned by this client, so the written
-        -- state is exactly what replicates to the server and everyone
-        -- else - this is the same ownership channel that made the old
-        -- velocity version work, minus the physics fight.
+        -- Real-physics hold: the held root is driven by exact-landing
+        -- velocity orders every Heartbeat - the exact same replication
+        -- channel that makes Chaos visible to everyone. A client CFrame
+        -- write only ever moves a part on this screen, which is why the
+        -- old kinematic lock looked fake; velocity commands on the
+        -- assembly this client owns are simulated physics, so the server
+        -- and every other player see the object truly fly in, follow the
+        -- head, collide with the world, support riders, and keep its
+        -- motion as a real toss on release.
         --
-        -- Capture: a fresh grab closes the residual exponentially
-        -- (fraction 1 - e^(-rate * dt) stays below 1, so it cannot
-        -- overshoot) until it is inside the glue slack, after which
-        -- the pose is written exactly. 40/s reaches 99% in ~0.1 s:
-        -- effectively instant without a single-frame teleport pop.
-        -- The slack is speed-aware: chasing a moving target with a
-        -- fixed close fraction leaves a steady lag of roughly
-        -- speed * (1 - a) / a, so a walking head would otherwise
-        -- hover ~0.3 studs behind the slot forever without ever
-        -- qualifying as locked. Scaling the slack with the slot's
-        -- per-frame motion locks the chase and snaps exact within a
-        -- frame or two of convergence, at which point the pose is
-        -- written, not chased - zero lag from then on.
-        local HOVER_CAPTURE_RATE = 40
-        local HOVER_GLUE_SLACK = 0.1
-        local HOVER_GLUE_MOTION_SCALE = 1.5
+        -- The order lands the object exactly on the slot after one
+        -- physics step, gravity included, so there is nothing to tune
+        -- and no chase to converge: no jitter, no sag, no lag. The only
+        -- clamp is the approach speed for a fresh grab from far away -
+        -- without it a 90-stud capture would order a 5000-stud/s
+        -- railgun arrival that tunnels straight through the map.
+        local HOVER_TRACK_SPEED_MAX = 400
 
-        -- The velocity written alongside the pose: remote clients
-        -- interpolate on it, the object coasts along the slot path if
-        -- network ownership hiccups while someone stands on it (then
-        -- re-locks the instant ownership returns), and it is exactly
-        -- the toss the object keeps when released.
-        local HOVER_STATE_VEL_MAX = 250
+        -- Orientation servo: the object is leveled onto the hold rotation
+        -- with real angular velocity commands (never a CFrame write), so
+        -- it stops spinning naturally and rides flat while stood on.
+        local HOVER_LEVEL_GAIN = 12
+        local HOVER_LEVEL_SPIN_MAX = 14
 
         local function computeUprightHoldRotation(root)
                 -- Level reference for the orientation servo: keep the
@@ -1626,17 +1566,15 @@ do
         end
 
         local function releaseHeadHover(message)
-                -- Collision was never touched during the hold and the
-                -- object keeps the last written slot velocity, so
+                -- Nothing about the object was ever modified during the
+                -- hold - no collision changes, no anchoring, no local
+                -- constraint rigs - and its velocity is real physics, so
                 -- letting go is just that: gravity takes over from a
-                -- real toss, not a snap.
+                -- genuine toss along the head's motion, not a snap.
                 local root = HeadHoverSettings.SelectedRoot
                 HeadHoverSettings.SelectedRoot = nil
                 HeadHoverSettings.ErrorCount = 0
                 HeadHoverSettings.HoldOrientation = nil
-                HeadHoverSettings.Capturing = false
-                HeadHoverSettings.LastSlot = nil
-                HeadHoverSettings.LastTarget = nil
 
                 if root and root.Parent then
                         pcall(function()
@@ -1651,15 +1589,13 @@ do
         local function selectHoverRoot(root)
                 -- Nothing about the object is modified on grab: no
                 -- collision changes, no anchoring, no mass tricks. The
-                -- hold is purely the per-frame CFrame write, so there
-                -- is equally nothing to undo on release.
+                -- hold is purely per-frame velocity orders on the live
+                -- assembly, so there is equally nothing to undo on
+                -- release.
                 HeadHoverSettings.SelectedRoot = root
                 HeadHoverSettings.ErrorCount = 0
                 HeadHoverSettings.NextAssemblyRefresh = 0
                 HeadHoverSettings.HoldOrientation = computeUprightHoldRotation(root)
-                HeadHoverSettings.Capturing = true
-                HeadHoverSettings.LastSlot = root.Position
-                HeadHoverSettings.LastTarget = nil
 
                 showHoldHighlight(root)
                 updateHeadHoverStatus(
@@ -1771,63 +1707,57 @@ do
                 end
         end
 
-        local function applyHoverPlacement(root, targetCFrame, stepTime, glueSlack)
-                -- Kinematic lock: the pose is written, not chased. There
-                -- is no controller and no feedback loop - nothing for
-                -- gravity, rider weight, contacts, walls or network
-                -- corrections to fight, so the object can never sag,
-                -- tip, be shoved aside, or snag on geometry or
-                -- players: every frame it is exactly where the slot
-                -- says. The part stays unanchored and owned by this
-                -- client, so the written state is what replicates to
-                -- the server and every other player.
-                local targetPosition = targetCFrame.Position
-                local newCFrame = targetCFrame
+        local function applyHoverPlacement(root, slotPosition, holdRotation, stepTime)
+                -- Exact-landing velocity order: the same physics channel
+                -- the Chaos swarm rides. CFrame is never written - a
+                -- client CFrame write only ever moves the part on this
+                -- screen - while a velocity command on an assembly this
+                -- client owns is real, simulated, replicated motion. The
+                -- correction below lands the object exactly on the slot
+                -- after one physics step, gravity included, so the hold
+                -- cannot sag, lag or jitter: every frame the object is
+                -- exactly where physics will put it at the slot.
+                local residual = slotPosition - root.Position
+                local velocity = residual / stepTime
+                        + Vector3.new(0, 0.5 * Workspace.Gravity * stepTime, 0)
 
-                if HeadHoverSettings.Capturing then
-                        -- Fresh grab: close the residual exponentially
-                        -- (fraction below 1, cannot overshoot) until it
-                        -- is inside the glue slack, then write exact.
-                        local alpha = 1 - math.exp(
-                                -HOVER_CAPTURE_RATE * stepTime
-                        )
-                        newCFrame = root.CFrame:Lerp(targetCFrame, alpha)
-
-                        if (newCFrame.Position - targetPosition).Magnitude
-                                <= glueSlack then
-                                HeadHoverSettings.Capturing = false
-                                newCFrame = targetCFrame
-                        end
+                if velocity.X ~= velocity.X
+                        or velocity.Y ~= velocity.Y
+                        or velocity.Z ~= velocity.Z then
+                        velocity = Vector3.zero
+                elseif velocity.Magnitude > HOVER_TRACK_SPEED_MAX then
+                        -- Fresh grab from across the map: close the gap
+                        -- at a sane speed instead of a single-frame
+                        -- railgun arrival that tunnels through geometry.
+                        velocity = velocity.Unit * HOVER_TRACK_SPEED_MAX
                 end
 
-                -- Velocity written to match the actual frame-to-frame
-                -- slot motion: remote clients interpolate on it, the
-                -- object coasts along the slot path if network
-                -- ownership hiccups while a rider stands on it (then
-                -- re-locks the instant ownership returns), and it is
-                -- exactly the toss kept on release. The hold never
-                -- rotates, so angular velocity is always zero.
-                local lastSlot = HeadHoverSettings.LastSlot
-                local stateVelocity = Vector3.zero
+                root.AssemblyLinearVelocity = velocity
 
-                if typeof(lastSlot) == "Vector3" then
-                        stateVelocity = (newCFrame.Position - lastSlot)
-                                / stepTime
+                -- Orientation servo: level the object onto the hold
+                -- rotation with real angular velocity, never a pose
+                -- write, so it rides flat and stops spinning naturally.
+                local angularVelocity = Vector3.zero
+                local delta = root.CFrame.Rotation:Inverse() * holdRotation
+                local axis, angle = delta:ToAxisAngle()
+
+                if angle == angle
+                        and angle > 1e-3
+                        and axis.Magnitude > 0 then
+                        angularVelocity = root.CFrame:VectorToWorldSpace(axis.Unit)
+                                * math.min(
+                                        angle * HOVER_LEVEL_GAIN,
+                                        HOVER_LEVEL_SPIN_MAX
+                                )
                 end
 
-                if stateVelocity.X ~= stateVelocity.X
-                        or stateVelocity.Y ~= stateVelocity.Y
-                        or stateVelocity.Z ~= stateVelocity.Z then
-                        stateVelocity = Vector3.zero
-                elseif stateVelocity.Magnitude > HOVER_STATE_VEL_MAX then
-                        stateVelocity = stateVelocity.Unit
-                                * HOVER_STATE_VEL_MAX
+                if angularVelocity.X ~= angularVelocity.X
+                        or angularVelocity.Y ~= angularVelocity.Y
+                        or angularVelocity.Z ~= angularVelocity.Z then
+                        angularVelocity = Vector3.zero
                 end
 
-                root.AssemblyLinearVelocity = stateVelocity
-                root.AssemblyAngularVelocity = Vector3.zero
-                root.CFrame = newCFrame
-                HeadHoverSettings.LastSlot = newCFrame.Position
+                root.AssemblyAngularVelocity = angularVelocity
         end
 
         local function updateHeadHover(deltaTime)
@@ -1893,34 +1823,21 @@ do
                 end
 
                 -- The slot: exactly hoverHeight above the head, level,
-                -- facing kept from the moment of the grab. The object
-                -- is written here every frame - it does not chase the
-                -- slot, it IS the slot.
-                local targetPosition = headPosition
+                -- facing kept from the moment of the grab. The object is
+                -- ordered onto the slot every frame with one
+                -- exact-landing velocity command - real physics, so the
+                -- flight in, the follow and the toss out are all
+                -- genuine and visible to every player.
+                local slotPosition = headPosition
                         + Vector3.new(0, hoverHeight, 0)
-                local targetCFrame = CFrame.new(targetPosition) * holdRotation
-
-                -- Speed-aware glue slack: a walking head moves ~0.3
-                -- studs per frame, so a fixed 0.1-stud lock threshold
-                -- would never trigger mid-motion. The slack grows with
-                -- the slot's own frame-to-frame motion so the chase
-                -- locks the moment it has converged, then snaps exact.
-                local previousTarget = HeadHoverSettings.LastTarget
-                local glueSlack = HOVER_GLUE_SLACK
-
-                if typeof(previousTarget) == "Vector3" then
-                        local motion = (targetPosition - previousTarget).Magnitude
-
-                        if motion == motion and motion * HOVER_GLUE_MOTION_SCALE
-                                        > glueSlack then
-                                glueSlack = motion * HOVER_GLUE_MOTION_SCALE
-                        end
-                end
-
-                HeadHoverSettings.LastTarget = targetPosition
 
                 local ok = pcall(function()
-                        applyHoverPlacement(root, targetCFrame, stepTime, glueSlack)
+                        applyHoverPlacement(
+                                root,
+                                slotPosition,
+                                holdRotation,
+                                stepTime
+                        )
                 end)
 
                 if not ok then
@@ -1935,7 +1852,7 @@ do
 
                 HeadHoverSettings.ErrorCount = 0
 
-                if HeadHoverSettings.Capturing then
+                if (root.Position - slotPosition).Magnitude > 2 then
                         updateHeadHoverStatus(
                                 "Holding: "
                                         .. tostring(root.Name):sub(1, 32)
@@ -5045,20 +4962,6 @@ PartRingSection:Slider({
 })
 
 PartRingSection:Slider({
-        Text = "Max Parts",
-        Min = 10,
-        Max = 2000,
-        Value = PartRingSettings.MaxParts,
-        Callback = function(value)
-                PartRingSettings.MaxParts = value
-
-                if PartRingSettings.Enabled then
-                        PartRing.refresh()
-                end
-        end
-})
-
-PartRingSection:Slider({
         Text = "Chaos Radius",
         Min = 3,
         Max = 150,
@@ -5130,34 +5033,6 @@ RingPowerSection:Slider({
 })
 
 RingPowerSection:Slider({
-        Text = "Max Part Mass",
-        Min = 100,
-        Max = 5000000,
-        Value = PartRingSettings.MaximumAssemblyMass,
-        Callback = function(value)
-                PartRingSettings.MaximumAssemblyMass = value
-
-                if PartRingSettings.Enabled then
-                        PartRing.refresh()
-                end
-        end
-})
-
-RingPowerSection:Slider({
-        Text = "Max Part Size",
-        Min = 5,
-        Max = 10000,
-        Value = PartRingSettings.MaximumAssemblySize,
-        Callback = function(value)
-                PartRingSettings.MaximumAssemblySize = value
-
-                if PartRingSettings.Enabled then
-                        PartRing.refresh()
-                end
-        end
-})
-
-RingPowerSection:Slider({
         Text = "Release Fling",
         Min = 0,
         Max = 5,
@@ -5223,7 +5098,7 @@ ObjectHoverSection:Slider({
 })
 
 ObjectHoverSection:Paragraph({
-        Text = "Green objects are liftable. Click one to hold it rock-solid over your head - it cannot be pushed, tilted, weighed down, or snagged by anything, and players can stand on it. Click it again or hit Release to drop it."
+        Text = "Green objects are liftable. Click one to hold it over your head with real physics - the flight in, the follow and the toss on release are all genuine and visible to every player, and you can stand on it. Click it again or hit Release to drop it. No mass or size limits."
 })
 end
 
