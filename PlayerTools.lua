@@ -128,6 +128,7 @@ local HeadHoverSettings = {
         CollisionStates = setmetatable({}, {__mode = "k"}),
         NextAssemblyRefresh = 0,
         SuppressClickUntil = 0,
+        CarryVelocity = nil,
         LastStatus = nil,
         ErrorCount = 0
 }
@@ -1478,6 +1479,12 @@ do
 
         local MAX_HOVER_GLOW_PARTS = 40
 
+        -- Head-velocity feed-forward is low-passed at this rate (1/s) so
+        -- humanoid step pulses do not reach the held object at full
+        -- bandwidth. 8/s keeps walking-follow tight while flattening the
+        -- per-step velocity spikes that read as jitter.
+        local HOVER_CARRY_SMOOTH_RATE = 8
+
         local function destroyHighlightList(list)
                 for index = #list, 1, -1 do
                         local highlight = list[index]
@@ -1595,6 +1602,7 @@ do
                 local root = HeadHoverSettings.SelectedRoot
                 HeadHoverSettings.SelectedRoot = nil
                 HeadHoverSettings.ErrorCount = 0
+                HeadHoverSettings.CarryVelocity = nil
 
                 if root then
                         restoreHoverPart()
@@ -1614,6 +1622,7 @@ do
                 HeadHoverSettings.SelectedRoot = root
                 HeadHoverSettings.ErrorCount = 0
                 HeadHoverSettings.NextAssemblyRefresh = 0
+                HeadHoverSettings.CarryVelocity = Vector3.zero
 
                 for _, part in ipairs(getHoverAssemblyParts(root)) do
                         if HeadHoverSettings.CollisionStates[part] == nil then
@@ -1726,14 +1735,19 @@ do
         end
 
         local function applyHoverPlacement(root, targetNow, stepTime, pullGain, carry)
-                -- Exact-landing hold with a static slot: land on the point
-                -- above the head after one physics step, gravity included.
-                -- Same uncapped correction as Chaos - no approach cap, no
-                -- speed ceiling - and the carry term keeps the object
-                -- tracking the head while walking or flying.
+                -- Critically damped hold: close an exponentially weighted
+                -- fraction (1 - e^(-rate * dt)) of the residual each step
+                -- instead of the whole distance plus a bonus. The fraction
+                -- is always below 1, so the object physically cannot
+                -- overshoot the slot and vibrate around it; the same
+                -- exponential low-passes head-motion noise and stays
+                -- stable when the frame time wobbles. Gravity feed-forward
+                -- and the smoothed carry keep the hold tracking while
+                -- walking or flying.
                 local currentPosition = root.Position
                 local residual = targetNow - currentPosition
-                local correction = residual / stepTime * pullGain
+                local closeFraction = 1 - math.exp(-pullGain * stepTime)
+                local correction = residual * (closeFraction / stepTime)
                         + Vector3.new(0, 0.5 * Workspace.Gravity * stepTime, 0)
 
                 root.AssemblyLinearVelocity = correction + carry
@@ -1796,7 +1810,14 @@ do
                         1,
                         100
                 )
-                local pullGain = 0.5 + pullStrength * 0.014
+                -- Response rate in 1/s: pull 1 floats (settle ~0.95 s),
+                -- pull 60 holds firm (~0.26 s), pull 100 is locked on
+                -- (~0.18 s). The rate bounds the per-step close fraction
+                -- below 1, so cranking the slider can never re-create
+                -- the overshoot vibration the old gain mapping had
+                -- (0.5 + pull * 0.014 went above 1 at pull 36+ and the
+                -- object sign-flipped around the slot forever).
+                local pullGain = 3 + pullStrength * 0.14
 
                 local headPosition = head.Position
 
@@ -1807,15 +1828,36 @@ do
                 end
 
                 local targetNow = headPosition + Vector3.new(0, hoverHeight, 0)
-                local carry = head.AssemblyLinearVelocity * 0.5
 
-                if carry.X ~= carry.X
-                        or carry.Y ~= carry.Y
-                        or carry.Z ~= carry.Z then
-                        carry = Vector3.zero
-                elseif carry.Magnitude > 250 then
-                        carry = carry.Unit * 250
+                local headVelocity = head.AssemblyLinearVelocity
+
+                if headVelocity.X ~= headVelocity.X
+                        or headVelocity.Y ~= headVelocity.Y
+                        or headVelocity.Z ~= headVelocity.Z then
+                        headVelocity = Vector3.zero
+                elseif headVelocity.Magnitude > 250 then
+                        headVelocity = headVelocity.Unit * 250
                 end
+
+                -- Low-pass the head-velocity feed-forward: the raw
+                -- humanoid velocity pulses with every footstep, and
+                -- handing it straight to the object reproduced those
+                -- pulses at full bandwidth as visible jitter. The
+                -- filter keeps the follow glide while flattening the
+                -- spikes.
+                local previousCarry = HeadHoverSettings.CarryVelocity
+
+                if typeof(previousCarry) ~= "Vector3" then
+                        previousCarry = Vector3.zero
+                end
+
+                local carryAlpha = 1 - math.exp(
+                        -HOVER_CARRY_SMOOTH_RATE * stepTime
+                )
+                local carry = previousCarry
+                        + (headVelocity - previousCarry) * carryAlpha
+
+                HeadHoverSettings.CarryVelocity = carry
 
                 local ok = pcall(
                         applyHoverPlacement,
