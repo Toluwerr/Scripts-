@@ -202,14 +202,14 @@ local ObjectHoldSettings = {
         PickerConnection = nil,
         InputConnection = nil,
         HeartbeatConnection = nil,
-        SteppedConnection = nil,
         FollowVelocity = nil,
         LastHeadPosition = nil,
         NextGlowRefresh = 0,
-        NextOwnershipAssert = 0,
+        NextPickerRun = 0,
+        HoldBrokenSince = nil,
+        NextClaimAt = 0,
         NextWakeNudge = 0,
         WakeToggle = false,
-        ClaimFailStreak = 0,
         ArrivingShown = false,
         ClickConsumedAt = 0,
         LastStatus = nil,
@@ -3180,11 +3180,14 @@ do
                 alignPosition.Attachment0 = attachment
                 alignPosition.ApplyAtCenterOfMass = true
                 alignPosition.MaxForce = math.huge
-                -- No speed cap: a capped AlignPosition can never keep
-                -- up with a player moving faster than the cap, which
-                -- is exactly the trailing-behind bug. The velocity
-                -- lead in updateObjectHold keeps it tight instead.
-                alignPosition.MaxVelocity = math.huge
+                -- Bounded start value; updateObjectHold retunes it
+                -- every frame from the player's live speed. An
+                -- uncapped servo (math.huge) corrects any
+                -- displacement at unlimited speed - a rider landing
+                -- on the object became a launcher. A fixed low cap
+                -- trails behind at high speed. The live retune does
+                -- neither.
+                alignPosition.MaxVelocity = 200
                 alignPosition.Responsiveness = math.clamp(
                         tonumber(ObjectHoldSettings.Responsiveness) or 35,
                         5,
@@ -3238,7 +3241,8 @@ do
                 ObjectHoldSettings.Root = nil
                 ObjectHoldSettings.ErrorCount = 0
                 ObjectHoldSettings.NextGlowRefresh = 0
-                ObjectHoldSettings.NextOwnershipAssert = 0
+                ObjectHoldSettings.HoldBrokenSince = nil
+                ObjectHoldSettings.NextClaimAt = 0
                 ObjectHoldSettings.NextWakeNudge = 0
                 ObjectHoldSettings.WakeToggle = false
                 ObjectHoldSettings.ArrivingShown = false
@@ -3248,6 +3252,31 @@ do
 
                 clearGlowList(ObjectHoldSettings.HoldHighlights)
                 updateHoldStatus(message or "Released - click an object")
+        end
+
+        -- Best-effort ownership claim. Claiming every physics step
+        -- (the previous attempt) started a war with the server's
+        -- auto-assignment: whenever a rider stood on the object,
+        -- simulation ping-ponged between machines every step and the
+        -- whole thing stuttered. The calm contract instead: claim
+        -- once on grab, and afterwards only when the convergence
+        -- watchdog in updateObjectHold sees the hold actually break.
+        local function claimHoldOwnership(root)
+                pcall(function()
+                        root:SetNetworkOwner(LocalPlayer)
+                end)
+
+                pcall(function()
+                        sethiddenproperty(
+                                LocalPlayer,
+                                "SimulationRadius",
+                                math.huge
+                        )
+                end)
+
+                pcall(function()
+                        setsimulationradius(math.huge, math.huge)
+                end)
         end
 
         local function grabObject(root)
@@ -3260,23 +3289,12 @@ do
                         computeLevelHoldCFrame(root)
                 )
 
-                -- Ownership assist, all best-effort: the engine already
-                -- auto-assigns nearby unanchored parts to this client
-                -- (which is what makes the hold replicate), but where
-                -- the environment allows it, claim ownership directly
-                -- and widen the simulation radius so far-away grabs
-                -- engage replication immediately too.
-                pcall(function()
-                        root:SetNetworkOwner(LocalPlayer)
-                end)
-
-                pcall(function()
-                        sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
-                end)
-
-                pcall(function()
-                        setsimulationradius(math.huge, math.huge)
-                end)
+                -- Ownership assist: auto-assignment already favors
+                -- this client because the slot floats right above
+                -- the head; claim directly where the environment
+                -- allows it so far-away grabs engage replication
+                -- immediately too.
+                claimHoldOwnership(root)
 
                 refreshHoldGlow(root)
 
@@ -3383,8 +3401,8 @@ do
 
                         lead = velocity * leadTime
 
-                        if lead.Magnitude > 20 then
-                                lead = lead.Unit * 20
+                        if lead.Magnitude > 15 then
+                                lead = lead.Unit * 15
                         end
                 end
 
@@ -3416,46 +3434,84 @@ do
                 ObjectHoldSettings.ErrorCount = 0
 
                 local now = os.clock()
+                local distance = (root.Position - goal).Magnitude
 
-                -- Ownership keep: when another player jumps onto the
-                -- object, the server can hand its simulation over to
-                -- them, which freezes or drops the hold. Re-claiming
-                -- on a short interval keeps the assembly simulated
-                -- here, so riders get carried instead of breaking
-                -- the hold.
-                if now >= (ObjectHoldSettings.NextOwnershipAssert or 0) then
-                        ObjectHoldSettings.NextOwnershipAssert = now + 1.5
+                -- Live speed cap, retuned every frame: fast enough
+                -- to sit level at full fly speed and to reel in a
+                -- far grab, bounded enough that a hard displacement
+                -- (a rider landing on the object) glides back to the
+                -- slot instead of rocketing through it.
+                local followSpeed = velocity and velocity.Magnitude or 0
+                local wantedCap = math.clamp(
+                        math.max(
+                                followSpeed * 2.5 + 60,
+                                (distance == distance and distance or 0) * 3
+                        ),
+                        80,
+                        500
+                )
 
-                        -- Backstop claim on the slow timer: if the
-                        -- per-step claims ever start failing, this
-                        -- keeps trying and can resurrect them.
-                        local backstopOk = pcall(function()
-                                root:SetNetworkOwner(LocalPlayer)
+                if math.abs(
+                        (tonumber(rig.AlignPosition.MaxVelocity) or 0)
+                                - wantedCap
+                ) >= 2 then
+                        pcall(function()
+                                rig.AlignPosition.MaxVelocity = wantedCap
                         end)
+                end
 
-                        if backstopOk then
-                                ObjectHoldSettings.ClaimFailStreak = 0
+                -- Convergence watchdog: a hold only "breaks" when the
+                -- object sits far off its slot - which is exactly
+                -- what losing the ownership fight to a rider or the
+                -- server looks like. While broken, re-claim at a
+                -- calm 0.4s cadence until the servo wins control
+                -- back. While healthy, zero ownership traffic at
+                -- all - no war, no stutter.
+                if distance == distance and distance > 10 then
+                        if not ObjectHoldSettings.HoldBrokenSince then
+                                ObjectHoldSettings.HoldBrokenSince = now
                         end
 
-                        pcall(function()
-                                sethiddenproperty(
-                                        LocalPlayer,
-                                        "SimulationRadius",
-                                        math.huge
-                                )
-                        end)
+                        if now - ObjectHoldSettings.HoldBrokenSince > 0.6
+                                and now >= (ObjectHoldSettings.NextClaimAt or 0) then
+                                ObjectHoldSettings.NextClaimAt = now + 0.4
+                                claimHoldOwnership(root)
+                        end
+                else
+                        ObjectHoldSettings.HoldBrokenSince = nil
+                end
 
-                        pcall(function()
-                                setsimulationradius(math.huge, math.huge)
-                        end)
+                -- Anti-sleep, minimal edition: an assembly hovering
+                -- in perfect equilibrium can be put to sleep by the
+                -- engine, freezing replication for everyone else.
+                -- Only a real physics touch keeps an assembly
+                -- simulated, so nudge with a negligible alternating
+                -- velocity - but only while the object is actually
+                -- near-still, so flying in and carrying riders are
+                -- never touched.
+                if now >= (ObjectHoldSettings.NextWakeNudge or 0) then
+                        ObjectHoldSettings.NextWakeNudge = now + 0.4
+                        ObjectHoldSettings.WakeToggle =
+                                not ObjectHoldSettings.WakeToggle
+
+                        local currentVelocity = root.AssemblyLinearVelocity
+
+                        if currentVelocity.Magnitude < 0.05 then
+                                local nudge = ObjectHoldSettings.WakeToggle
+                                        and Vector3.new(0, 0.01, 0)
+                                        or Vector3.new(0, -0.01, 0)
+
+                                pcall(function()
+                                        root.AssemblyLinearVelocity =
+                                                currentVelocity + nudge
+                                end)
+                        end
                 end
 
                 if now >= (ObjectHoldSettings.NextGlowRefresh or 0) then
                         ObjectHoldSettings.NextGlowRefresh = now + 1.25
                         refreshHoldGlow(root)
                 end
-
-                local distance = (root.Position - goal).Magnitude
 
                 if distance == distance then
                         local arriving = ObjectHoldSettings.ArrivingShown
@@ -3481,63 +3537,6 @@ do
                         updateHoldStatus(
                                 "Holding: " .. tostring(root.Name):sub(1, 32)
                         )
-                end
-        end
-
-        -- Ownership override + anti-sleep watchdog, run before
-        -- every physics step. Two devforum-proven facts drive this:
-        -- (1) re-setting network ownership on RunService.Stepped
-        -- makes this client the sole owner of the part - no other
-        -- client can take control on their end, so a rider jumping
-        -- on can never steal the assembly; each step re-asserts the
-        -- claim before the solver runs. (2) A hovering assembly
-        -- held in perfect equilibrium can be put to sleep by the
-        -- engine, which freezes replication - everyone else then
-        -- sees the object stuck in the air at an old spot. Only a
-        -- real physics touch can keep an assembly in live
-        -- simulation, so a negligible alternating velocity nudge
-        -- (0.01 studs/s, cancelled by the servo within a step, zero
-        -- net drift) does exactly that.
-        local function assertHoldOwnership()
-                if not running or not ObjectHoldSettings.Enabled then
-                        return
-                end
-
-                local root = ObjectHoldSettings.Root
-
-                if not root
-                        or not root.Parent
-                        or root.Anchored then
-                        return
-                end
-
-                if (ObjectHoldSettings.ClaimFailStreak or 0) < 120 then
-                        local ok = pcall(function()
-                                root:SetNetworkOwner(LocalPlayer)
-                        end)
-
-                        if ok then
-                                ObjectHoldSettings.ClaimFailStreak = 0
-                        else
-                                ObjectHoldSettings.ClaimFailStreak += 1
-                        end
-                end
-
-                local now = os.clock()
-
-                if now >= (ObjectHoldSettings.NextWakeNudge or 0) then
-                        ObjectHoldSettings.NextWakeNudge = now + 0.25
-                        ObjectHoldSettings.WakeToggle =
-                                not ObjectHoldSettings.WakeToggle
-
-                        local nudge = ObjectHoldSettings.WakeToggle
-                                and Vector3.new(0, 0.01, 0)
-                                or Vector3.new(0, -0.01, 0)
-
-                        pcall(function()
-                                root.AssemblyLinearVelocity =
-                                        root.AssemblyLinearVelocity + nudge
-                        end)
                 end
         end
 
@@ -3639,8 +3638,6 @@ do
                 ObjectHoldSettings.InputConnection = nil
                 disconnect(ObjectHoldSettings.HeartbeatConnection)
                 ObjectHoldSettings.HeartbeatConnection = nil
-                disconnect(ObjectHoldSettings.SteppedConnection)
-                ObjectHoldSettings.SteppedConnection = nil
 
                 releaseObject("Object Hover off")
                 clearGlowList(ObjectHoldSettings.PickerHighlights)
@@ -3650,9 +3647,11 @@ do
                 ObjectHoldSettings.ErrorCount = 0
                 ObjectHoldSettings.FollowVelocity = nil
                 ObjectHoldSettings.LastHeadPosition = nil
-                ObjectHoldSettings.ClaimFailStreak = 0
+                ObjectHoldSettings.HoldBrokenSince = nil
+                ObjectHoldSettings.NextClaimAt = 0
                 ObjectHoldSettings.NextWakeNudge = 0
                 ObjectHoldSettings.WakeToggle = false
+                ObjectHoldSettings.NextPickerRun = 0
         end
 
         ObjectHold.release = function()
@@ -3681,6 +3680,16 @@ do
 
                 ObjectHoldSettings.PickerConnection = RunService.RenderStepped:Connect(
                         function()
+                                -- 20 Hz is plenty for a hover glow;
+                                -- six raycasts every single frame was
+                                -- real per-frame cost.
+                                if os.clock()
+                                        < (ObjectHoldSettings.NextPickerRun or 0) then
+                                        return
+                                end
+
+                                ObjectHoldSettings.NextPickerRun = os.clock() + 0.05
+
                                 local ok, err = pcall(updateHoldPicker)
 
                                 if not ok then
@@ -3703,19 +3712,6 @@ do
                                 if not ok then
                                         updateHoldStatus(
                                                 "Input error: "
-                                                        .. tostring(err):sub(1, 80)
-                                        )
-                                end
-                        end
-                )
-
-                ObjectHoldSettings.SteppedConnection = RunService.Stepped:Connect(
-                        function()
-                                local ok, err = pcall(assertHoldOwnership)
-
-                                if not ok then
-                                        updateHoldStatus(
-                                                "Ownership error: "
                                                         .. tostring(err):sub(1, 80)
                                         )
                                 end
