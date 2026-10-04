@@ -4403,10 +4403,6 @@ ObjectHoverSection:Slider({
         end
 })
 
-ObjectHoverSection:Paragraph({
-        Text = "Green objects are liftable. Click one and it flies in on real physics and floats over your head - collisions, riders and the release toss are all genuine and visible to every player. Click it again or hit Release to drop it. It automatically matches your speed, and the slot positions itself: just above your head normally, or right inside it while Noclip is on - as close to you as possible so it never gets stolen. Snappiness controls how hard it chases the slot."
-})
-
 local ObjectPullSection = FunTab:Section("Object Pull")
 
 local objectPullStatusLabel = ObjectPullSection:Paragraph({
@@ -4446,10 +4442,6 @@ ObjectPullSection:Slider({
         Callback = function(value)
                 ObjectPullSettings.KeepDistance = tonumber(value) or 7
         end
-})
-
-ObjectPullSection:Paragraph({
-        Text = "Drags every liftable object within range straight toward you with unlimited strength - any mass, any count. Real replicated physics visible to every player: objects fly in fast, slow down as they approach and settle around you. Keep Distance sets how far from you they stop and pile up. Works alongside Object Hover."
 })
 end
 
