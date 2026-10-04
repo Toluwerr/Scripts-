@@ -97,8 +97,9 @@ local AimlockSettings = {
 
 local FlingSettings = {
         Enabled = false,
-        Power = 100000,
-        WorkerToken = 0,
+        Power = 100,
+        Mover = nil,
+        RespawnConnection = nil,
         AntiFling = false,
         AntiFlingConnections = {},
         SafeRoot = nil,
@@ -2728,16 +2729,122 @@ local function disconnectAntiFlingConnections()
         table.clear(FlingSettings.AntiFlingConnections)
 end
 
--- Anti Fling: every fling is a physics contact impulse, and every
--- contact impulse on our own character is resolved by THIS client
--- (we own our character assembly). It shows up as a sudden huge jump
--- in root velocity between two frames. Legit motion - walking,
--- falling, our own Fly - always changes velocity smoothly, so a
--- one-frame jump of hundreds of studs/s can only be a fling. When
--- that happens we snap the root back to the last safe pose; since we
--- own the assembly, the correction replicates and nobody sees us
--- move. Catches touch flings, spin flings and tool flings alike.
-local ANTI_FLING_VELOCITY_JUMP = 500
+-- Fling: a BodyAngularVelocity spin mover bolted onto our root,
+-- the mechanism working fling scripts actually use. The mover is
+-- enforced by the physics solver every step, so the huge spin is
+-- steady state on an assembly we own and replicates out to everyone
+-- - anyone who touches us resolves the contact against a surface
+-- moving thousands of studs per second and gets launched. (A
+-- one-frame velocity flicker mostly never leaves the client at all:
+-- property replication samples far too slowly to catch it.)
+-- FallingDown and Ragdoll are disabled while spinning so we never
+-- trip over our own rotation. Fling Power maps to spin speed,
+-- 100 = 10,000 studs/s of surface velocity at the default.
+local FLING_SPIN_PER_POWER = 100
+
+local function getFlingSpin()
+        return math.clamp(tonumber(FlingSettings.Power) or 100, 1, 1000)
+                * FLING_SPIN_PER_POWER
+end
+
+local function applyFlingMover(character)
+        local root = getRoot(character)
+
+        if not root or not root.Parent then
+                return
+        end
+
+        local mover = Instance.new("BodyAngularVelocity")
+        mover.Name = "FlingSpin"
+        mover.AngularVelocity = Vector3.new(0, getFlingSpin(), 0)
+        mover.MaxTorque = Vector3.new(0, math.huge, 0)
+        mover.P = 1e9
+        mover.Parent = root
+        FlingSettings.Mover = mover
+
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+        if humanoid then
+                pcall(function()
+                        humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+                        humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+                end)
+        end
+end
+
+local function stopFling()
+        FlingSettings.Enabled = false
+        disconnect(FlingSettings.RespawnConnection)
+        FlingSettings.RespawnConnection = nil
+
+        local mover = FlingSettings.Mover
+        FlingSettings.Mover = nil
+
+        if mover then
+                pcall(function()
+                        mover:Destroy()
+                end)
+        end
+
+        local character = LocalPlayer.Character
+        local root = getRoot(character)
+
+        if root and root.Parent then
+                pcall(function()
+                        root.AssemblyAngularVelocity = Vector3.zero
+                end)
+        end
+
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+        if humanoid then
+                pcall(function()
+                        humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+                        humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+                end)
+        end
+end
+
+local function startFling()
+        stopFling()
+        FlingSettings.Enabled = true
+        applyFlingMover(LocalPlayer.Character)
+
+        FlingSettings.RespawnConnection = LocalPlayer.CharacterAdded:Connect(
+                function(character)
+                        if not FlingSettings.Enabled then
+                                return
+                        end
+
+                        local root = character:WaitForChild("HumanoidRootPart", 10)
+
+                        if root and root.Parent then
+                                applyFlingMover(character)
+                        end
+                end
+        )
+end
+
+local function setFlingEnabled(value)
+        if value then
+                startFling()
+        else
+                stopFling()
+        end
+end
+
+-- Anti Fling: we always own our own character, so every fling aimed
+-- at us - touch, spin or tool - ends up as our client resolving a
+-- sudden huge jump in root velocity or spin between two frames.
+-- Legit motion (walking, falling, our Fly) changes velocity
+-- smoothly, so a big one-frame jump can only be an attack: snap the
+-- root back to the last safe pose. Because we own the assembly the
+-- correction replicates and nobody sees us move. The spin check is
+-- skipped while our own Fling is running, since our spin mover
+-- would trip it - enemy spin flings still shove us linearly, and
+-- that half of the watchdog keeps working.
+local ANTI_FLING_SPEED_JUMP = 300
+local ANTI_FLING_SPIN = 250
 
 local function disableAntiFling()
         FlingSettings.AntiFling = false
@@ -2751,10 +2858,7 @@ local function enableAntiFling()
         disableAntiFling()
         FlingSettings.AntiFling = true
 
-        -- Stepped fires right before physics. The Fling feature's huge
-        -- velocity is always restored before Stepped, so both toggles
-        -- can run at once without the watchdog eating our own fling.
-        table.insert(FlingSettings.AntiFlingConnections, RunService.Stepped:Connect(function()
+        table.insert(FlingSettings.AntiFlingConnections, RunService.Heartbeat:Connect(function()
                 if not FlingSettings.AntiFling then
                         return
                 end
@@ -2767,6 +2871,7 @@ local function enableAntiFling()
                 end
 
                 local velocity = root.AssemblyLinearVelocity
+                local spin = root.AssemblyAngularVelocity.Magnitude
                 local nan = velocity.X ~= velocity.X
                         or velocity.Y ~= velocity.Y
                         or velocity.Z ~= velocity.Z
@@ -2783,7 +2888,10 @@ local function enableAntiFling()
                 local seated = humanoid ~= nil and humanoid.SeatPart ~= nil
 
                 if not seated
-                        and (nan or (velocity - FlingSettings.SafeVelocity).Magnitude > ANTI_FLING_VELOCITY_JUMP) then
+                        and (nan
+                                or (velocity - FlingSettings.SafeVelocity).Magnitude > ANTI_FLING_SPEED_JUMP
+                                or (not FlingSettings.Enabled
+                                        and (spin > ANTI_FLING_SPIN or spin ~= spin))) then
                         root.CFrame = FlingSettings.SafeCFrame
                         root.AssemblyLinearVelocity = FlingSettings.SafeVelocity
                         root.AssemblyAngularVelocity = Vector3.zero
@@ -2806,62 +2914,6 @@ local function setAntiFlingEnabled(value)
         else
                 disableAntiFling()
         end
-end
-
-local function setFlingEnabled(value)
-        local enabled = value and true or false
-
-        if FlingSettings.Enabled == enabled then
-                return
-        end
-
-        FlingSettings.Enabled = enabled
-        FlingSettings.WorkerToken += 1
-
-        if not enabled then
-                return
-        end
-
-        local workerToken = FlingSettings.WorkerToken
-
-        task.spawn(function()
-                while running
-                        and FlingSettings.Enabled
-                        and workerToken == FlingSettings.WorkerToken do
-                        RunService.Heartbeat:Wait()
-
-                        if not running
-                                or not FlingSettings.Enabled
-                                or workerToken ~= FlingSettings.WorkerToken then
-                                break
-                        end
-
-                        local root = getRoot(LocalPlayer.Character)
-
-                        if root and root.Parent then
-                                local savedVelocity = root.AssemblyLinearVelocity
-                                local power = math.clamp(tonumber(FlingSettings.Power) or 100000, 1, 1000000)
-
-                                -- Classic touch fling: a monster velocity for the
-                                -- window between Heartbeat and the next
-                                -- RenderStepped. No physics step runs inside that
-                                -- window, so we never actually move - but the
-                                -- velocity replicates out, and anyone touching us
-                                -- eats the full impulse and gets launched.
-                                root.AssemblyLinearVelocity = savedVelocity * power + Vector3.new(0, power, 0)
-
-                                RunService.RenderStepped:Wait()
-
-                                if running
-                                        and FlingSettings.Enabled
-                                        and workerToken == FlingSettings.WorkerToken
-                                        and root
-                                        and root.Parent then
-                                        root.AssemblyLinearVelocity = savedVelocity
-                                end
-                        end
-                end
-        end)
 end
 
 do
@@ -3789,28 +3841,29 @@ end
 -- ============================================================
 -- Object Pull: a magnet for everything in range.
 --
--- Every unanchored assembly in the scan is dragged straight
--- toward the player. The pull is a direct velocity order, so
--- it is mass-independent - a paper cup and a concrete slab
--- fly in at the same speed - and it rides on real replicated
--- physics: each root is claimed with SetNetworkOwner when
--- found and quietly refreshed every few seconds, and a
--- client-owned simulation replicates to the server and every
--- other player. Anything that is not ours to simulate simply
--- ignores the pull - an occupied car stays put until its
--- driver hops out, and the next claim sweep grabs it. Speed
--- scales with the remaining gap to the Keep Distance ring,
--- so objects rocket in from far away and ease off as they
--- arrive instead of smashing through.
+-- Every unanchored assembly in the scan is servo-driven to a ring
+-- around the player with one velocity order per frame - mass-
+-- independent, riding on real replicated physics. Roblox hard-caps
+-- client simulation at roughly a thousand studs, so that is the
+-- honest maximum range: claims and velocity writes beyond it
+-- physically cannot work, and pretending otherwise just fills the
+-- status with objects that never move. Each root is claimed with
+-- SetNetworkOwner when found and refreshed every few seconds;
+-- anything that is not ours to simulate silently ignores the pull -
+-- an occupied car stays put until its driver hops out and the next
+-- sweep grabs it. One servo formula aims every root at its own ring
+-- point, the spot Keep Distance studs along its approach
+-- direction: far objects race in, arrivals brake smoothly, objects
+-- inside the ring get pushed back out to it, and the position gain
+-- absorbs gravity while they hover there.
 -- ============================================================
 do
         local SCAN_INTERVAL = 0.4
-        local SCAN_RADIUS = 100000
-        local QUERY_LIMIT = 100000
+        local SCAN_RADIUS = 1000
+        local QUERY_LIMIT = 8192
         local CLAIM_REFRESH = 3
-        local MIN_SPEED = 50
-        local SPEED_PER_STUD = 6
-        local MAX_SPEED = 2000
+        local SPEED_GAIN = 6
+        local MAX_SPEED = 300
         local DEFAULT_KEEP = 7
         local MIN_KEEP = 3
         local MAX_KEEP = 50
@@ -3980,19 +4033,21 @@ do
                         if root.Parent
                                 and not root.Anchored
                                 and root.AssemblyRootPart == root then
-                                local offset = center - root.Position
-                                local distance = offset.Magnitude
+                                local toPlayer = center - root.Position
+                                local gap = toPlayer.Magnitude
 
-                                if distance == distance
-                                        and distance > keep then
-                                        local speed = math.clamp(
-                                                (distance - keep) * SPEED_PER_STUD,
-                                                MIN_SPEED,
+                                if gap == gap and gap > 0.01 then
+                                        local toRing = toPlayer
+                                                - toPlayer.Unit * keep
+                                        local speed = math.min(
+                                                toRing.Magnitude * SPEED_GAIN,
                                                 MAX_SPEED
                                         )
 
-                                        root.AssemblyLinearVelocity =
-                                                offset.Unit * speed
+                                        if speed > 0.05 then
+                                                root.AssemblyLinearVelocity =
+                                                        toRing.Unit * speed
+                                        end
                                 end
                         end
                 end
@@ -4074,8 +4129,7 @@ local function cleanup()
                 ObjectPull.setEnabled(false)
         end)
         clearNoclip()
-        FlingSettings.Enabled = false
-        FlingSettings.WorkerToken += 1
+        stopFling()
         disableAntiFling()
         FlySettings.Enabled = false
         stopFlyRuntime()
@@ -4522,12 +4576,19 @@ FlingSection:Toggle({
 FlingSection:Input({
         Text = "Fling Power",
         Value = tostring(FlingSettings.Power),
-        Placeholder = "100000",
+        Placeholder = "100",
         Callback = function(value)
                 local parsed = tonumber(value)
 
                 if parsed then
-                        FlingSettings.Power = math.clamp(parsed, 1, 1000000)
+                        FlingSettings.Power = math.clamp(parsed, 1, 1000)
+
+                        if FlingSettings.Mover then
+                                pcall(function()
+                                        FlingSettings.Mover.AngularVelocity =
+                                                Vector3.new(0, getFlingSpin(), 0)
+                                end)
+                        end
                 end
         end
 })
