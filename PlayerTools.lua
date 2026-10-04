@@ -223,10 +223,8 @@ local ObjectPullSettings = {
         KeepDistance = 7,
         Roots = {},
         NextScanAt = 0,
-        NextStatusAt = 0,
         Connection = nil,
-        LastStatus = nil,
-        LastStatusKind = nil
+        LastStatus = nil
 }
 
 local ObjectPull = {}
@@ -3803,53 +3801,35 @@ do
 end
 
 -- ============================================================
--- Object Pull: a magnet for every liftable object in range.
+-- Object Pull: a magnet for everything in range.
 --
--- While enabled, every pullable assembly within a fixed radius
--- is dragged straight toward the player at unlimited strength:
--- the pull is applied as direct velocity orders, which are
--- mass-independent - a paper cup and a concrete slab arrive at
--- the same speed. Real replicated physics per the same
--- ownership rules the rest of this file relies on: the engine
--- auto-assigns nearby unanchored parts to this client, roots
--- are claimed via rate-limited SetNetworkOwner calls, and
+-- Every unanchored assembly in the scan is dragged straight
+-- toward the player. The pull is a direct velocity order, so
+-- it is mass-independent - a paper cup and a concrete slab
+-- fly in at the same speed - and it rides on real replicated
+-- physics: each root is claimed with SetNetworkOwner when
+-- found and quietly refreshed every few seconds, and a
 -- client-owned simulation replicates to the server and every
--- other player. The pull is deliberately violent: speed scales
--- at 6 studs/s per stud of remaining gap, up to 2000, so far
--- objects rocket in and only ease off as they close on the
--- Keep Distance ring. A convergence watchdog re-claims any
--- object that stalls outside the ring - the classic sign that
--- the assembly is not ours to simulate. Vehicles are fair
--- game: unoccupied ones get claimed and yanked like anything
--- else, while one with a rider welded in is watched but not
--- fought over - its ownership is locked to the rider's
--- client, so it is pounced on the moment they hop out.
+-- other player. Anything that is not ours to simulate simply
+-- ignores the pull - an occupied car stays put until its
+-- driver hops out, and the next claim sweep grabs it. Speed
+-- scales with the remaining gap to the Keep Distance ring,
+-- so objects rocket in from far away and ease off as they
+-- arrive instead of smashing through.
 -- ============================================================
 do
-        local PULL_SCAN_INTERVAL = 0.1
-        local PULL_RADIUS = 300
-        local PULL_DEFAULT_KEEP = 7
-        local PULL_MIN_KEEP = 3
-        local PULL_MAX_KEEP = 50
-        local PULL_MIN_SPEED = 50
-        local PULL_SPEED_PER_STUD = 6
-        local PULL_MAX_SPEED = 2000
-        local PULL_QUERY_BUFFER = 8192
-        local PULL_CLAIM_BURST = 20
-        local PULL_CLAIM_MEMORY = 0.75
-        local PULL_RESCUE_FIRST = 0.75
-        local PULL_RESCUE_SPREAD = 0.5
-        local PULL_RESCUE_INTERVAL = 0.5
-        local PULL_RESCUE_STALL = 1.5
-        local PULL_RESCUE_BUDGET = 5
-        local PULL_RESCUE_RETRY = 6
-        local PULL_RESCUE_CONCEDE = 2
-        local PULL_STATUS_INTERVAL = 0.25
-        local PULL_SEAT_CACHE_TTL = 2
+        local SCAN_INTERVAL = 0.4
+        local SCAN_RADIUS = 100000
+        local QUERY_LIMIT = 100000
+        local CLAIM_REFRESH = 3
+        local MIN_SPEED = 50
+        local SPEED_PER_STUD = 6
+        local MAX_SPEED = 2000
+        local DEFAULT_KEEP = 7
+        local MIN_KEEP = 3
+        local MAX_KEEP = 50
 
-        local claimedRoots = {}
-        local rescueWatch = {}
-        local seatAssemblyCache = {}
+        local lastClaimAt = {}
 
         local function updatePullStatus(text)
                 local message = tostring(text or "Object Pull off")
@@ -3858,84 +3838,19 @@ do
                         return
                 end
 
-                -- Count-only changes are throttled so a busy pull
-                -- does not repaint the label every single frame;
-                -- kind changes (pulling / gathered / off / error)
-                -- always pass through immediately.
-                local now = os.clock()
-                local kind = message:gsub("%d+", "#")
-
-                if kind == (ObjectPullSettings.LastStatusKind or "")
-                        and now < (ObjectPullSettings.NextStatusAt or 0) then
-                        return
-                end
-
                 ObjectPullSettings.LastStatus = message
-                ObjectPullSettings.LastStatusKind = kind
-                ObjectPullSettings.NextStatusAt = now + PULL_STATUS_INTERVAL
 
                 if type(ObjectPull.OnStatusChanged) == "function" then
                         pcall(ObjectPull.OnStatusChanged, message)
                 end
         end
 
-        local function hasPullBlockedAncestor(instance)
-                local current = instance
-
-                while current and current ~= Workspace do
-                        if current:IsA("Tool") then
-                                return true
-                        end
-
-                        if current:IsA("Model")
-                                and current:FindFirstChildOfClass("Humanoid") then
-                                return true
-                        end
-
-                        current = current.Parent
-                end
-
-                return false
-        end
-
-        -- Sitting welds the rider's character into the vehicle
-        -- assembly, which locks network ownership to their
-        -- client - an occupied vehicle can never be pulled, and
-        -- trying just burns claim traffic. So the seat walk
-        -- reports whether anyone is seated; the state is cached
-        -- briefly so big assemblies are not re-walked every
-        -- scan.
-        local function assemblySeatState(root)
-                local now = os.clock()
-                local cached = seatAssemblyCache[root]
-
-                if cached and now - cached.At < PULL_SEAT_CACHE_TTL then
-                        return cached.HasSeat, cached.Occupied
-                end
-
-                local hasSeat = root:IsA("Seat")
-                local occupied = hasSeat and root.Occupant ~= nil
-
-                if not occupied then
-                        for _, child in ipairs(root:GetDescendants()) do
-                                if child:IsA("Seat") then
-                                        hasSeat = true
-
-                                        if child.Occupant then
-                                                occupied = true
-                                                break
-                                        end
-                                end
-                        end
-                end
-
-                seatAssemblyCache[root] = {
-                        HasSeat = hasSeat,
-                        Occupied = occupied,
-                        At = now
-                }
-
-                return hasSeat, occupied
+        local function getKeepDistance()
+                return math.clamp(
+                        tonumber(ObjectPullSettings.KeepDistance) or DEFAULT_KEEP,
+                        MIN_KEEP,
+                        MAX_KEEP
+                )
         end
 
         local function isPullableRoot(root)
@@ -3964,10 +3879,6 @@ do
                         return false
                 end
 
-                if hasPullBlockedAncestor(root) then
-                        return false
-                end
-
                 return true
         end
 
@@ -3986,17 +3897,16 @@ do
                 local params = OverlapParams.new()
                 params.FilterType = Enum.RaycastFilterType.Exclude
                 params.FilterDescendantsInstances = filter
-                params.MaxParts = PULL_QUERY_BUFFER
+                params.MaxParts = QUERY_LIMIT
 
                 local found = Workspace:GetPartBoundsInRadius(
                         center,
-                        PULL_RADIUS,
+                        SCAN_RADIUS,
                         params
                 )
+                local now = os.clock()
                 local roots = {}
                 local seen = {}
-                local claims = 0
-                local stamp = os.clock()
 
                 for _, part in ipairs(found) do
                         local root = part and part.AssemblyRootPart
@@ -4007,59 +3917,53 @@ do
                                 seen[root] = true
                                 table.insert(roots, root)
 
-                                local _, occupied =
-                                        assemblySeatState(root)
+                                -- Claim new finds, and quietly refresh the rest
+                                -- every few seconds. A claim that fails or gets
+                                -- outvoted just waits for the next sweep - no
+                                -- fighting over anything.
+                                if not lastClaimAt[root]
+                                        or now - lastClaimAt[root] >= CLAIM_REFRESH then
+                                        lastClaimAt[root] = now
 
-                                -- Claims are remembered and rate-limited:
-                                -- a swarm is claimed over several scan
-                                -- ticks instead of one huge burst. The
-                                -- memory window also debounces roots
-                                -- sitting on the scan edge, so they are
-                                -- not re-claimed on every flicker in
-                                -- and out of the query sphere; a root
-                                -- that is genuinely gone is forgotten
-                                -- shortly after. An occupied vehicle is
-                                -- never claimed - its assembly is welded
-                                -- to the rider's character, and that
-                                -- ownership is not ours to take.
-                                if not occupied then
-                                        if not claimedRoots[root] then
-                                                if claims < PULL_CLAIM_BURST then
-                                                        claims += 1
-                                                        claimedRoots[root] = stamp
-
-                                                        pcall(function()
-                                                                root:SetNetworkOwner(
-                                                                        LocalPlayer
-                                                                )
-                                                        end)
-                                                end
-                                        else
-                                                claimedRoots[root] = stamp
-                                        end
+                                        pcall(function()
+                                                root:SetNetworkOwner(LocalPlayer)
+                                        end)
                                 end
                         end
                 end
 
-                for root, seenAt in pairs(claimedRoots) do
-                        if stamp - seenAt > PULL_CLAIM_MEMORY then
-                                claimedRoots[root] = nil
-                        end
-                end
-
-                for root in pairs(rescueWatch) do
+                for root in pairs(lastClaimAt) do
                         if not seen[root] then
-                                rescueWatch[root] = nil
-                        end
-                end
-
-                for root in pairs(seatAssemblyCache) do
-                        if not seen[root] then
-                                seatAssemblyCache[root] = nil
+                                lastClaimAt[root] = nil
                         end
                 end
 
                 ObjectPullSettings.Roots = roots
+
+                local keep = getKeepDistance()
+                local active = 0
+                local total = 0
+
+                for _, root in ipairs(roots) do
+                        local offset = center - root.Position
+                        local distance = offset.Magnitude
+
+                        if distance == distance then
+                                total += 1
+
+                                if distance > keep then
+                                        active += 1
+                                end
+                        end
+                end
+
+                if active > 0 then
+                        updatePullStatus("Pulling " .. active .. " objects")
+                elseif total > 0 then
+                        updatePullStatus(total .. " objects gathered")
+                else
+                        updatePullStatus("No liftable objects in range")
+                end
         end
 
         local function updateObjectPull()
@@ -4079,22 +3983,12 @@ do
                 local now = os.clock()
 
                 if now >= (ObjectPullSettings.NextScanAt or 0) then
-                        ObjectPullSettings.NextScanAt = now + PULL_SCAN_INTERVAL
+                        ObjectPullSettings.NextScanAt = now + SCAN_INTERVAL
                         scanPullRoots(rootPart.Position)
                 end
 
                 local center = rootPart.Position
-                local keepDistance = math.clamp(
-                        tonumber(ObjectPullSettings.KeepDistance)
-                                or PULL_DEFAULT_KEEP,
-                        PULL_MIN_KEEP,
-                        PULL_MAX_KEEP
-                )
-                local activeCount = 0
-                local totalCount = 0
-                local stuckCount = 0
-                local occupiedCount = 0
-                local rescueBudget = PULL_RESCUE_BUDGET
+                local keep = getKeepDistance()
 
                 for _, root in ipairs(ObjectPullSettings.Roots) do
                         if root.Parent
@@ -4103,128 +3997,18 @@ do
                                 local offset = center - root.Position
                                 local distance = offset.Magnitude
 
-                                if distance == distance then
-                                        local _, occupied =
-                                                assemblySeatState(root)
+                                if distance == distance
+                                        and distance > keep then
+                                        local speed = math.clamp(
+                                                (distance - keep) * SPEED_PER_STUD,
+                                                MIN_SPEED,
+                                                MAX_SPEED
+                                        )
 
-                                        if occupied then
-                                                -- A rider is welded into
-                                                -- the assembly: ownership
-                                                -- is locked to their
-                                                -- client, so writes and
-                                                -- rescue claims are
-                                                -- pointless - just watch
-                                                -- it and pounce the
-                                                -- moment they hop out.
-                                                occupiedCount += 1
-                                                rescueWatch[root] = nil
-                                        elseif distance > keepDistance then
-                                                activeCount += 1
-                                                totalCount += 1
-
-                                                local speed = math.clamp(
-                                                        (distance - keepDistance)
-                                                                * PULL_SPEED_PER_STUD,
-                                                        PULL_MIN_SPEED,
-                                                        PULL_MAX_SPEED
-                                                )
-
-                                                root.AssemblyLinearVelocity =
-                                                        offset.Unit * speed
-
-                                                -- Convergence watchdog: an
-                                                -- object outside the ring
-                                                -- that is not getting
-                                                -- closer is either not
-                                                -- ours to simulate or
-                                                -- genuinely blocked. A
-                                                -- per-root retry budget
-                                                -- plus a per-frame global
-                                                -- budget keep rescue
-                                                -- claims bounded; after
-                                                -- the budget is spent the
-                                                -- watch concedes and only
-                                                -- re-arms if the object
-                                                -- starts moving again.
-                                                local watch = rescueWatch[root]
-
-                                                if not watch then
-                                                        rescueWatch[root] = {
-                                                                Distance = distance,
-                                                                NextClaimAt = now
-                                                                        + PULL_RESCUE_FIRST
-                                                                        + math.random()
-                                                                                * PULL_RESCUE_SPREAD,
-                                                                Claims = 0,
-                                                                Conceded = false
-                                                        }
-                                                elseif now >= watch.NextClaimAt then
-                                                        local stalled = distance
-                                                                > (watch.Distance or 0)
-                                                                        - PULL_RESCUE_STALL
-
-                                                        if stalled
-                                                                and watch.Claims
-                                                                        < PULL_RESCUE_RETRY then
-                                                                if rescueBudget > 0 then
-                                                                        rescueBudget -= 1
-                                                                        watch.Claims += 1
-
-                                                                        pcall(function()
-                                                                                root:SetNetworkOwner(
-                                                                                        LocalPlayer
-                                                                                )
-                                                                        end)
-                                                                end
-
-                                                                watch.NextClaimAt = now
-                                                                        + PULL_RESCUE_INTERVAL
-                                                        elseif stalled then
-                                                                watch.Conceded = true
-                                                                watch.NextClaimAt = now
-                                                                        + PULL_RESCUE_CONCEDE
-                                                        else
-                                                                watch.Claims = 0
-                                                                watch.Conceded = false
-                                                                watch.NextClaimAt = now
-                                                                        + PULL_RESCUE_INTERVAL
-                                                        end
-
-                                                        watch.Distance = distance
-                                                end
-
-                                                if watch and watch.Conceded then
-                                                        stuckCount += 1
-                                                end
-                                        else
-                                                rescueWatch[root] = nil
-                                                totalCount += 1
-                                        end
+                                        root.AssemblyLinearVelocity =
+                                                offset.Unit * speed
                                 end
                         end
-                end
-
-                if activeCount > 0 then
-                        local statusText =
-                                "Pulling " .. activeCount .. " objects"
-
-                        if stuckCount > 0 then
-                                statusText = statusText
-                                        .. " (" .. stuckCount .. " stuck)"
-                        end
-
-                        updatePullStatus(statusText)
-                elseif occupiedCount > 0 then
-                        updatePullStatus(
-                                "Waiting on " .. occupiedCount
-                                        .. " occupied vehicles"
-                        )
-                elseif totalCount > 0 then
-                        updatePullStatus(
-                                totalCount .. " objects gathered"
-                        )
-                else
-                        updatePullStatus("No liftable objects in range")
                 end
         end
 
@@ -4233,19 +4017,9 @@ do
                 ObjectPullSettings.Connection = nil
                 ObjectPullSettings.Roots = {}
                 ObjectPullSettings.NextScanAt = 0
-                ObjectPullSettings.NextStatusAt = 0
-                ObjectPullSettings.LastStatusKind = nil
 
-                for root in pairs(claimedRoots) do
-                        claimedRoots[root] = nil
-                end
-
-                for root in pairs(rescueWatch) do
-                        rescueWatch[root] = nil
-                end
-
-                for root in pairs(seatAssemblyCache) do
-                        seatAssemblyCache[root] = nil
+                for root in pairs(lastClaimAt) do
+                        lastClaimAt[root] = nil
                 end
         end
 
@@ -4264,9 +4038,6 @@ do
                         return
                 end
 
-                -- Same replication assists as the hold: widen the
-                -- simulation radius where the environment allows it
-                -- so far-away objects engage immediately too.
                 pcall(function()
                         sethiddenproperty(
                                 LocalPlayer,
