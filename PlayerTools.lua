@@ -100,8 +100,15 @@ local FlingSettings = {
         Power = 100,
         Mover = nil,
         RespawnConnection = nil,
+        NoclipConnection = nil,
+        BurstConnection = nil,
+        DensitySaved = setmetatable({}, { __mode = "k" }),
+        LastTouchAt = 0,
+        CooldownUntil = 0,
         AntiFling = false,
         AntiFlingConnections = {},
+        StripStates = setmetatable({}, { __mode = "k" }),
+        StripCaches = setmetatable({}, { __mode = "k" }),
         SafeRoot = nil,
         SafeCFrame = nil,
         SafeVelocity = nil
@@ -226,6 +233,8 @@ local ObjectPullSettings = {
         KeepDistance = 7,
         Roots = {},
         NextScanAt = 0,
+        NextEnvAt = 0,
+        SimBoost = false,
         Connection = nil,
         LastStatus = nil
 }
@@ -2729,38 +2738,56 @@ local function disconnectAntiFlingConnections()
         table.clear(FlingSettings.AntiFlingConnections)
 end
 
--- Fling: a BodyAngularVelocity spin mover bolted onto our root,
--- the mechanism working fling scripts actually use. The mover is
--- enforced by the physics solver every step, so the huge spin is
--- steady state on an assembly we own and replicates out to everyone
--- - anyone who touches us resolves the contact against a surface
--- moving thousands of studs per second and gets launched. (A
--- one-frame velocity flicker mostly never leaves the client at all:
--- property replication samples far too slowly to catch it.)
--- FallingDown and Ragdoll are disabled while spinning so we never
--- trip over our own rotation. Fling Power maps to spin speed,
--- 100 = 10,000 studs/s of surface velocity at the default.
+-- Fling: a touch fling rebuilt from the pattern working fling
+-- scripts actually ship. While it is on, three protections make us
+-- the immovable one. Our parts get near-infinite density, so the
+-- contact reaction on us rounds to zero. Our collisions are also
+-- stripped locally every Stepped - a CanCollide write is local
+-- only, so every other client still sees us solid and resolves the
+-- contact on their side (that is the half that flings THEM), while
+-- our own client never resolves it at all (that is the half that
+-- stops us flinging OURSELVES). And our velocities are zeroed the
+-- moment a burst ends. The spin itself is a BodyAngularVelocity
+-- mover enforced by the solver every step, but it only exists while
+-- someone is actually in touch range - no idle spinning - so we
+-- whirl for a fraction of a second per contact and stand still the
+-- rest of the time while they get launched.
 local FLING_SPIN_PER_POWER = 100
+local FLING_TOUCH_RANGE = 9
+local FLING_BURST_CAP = 1
+local FLING_COOLDOWN = 0.35
+local FLING_PHYSICS = PhysicalProperties.new(math.huge, 0.3, 0.5)
 
 local function getFlingSpin()
         return math.clamp(tonumber(FlingSettings.Power) or 100, 1, 1000)
                 * FLING_SPIN_PER_POWER
 end
 
-local function applyFlingMover(character)
+local function applyFlingCharacterSetup(character)
         local root = getRoot(character)
 
         if not root or not root.Parent then
                 return
         end
 
-        local mover = Instance.new("BodyAngularVelocity")
-        mover.Name = "FlingSpin"
-        mover.AngularVelocity = Vector3.new(0, getFlingSpin(), 0)
-        mover.MaxTorque = Vector3.new(0, math.huge, 0)
-        mover.P = 1e9
-        mover.Parent = root
-        FlingSettings.Mover = mover
+        -- Near-infinite density on every part of us: contact impulses
+        -- land on everyone else and the reaction on us approaches
+        -- nothing. The original properties are remembered so disable
+        -- puts everything back exactly as it was.
+        for _, part in ipairs(character:GetDescendants()) do
+                if part:IsA("BasePart") then
+                        if FlingSettings.DensitySaved[part] == nil then
+                                FlingSettings.DensitySaved[part] = {
+                                        physics = part.CustomPhysicalProperties or false,
+                                        canCollide = part.CanCollide
+                                }
+                        end
+
+                        pcall(function()
+                                part.CustomPhysicalProperties = FLING_PHYSICS
+                        end)
+                end
+        end
 
         local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 
@@ -2772,11 +2799,17 @@ local function applyFlingMover(character)
         end
 end
 
-local function stopFling()
-        FlingSettings.Enabled = false
-        disconnect(FlingSettings.RespawnConnection)
-        FlingSettings.RespawnConnection = nil
+local function createFlingMover(root)
+        local mover = Instance.new("BodyAngularVelocity")
+        mover.Name = "FlingSpin"
+        mover.AngularVelocity = Vector3.new(0, getFlingSpin(), 0)
+        mover.MaxTorque = Vector3.new(0, math.huge, 0)
+        mover.P = 1e9
+        mover.Parent = root
+        FlingSettings.Mover = mover
+end
 
+local function destroyFlingMover()
         local mover = FlingSettings.Mover
         FlingSettings.Mover = nil
 
@@ -2786,15 +2819,61 @@ local function stopFling()
                 end)
         end
 
-        local character = LocalPlayer.Character
-        local root = getRoot(character)
+        local root = getRoot(LocalPlayer.Character)
 
         if root and root.Parent then
                 pcall(function()
                         root.AssemblyAngularVelocity = Vector3.zero
+                        root.AssemblyLinearVelocity = Vector3.zero
                 end)
         end
+end
 
+local function findFlingTouch(root)
+        local position = root.Position
+        local rangeSq = FLING_TOUCH_RANGE * FLING_TOUCH_RANGE
+
+        for _, player in ipairs(Players:GetPlayers()) do
+                if player ~= LocalPlayer then
+                        local target = getRoot(player.Character)
+
+                        if target and target.Parent then
+                                local offset = target.Position - position
+
+                                if offset:Dot(offset) <= rangeSq then
+                                        return true
+                                end
+                        end
+                end
+        end
+
+        return false
+end
+
+local function stopFling()
+        FlingSettings.Enabled = false
+        disconnect(FlingSettings.RespawnConnection)
+        FlingSettings.RespawnConnection = nil
+        disconnect(FlingSettings.NoclipConnection)
+        FlingSettings.NoclipConnection = nil
+        disconnect(FlingSettings.BurstConnection)
+        FlingSettings.BurstConnection = nil
+
+        destroyFlingMover()
+
+        for part, saved in pairs(FlingSettings.DensitySaved) do
+                if part and part.Parent then
+                        pcall(function()
+                                part.CustomPhysicalProperties =
+                                        saved.physics == false and nil or saved.physics
+                                part.CanCollide = saved.canCollide
+                        end)
+                end
+        end
+
+        table.clear(FlingSettings.DensitySaved)
+
+        local character = LocalPlayer.Character
         local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 
         if humanoid then
@@ -2808,7 +2887,9 @@ end
 local function startFling()
         stopFling()
         FlingSettings.Enabled = true
-        applyFlingMover(LocalPlayer.Character)
+        FlingSettings.LastTouchAt = 0
+        FlingSettings.CooldownUntil = 0
+        applyFlingCharacterSetup(LocalPlayer.Character)
 
         FlingSettings.RespawnConnection = LocalPlayer.CharacterAdded:Connect(
                 function(character)
@@ -2819,9 +2900,65 @@ local function startFling()
                         local root = character:WaitForChild("HumanoidRootPart", 10)
 
                         if root and root.Parent then
-                                applyFlingMover(character)
+                                applyFlingCharacterSetup(character)
                         end
                 end
+        )
+
+        -- The local collision strip. Re-applied every physics step
+        -- because the humanoid re-enables collisions on its own every
+        -- frame; without the loop the protection lasts one step.
+        FlingSettings.NoclipConnection = RunService.Stepped:Connect(function()
+                local character = LocalPlayer.Character
+
+                if not character or not character.Parent then
+                        return
+                end
+
+                for _, part in ipairs(character:GetDescendants()) do
+                        if part:IsA("BasePart") and part.CanCollide then
+                                pcall(function()
+                                        part.CanCollide = false
+                                end)
+                        end
+                end
+        end
+        )
+
+        -- Burst driver: spin only while someone is touching us. They
+        -- leave - usually because they just got launched - and the
+        -- mover comes straight off with our velocities zeroed, so we
+        -- never drift and never self-fling. Continuous contact is
+        -- capped and cycled so a hug cannot pin the spin on forever.
+        FlingSettings.BurstConnection = RunService.Heartbeat:Connect(function()
+                if not FlingSettings.Enabled then
+                        return
+                end
+
+                local root = getRoot(LocalPlayer.Character)
+
+                if not root or not root.Parent then
+                        return
+                end
+
+                local now = os.clock()
+                local touching = findFlingTouch(root)
+
+                if touching then
+                        FlingSettings.LastTouchAt = now
+                end
+
+                if touching and now >= (FlingSettings.CooldownUntil or 0) then
+                        if not FlingSettings.Mover then
+                                createFlingMover(root)
+                        end
+                elseif FlingSettings.Mover
+                        and (not touching
+                                or now - (FlingSettings.LastTouchAt or 0) >= FLING_BURST_CAP) then
+                        destroyFlingMover()
+                        FlingSettings.CooldownUntil = now + FLING_COOLDOWN
+                end
+        end
         )
 end
 
@@ -2833,22 +2970,43 @@ local function setFlingEnabled(value)
         end
 end
 
--- Anti Fling: we always own our own character, so every fling aimed
--- at us - touch, spin or tool - ends up as our client resolving a
--- sudden huge jump in root velocity or spin between two frames.
--- Legit motion (walking, falling, our Fly) changes velocity
--- smoothly, so a big one-frame jump can only be an attack: snap the
--- root back to the last safe pose. Because we own the assembly the
--- correction replicates and nobody sees us move. The spin check is
--- skipped while our own Fling is running, since our spin mover
--- would trip it - enemy spin flings still shove us linearly, and
--- that half of the watchdog keeps working.
+-- Anti Fling: two layers. The structural one is what working
+-- scripts ship: a fling is a physics contact, and a contact needs
+-- two collidable sides, so every other player's character parts
+-- get CanCollide stripped locally at 20 Hz - a local write that
+-- does not replicate, so they still collide normally with the
+-- world and each other, but their spin can never resolve a contact
+-- against us on our client, and only owners resolve contacts on
+-- their own assembly. Nothing to resolve, nothing to fling us.
+-- The watchdog layer stays underneath for everything that is not a
+-- player contact - disaster physics, NaN exploits, loose debris:
+-- we always own our own character, so any fling aimed at us ends
+-- up as a sudden huge jump in root velocity or spin between two
+-- frames, and legit motion (walking, falling, our Fly) never jumps
+-- like that. Snap the root back to the last safe pose; because we
+-- own the assembly the correction replicates and nobody sees us
+-- move. The spin check is skipped while our own Fling is running,
+-- since our spin mover would trip it - enemy spin flings still
+-- shove us linearly, and that half of the watchdog keeps working.
 local ANTI_FLING_SPEED_JUMP = 300
 local ANTI_FLING_SPIN = 250
+local ANTI_FLING_SWEEP = 3
 
 local function disableAntiFling()
         FlingSettings.AntiFling = false
         disconnectAntiFlingConnections()
+
+        for part, originalCanCollide in pairs(FlingSettings.StripStates) do
+                if part and part.Parent then
+                        pcall(function()
+                                part.CanCollide = originalCanCollide
+                        end)
+                end
+        end
+
+        table.clear(FlingSettings.StripStates)
+        table.clear(FlingSettings.StripCaches)
+
         FlingSettings.SafeRoot = nil
         FlingSettings.SafeCFrame = nil
         FlingSettings.SafeVelocity = nil
@@ -2904,6 +3062,74 @@ local function enableAntiFling()
                 else
                         FlingSettings.SafeCFrame = root.CFrame
                         FlingSettings.SafeVelocity = velocity
+                end
+        end))
+
+        -- Structural shield: strip collisions off every other
+        -- player's character locally. 20 Hz is plenty - the server
+        -- does not re-enable them every frame. Caches are weak and
+        -- per character, a DescendantAdded hook catches parts that
+        -- stream in later (accessories), and the strip only ever
+        -- remembers parts that were collidable when found, so
+        -- disable restores exactly what was taken.
+        local sweep = 0
+
+        table.insert(FlingSettings.AntiFlingConnections, RunService.Stepped:Connect(function()
+                if not FlingSettings.AntiFling then
+                        return
+                end
+
+                sweep += 1
+
+                if sweep % ANTI_FLING_SWEEP ~= 0 then
+                        return
+                end
+
+                for _, player in ipairs(Players:GetPlayers()) do
+                        if player ~= LocalPlayer then
+                                local character = player.Character
+
+                                if character and character.Parent then
+                                        local cache = FlingSettings.StripCaches[character]
+
+                                        if not cache then
+                                                cache = { parts = {} }
+
+                                                for _, part in ipairs(character:GetDescendants()) do
+                                                        if part:IsA("BasePart") then
+                                                                table.insert(cache.parts, part)
+                                                        end
+                                                end
+
+                                                local connection = character.DescendantAdded:Connect(
+                                                        function(descendant)
+                                                                if descendant:IsA("BasePart") then
+                                                                        table.insert(cache.parts, descendant)
+                                                                end
+                                                        end
+                                                )
+
+                                                table.insert(FlingSettings.AntiFlingConnections, connection)
+                                                FlingSettings.StripCaches[character] = cache
+                                        end
+
+                                        for index = #cache.parts, 1, -1 do
+                                                local part = cache.parts[index]
+
+                                                if not part or not part.Parent then
+                                                        table.remove(cache.parts, index)
+                                                elseif part.CanCollide then
+                                                        if FlingSettings.StripStates[part] == nil then
+                                                                FlingSettings.StripStates[part] = true
+                                                        end
+
+                                                        pcall(function()
+                                                                part.CanCollide = false
+                                                        end)
+                                                end
+                                        end
+                                end
+                        end
                 end
         end))
 end
@@ -3839,36 +4065,55 @@ do
 end
 
 -- ============================================================
--- Object Pull: a magnet for everything in range.
+-- Object Pull: a magnet for everything in range, built the way
+-- working Natural Disaster Survival scripts actually do it.
 --
--- Every unanchored assembly in the scan is servo-driven to a ring
--- around the player with one velocity order per frame - mass-
--- independent, riding on real replicated physics. Roblox hard-caps
--- client simulation at roughly a thousand studs, so that is the
--- honest maximum range: claims and velocity writes beyond it
--- physically cannot work, and pretending otherwise just fills the
--- status with objects that never move. Each root is claimed with
--- SetNetworkOwner when found and refreshed every few seconds;
--- anything that is not ours to simulate silently ignores the pull -
--- an occupied car stays put until its driver hops out and the next
--- sweep grabs it. One servo formula aims every root at its own ring
--- point, the spot Keep Distance studs along its approach
--- direction: far objects race in, arrivals brake smoothly, objects
--- inside the ring get pushed back out to it, and the position gain
--- absorbs gravity while they hover there.
+-- The engine only lets a client's velocity orders matter on parts
+-- that client simulates, and SetNetworkOwner simply errors when
+-- called from a client - so the real technique is the simulation
+-- radius war: our own MaximumSimulationRadius and (hidden)
+-- SimulationRadius get pushed to 9e9 while every other player's get
+-- pinned to zero, refreshed every half second. Auto-owned debris
+-- arbitration then lands on us for the whole island, and our
+-- velocity writes become real replicated physics. ReplicationFocus
+-- follows the pull and sleep is disabled so nothing dozes off
+-- mid-flight. Held roots are turned featherweight and ghosted
+-- (density 0.001, no collisions) so the swarm flows into the ring
+-- instead of crushing us, and everything is restored on release.
+-- Filters keep out characters and tools, burning debris (NDS fire
+-- rides parts as a Fire child), and ocean/lava slabs. Range stays
+-- at the engine's honest ~1000 stud simulation cap. One servo
+-- formula aims every root at its own ring point, the spot Keep
+-- Distance studs along its approach direction: far objects race
+-- in, arrivals brake smoothly, objects inside the ring get pushed
+-- back out to it, and the position gain absorbs gravity while they
+-- hover there.
 -- ============================================================
 do
         local SCAN_INTERVAL = 0.4
         local SCAN_RADIUS = 1000
         local QUERY_LIMIT = 8192
-        local CLAIM_REFRESH = 3
+        local ENV_INTERVAL = 0.5
         local SPEED_GAIN = 6
         local MAX_SPEED = 300
+        local MAX_DIMENSION = 120
         local DEFAULT_KEEP = 7
         local MIN_KEEP = 3
         local MAX_KEEP = 50
+        local SIM_RADIUS = 9e9
+        local LIGHT_PHYSICS = PhysicalProperties.new(0.001, 0, 0, 0, 0)
 
-        local lastClaimAt = {}
+        local EXCLUDED_NAMES = {
+                Terrain = true,
+                Baseplate = true,
+                HumanoidRootPart = true,
+                Handle = true
+        }
+
+        local claimedRoots = setmetatable({}, { __mode = "k" })
+        local claimedParts = setmetatable({}, { __mode = "k" })
+        local envOriginals = setmetatable({}, { __mode = "k" })
+        local allowSleepSaved = nil
 
         local function updatePullStatus(text)
                 local message = tostring(text or "Object Pull off")
@@ -3892,6 +4137,200 @@ do
                 )
         end
 
+        local function pullReadProperty(object, key, hidden)
+                if hidden and type(gethiddenproperty) == "function" then
+                        local ok, value = pcall(gethiddenproperty, object, key)
+
+                        if ok then
+                                return value
+                        end
+                end
+
+                local ok, value = pcall(function()
+                        return object[key]
+                end)
+
+                if ok then
+                        return value
+                end
+
+                return nil
+        end
+
+        local function pullWriteProperty(object, key, value, hidden)
+                if hidden and type(sethiddenproperty) == "function" then
+                        local ok = pcall(sethiddenproperty, object, key, value)
+
+                        if ok then
+                                return true
+                        end
+                end
+
+                return pcall(function()
+                        object[key] = value
+                end)
+        end
+
+        local function pullRemember(object, key, value, hidden)
+                local saved = envOriginals[object]
+
+                if not saved then
+                        saved = {}
+                        envOriginals[object] = saved
+                end
+
+                if saved[key] == nil then
+                        saved[key] = {
+                                value = pullReadProperty(object, key, hidden),
+                                hidden = hidden
+                        }
+                end
+
+                pullWriteProperty(object, key, value, hidden)
+        end
+
+        local function pullSimBoostActive()
+                local radius = pullReadProperty(LocalPlayer, "SimulationRadius", true)
+
+                if type(radius) == "number" and radius >= SIM_RADIUS * 0.5 then
+                        return true
+                end
+
+                local maximum = pullReadProperty(LocalPlayer, "MaximumSimulationRadius", false)
+
+                return type(maximum) == "number" and maximum >= SIM_RADIUS * 0.5
+        end
+
+        local function applyPullEnvironment(rootPart)
+                -- Ourselves: maximum simulation reach, always awake,
+                -- replication centred where the pull is.
+                pullRemember(LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
+                pullRemember(LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
+                pullRemember(LocalPlayer, "NetworkIsSleeping", false, true)
+                pullRemember(LocalPlayer, "ReplicationFocus", rootPart.CFrame)
+
+                if allowSleepSaved == nil then
+                        local ok, value = pcall(function()
+                                return settings().Physics.AllowSleep
+                        end)
+
+                        allowSleepSaved = ok and value or false
+                end
+
+                pcall(function()
+                        settings().Physics.AllowSleep = false
+                end)
+
+                -- Everyone else pinned to zero radius: the arbitration
+                -- for every loose part near them lands on us instead.
+                -- Local writes, undone on disable.
+                for _, player in ipairs(Players:GetPlayers()) do
+                        if player ~= LocalPlayer then
+                                pullRemember(player, "MaximumSimulationRadius", 0)
+                                pullRemember(player, "SimulationRadius", 0, true)
+                        end
+                end
+
+                ObjectPullSettings.SimBoost = pullSimBoostActive()
+        end
+
+        local function restorePullEnvironment()
+                for object, saved in pairs(envOriginals) do
+                        for key, original in pairs(saved) do
+                                pcall(pullWriteProperty, object, key, original.value, original.hidden)
+                        end
+                end
+
+                table.clear(envOriginals)
+
+                if allowSleepSaved ~= nil then
+                        pcall(function()
+                                settings().Physics.AllowSleep = allowSleepSaved
+                        end)
+
+                        allowSleepSaved = nil
+                end
+        end
+
+        local function claimPullRoot(root)
+                if claimedRoots[root] then
+                        return
+                end
+
+                -- The whole assembly is claimed, not just the root:
+                -- welded buildings flow in as one piece instead of
+                -- snagging on their still-collidable children. Player
+                -- character parts are skipped - never theirs to
+                -- touch, even when a seat welds a driver into the
+                -- assembly.
+                local characters = {}
+
+                for _, player in ipairs(Players:GetPlayers()) do
+                        if player.Character then
+                                table.insert(characters, player.Character)
+                        end
+                end
+
+                local list = {}
+
+                for _, part in ipairs(root:GetConnectedParts()) do
+                        if part and part:IsA("BasePart") and part.Parent then
+                                local inCharacter = false
+
+                                for _, character in ipairs(characters) do
+                                        if part:IsDescendantOf(character) then
+                                                inCharacter = true
+                                                break
+                                        end
+                                end
+
+                                if not inCharacter then
+                                        if claimedParts[part] == nil then
+                                                claimedParts[part] = {
+                                                        canCollide = part.CanCollide,
+                                                        physics = part.CustomPhysicalProperties or false
+                                                }
+
+                                                pcall(function()
+                                                        part.CanCollide = false
+                                                        part.CustomPhysicalProperties = LIGHT_PHYSICS
+                                                end)
+                                        end
+
+                                        table.insert(list, part)
+                                end
+                        end
+                end
+
+                claimedRoots[root] = list
+        end
+
+        local function releasePullRoot(root)
+                local list = claimedRoots[root]
+
+                if not list then
+                        return
+                end
+
+                claimedRoots[root] = nil
+
+                for _, part in ipairs(list) do
+                        local saved = claimedParts[part]
+
+                        if saved then
+                                claimedParts[part] = nil
+
+                                if part and part.Parent then
+                                        pcall(function()
+                                                part.CanCollide = saved.canCollide
+                                                part.CustomPhysicalProperties =
+                                                        saved.physics == false and nil or saved.physics
+                                        end)
+                                end
+                        end
+                end
+        end
+
         local function isPullableRoot(root)
                 if not root
                         or not root:IsA("BasePart")
@@ -3899,6 +4338,44 @@ do
                         or root.Anchored
                         or root.AssemblyRootPart ~= root then
                         return false
+                end
+
+                if EXCLUDED_NAMES[root.Name] then
+                        return false
+                end
+
+                -- Giant slabs: oceans, tsunami water, lava planes.
+                local size = root.Size
+
+                if size.X > MAX_DIMENSION
+                        or size.Y > MAX_DIMENSION
+                        or size.Z > MAX_DIMENSION then
+                        return false
+                end
+
+                -- Burning debris: NDS fire rides on parts as a Fire
+                -- child, and pulling it in would set us on fire.
+                if root:FindFirstChildOfClass("Fire") then
+                        return false
+                end
+
+                -- Characters, NPCs, tools and accessories are never
+                -- ours to pull: walk the ancestors and bail on any
+                -- humanoid rig or gear.
+                local target = root.Parent
+
+                while target and target ~= Workspace and target ~= game do
+                        if target:IsA("Accessory") or target:IsA("Tool") then
+                                return false
+                        end
+
+                        if target:IsA("Model")
+                                and (target:FindFirstChildOfClass("Humanoid")
+                                        or target:FindFirstChildOfClass("AnimationController")) then
+                                return false
+                        end
+
+                        target = target.Parent
                 end
 
                 if LocalPlayer.Character
@@ -3943,7 +4420,6 @@ do
                         SCAN_RADIUS,
                         params
                 )
-                local now = os.clock()
                 local roots = {}
                 local seen = {}
 
@@ -3955,25 +4431,13 @@ do
                                 and isPullableRoot(root) then
                                 seen[root] = true
                                 table.insert(roots, root)
-
-                                -- Claim new finds, and quietly refresh the rest
-                                -- every few seconds. A claim that fails or gets
-                                -- outvoted just waits for the next sweep - no
-                                -- fighting over anything.
-                                if not lastClaimAt[root]
-                                        or now - lastClaimAt[root] >= CLAIM_REFRESH then
-                                        lastClaimAt[root] = now
-
-                                        pcall(function()
-                                                root:SetNetworkOwner(LocalPlayer)
-                                        end)
-                                end
+                                claimPullRoot(root)
                         end
                 end
 
-                for root in pairs(lastClaimAt) do
+                for root in pairs(claimedRoots) do
                         if not seen[root] then
-                                lastClaimAt[root] = nil
+                                releasePullRoot(root)
                         end
                 end
 
@@ -3996,12 +4460,16 @@ do
                         end
                 end
 
+                local suffix = ObjectPullSettings.SimBoost
+                        and ""
+                        or " (no sim boost - executor limited)"
+
                 if active > 0 then
-                        updatePullStatus("Pulling " .. active .. " objects")
+                        updatePullStatus("Pulling " .. active .. " objects" .. suffix)
                 elseif total > 0 then
-                        updatePullStatus(total .. " objects gathered")
+                        updatePullStatus(total .. " objects gathered" .. suffix)
                 else
-                        updatePullStatus("No liftable objects in range")
+                        updatePullStatus("No liftable objects in range" .. suffix)
                 end
         end
 
@@ -4020,6 +4488,11 @@ do
                 end
 
                 local now = os.clock()
+
+                if now >= (ObjectPullSettings.NextEnvAt or 0) then
+                        ObjectPullSettings.NextEnvAt = now + ENV_INTERVAL
+                        applyPullEnvironment(rootPart)
+                end
 
                 if now >= (ObjectPullSettings.NextScanAt or 0) then
                         ObjectPullSettings.NextScanAt = now + SCAN_INTERVAL
@@ -4058,10 +4531,13 @@ do
                 ObjectPullSettings.Connection = nil
                 ObjectPullSettings.Roots = {}
                 ObjectPullSettings.NextScanAt = 0
+                ObjectPullSettings.NextEnvAt = 0
 
-                for root in pairs(lastClaimAt) do
-                        lastClaimAt[root] = nil
+                for root in pairs(claimedRoots) do
+                        releasePullRoot(root)
                 end
+
+                restorePullEnvironment()
         end
 
         ObjectPull.setEnabled = function(value)
@@ -4079,17 +4555,14 @@ do
                         return
                 end
 
-                pcall(function()
-                        sethiddenproperty(
-                                LocalPlayer,
-                                "SimulationRadius",
-                                math.huge
-                        )
-                end)
+                local rootPart = LocalPlayer.Character
+                        and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 
-                pcall(function()
-                        setsimulationradius(math.huge, math.huge)
-                end)
+                if rootPart and rootPart.Parent then
+                        applyPullEnvironment(rootPart)
+                end
+
+                ObjectPullSettings.SimBoost = pullSimBoostActive()
 
                 updatePullStatus("No liftable objects in range")
 
