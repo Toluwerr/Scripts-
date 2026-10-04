@@ -189,7 +189,6 @@ local VehicleSpeedBoostSettings = {
 
 local ObjectHoldSettings = {
         Enabled = false,
-        Height = 6,
         Responsiveness = 35,
         Root = nil,
         Rig = nil,
@@ -199,6 +198,7 @@ local ObjectHoldSettings = {
         HoldHighlights = {},
         HoldGlowParts = {},
         HeldParts = nil,
+        HoldBottomOffset = nil,
         PickerConnection = nil,
         InputConnection = nil,
         HeartbeatConnection = nil,
@@ -3047,6 +3047,34 @@ do
 
                 ObjectHoldSettings.HeldParts = parts
 
+                -- Vertical offset from the root part's center down
+                -- to the assembly's lowest point (negative or zero).
+                -- The auto slot in updateObjectHold uses it to park
+                -- the object's bottom edge, not its center, a fixed
+                -- clearance above the head. Axis-aligned sizes are
+                -- accurate here because the hold keeps the assembly
+                -- level. Runs on the slow tick, never per frame.
+                local lowest = -(root.Size.Y / 2)
+                local scanned = 0
+
+                for _, part in ipairs(parts) do
+                        scanned += 1
+
+                        if scanned > 2000 then
+                                break
+                        end
+
+                        local offset = part.Position.Y
+                                - root.Position.Y
+                                - part.Size.Y / 2
+
+                        if offset == offset and offset < lowest then
+                                lowest = offset
+                        end
+                end
+
+                ObjectHoldSettings.HoldBottomOffset = lowest
+
                 if glowPartsMatch(cached, parts, count) then
                         return
                 end
@@ -3247,6 +3275,7 @@ do
                 ObjectHoldSettings.WakeToggle = false
                 ObjectHoldSettings.ArrivingShown = false
                 ObjectHoldSettings.HeldParts = nil
+                ObjectHoldSettings.HoldBottomOffset = nil
 
                 table.clear(ObjectHoldSettings.HoldGlowParts)
 
@@ -3337,11 +3366,6 @@ do
                         return
                 end
 
-                local height = math.clamp(
-                        tonumber(ObjectHoldSettings.Height) or 6,
-                        1,
-                        40
-                )
                 local headPosition = head.Position
 
                 -- Speed matching, part one: measure how fast the
@@ -3406,8 +3430,40 @@ do
                         end
                 end
 
+                -- Auto slot - no height setting. Auto ownership
+                -- follows proximity, so the slot rides as close to
+                -- the player as physics allows. With Noclip on,
+                -- character parts are non-collidable and the object
+                -- can sit right in the head at zero distance,
+                -- unbeatable in the proximity contest. With Noclip
+                -- off, the object's bottom edge is parked a fixed
+                -- clearance above the head top - the shortest
+                -- distance that never snags on the character.
+                -- Flips live, so toggling Noclip mid-hold just
+                -- glides the object between the two slots.
+                local bottomOffset = ObjectHoldSettings.HoldBottomOffset
+
+                if type(bottomOffset) ~= "number"
+                        or bottomOffset ~= bottomOffset then
+                        bottomOffset = -(root.Size.Y / 2)
+                end
+
+                bottomOffset = math.clamp(bottomOffset, -40, 5)
+
+                local slotOffset
+
+                if MovementSettings.Noclip then
+                        slotOffset = 0
+                else
+                        slotOffset = math.clamp(
+                                head.Size.Y / 2 + 1 - bottomOffset,
+                                1,
+                                45
+                        )
+                end
+
                 local goal = headPosition
-                        + Vector3.new(0, height, 0)
+                        + Vector3.new(0, slotOffset, 0)
                         + lead
 
                 if goal.X ~= goal.X or goal.Y ~= goal.Y or goal.Z ~= goal.Z then
@@ -4046,16 +4102,6 @@ ObjectHoverSection:Button({
 })
 
 ObjectHoverSection:Slider({
-        Text = "Hover Height",
-        Min = 2,
-        Max = 20,
-        Value = ObjectHoldSettings.Height,
-        Callback = function(value)
-                ObjectHoldSettings.Height = value
-        end
-})
-
-ObjectHoverSection:Slider({
         Text = "Hold Snappiness",
         Min = 10,
         Max = 60,
@@ -4078,7 +4124,7 @@ ObjectHoverSection:Slider({
 })
 
 ObjectHoverSection:Paragraph({
-        Text = "Green objects are liftable. Click one and it flies in on real physics and floats over your head - collisions, riders and the release toss are all genuine and visible to every player. Click it again or hit Release to drop it. It automatically matches your speed, so walk, sprint, fly or drive and it stays level with you. Snappiness controls how hard it chases the slot."
+        Text = "Green objects are liftable. Click one and it flies in on real physics and floats over your head - collisions, riders and the release toss are all genuine and visible to every player. Click it again or hit Release to drop it. It automatically matches your speed, and the slot positions itself: just above your head normally, or right inside it while Noclip is on - as close to you as possible so it never gets stolen. Snappiness controls how hard it chases the slot."
 })
 end
 
