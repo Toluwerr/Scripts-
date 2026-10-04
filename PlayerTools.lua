@@ -3830,10 +3830,14 @@ do
         local PULL_MAX_SPEED = 2000
         local PULL_QUERY_BUFFER = 8192
         local PULL_CLAIM_BURST = 20
+        local PULL_CLAIM_MEMORY = 0.75
         local PULL_RESCUE_FIRST = 0.75
         local PULL_RESCUE_SPREAD = 0.5
         local PULL_RESCUE_INTERVAL = 0.5
         local PULL_RESCUE_STALL = 1.5
+        local PULL_RESCUE_BUDGET = 5
+        local PULL_RESCUE_RETRY = 6
+        local PULL_RESCUE_CONCEDE = 2
 
         local claimedRoots = {}
         local rescueWatch = {}
@@ -3931,6 +3935,7 @@ do
                 local roots = {}
                 local seen = {}
                 local claims = 0
+                local stamp = os.clock()
 
                 for _, part in ipairs(found) do
                         local root = part and part.AssemblyRootPart
@@ -3943,25 +3948,32 @@ do
 
                                 -- Claims are remembered and rate-limited:
                                 -- a swarm is claimed over several scan
-                                -- ticks instead of one huge burst, and a
-                                -- root that leaves and re-enters range
-                                -- gets claimed again.
-                                if not claimedRoots[root]
-                                        and claims < PULL_CLAIM_BURST then
-                                        claims += 1
-                                        claimedRoots[root] = true
+                                -- ticks instead of one huge burst. The
+                                -- memory window also debounces roots
+                                -- sitting on the scan edge, so they are
+                                -- not re-claimed on every flicker in
+                                -- and out of the query sphere; a root
+                                -- that is genuinely gone is forgotten
+                                -- shortly after.
+                                if not claimedRoots[root] then
+                                        if claims < PULL_CLAIM_BURST then
+                                                claims += 1
+                                                claimedRoots[root] = stamp
 
-                                        pcall(function()
-                                                root:SetNetworkOwner(
-                                                        LocalPlayer
-                                                )
-                                        end)
+                                                pcall(function()
+                                                        root:SetNetworkOwner(
+                                                                LocalPlayer
+                                                        )
+                                                end)
+                                        end
+                                else
+                                        claimedRoots[root] = stamp
                                 end
                         end
                 end
 
-                for root in pairs(claimedRoots) do
-                        if not seen[root] then
+                for root, seenAt in pairs(claimedRoots) do
+                        if stamp - seenAt > PULL_CLAIM_MEMORY then
                                 claimedRoots[root] = nil
                         end
                 end
@@ -4005,6 +4017,7 @@ do
                 )
                 local activeCount = 0
                 local totalCount = 0
+                local rescueBudget = PULL_RESCUE_BUDGET
 
                 for _, root in ipairs(ObjectPullSettings.Roots) do
                         if root.Parent
@@ -4032,10 +4045,17 @@ do
                                                 -- Convergence watchdog: an
                                                 -- object outside the ring
                                                 -- that is not getting
-                                                -- closer is not ours to
-                                                -- simulate - re-claim it
-                                                -- on a calm staggered
-                                                -- cadence until it moves.
+                                                -- closer is either not
+                                                -- ours to simulate or
+                                                -- genuinely blocked. A
+                                                -- per-root retry budget
+                                                -- plus a per-frame global
+                                                -- budget keep rescue
+                                                -- claims bounded; after
+                                                -- the budget is spent the
+                                                -- watch concedes and only
+                                                -- re-arms if the object
+                                                -- starts moving again.
                                                 local watch = rescueWatch[root]
 
                                                 if not watch then
@@ -4044,22 +4064,40 @@ do
                                                                 NextClaimAt = now
                                                                         + PULL_RESCUE_FIRST
                                                                         + math.random()
-                                                                                * PULL_RESCUE_SPREAD
+                                                                                * PULL_RESCUE_SPREAD,
+                                                                Claims = 0
                                                         }
                                                 elseif now >= watch.NextClaimAt then
-                                                        if distance
+                                                        local stalled = distance
                                                                 > (watch.Distance or 0)
-                                                                        - PULL_RESCUE_STALL then
-                                                                pcall(function()
-                                                                        root:SetNetworkOwner(
-                                                                                LocalPlayer
-                                                                        )
-                                                                end)
+                                                                        - PULL_RESCUE_STALL
+
+                                                        if stalled
+                                                                and watch.Claims
+                                                                        < PULL_RESCUE_RETRY then
+                                                                if rescueBudget > 0 then
+                                                                        rescueBudget -= 1
+                                                                        watch.Claims += 1
+
+                                                                        pcall(function()
+                                                                                root:SetNetworkOwner(
+                                                                                        LocalPlayer
+                                                                                )
+                                                                        end)
+                                                                end
+
+                                                                watch.NextClaimAt = now
+                                                                        + PULL_RESCUE_INTERVAL
+                                                        elseif stalled then
+                                                                watch.NextClaimAt = now
+                                                                        + PULL_RESCUE_CONCEDE
+                                                        else
+                                                                watch.Claims = 0
+                                                                watch.NextClaimAt = now
+                                                                        + PULL_RESCUE_INTERVAL
                                                         end
 
                                                         watch.Distance = distance
-                                                        watch.NextClaimAt = now
-                                                                + PULL_RESCUE_INTERVAL
                                                 end
                                         else
                                                 rescueWatch[root] = nil
