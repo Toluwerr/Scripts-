@@ -218,6 +218,16 @@ local ObjectHoldSettings = {
 
 local ObjectHold = {}
 
+local ObjectPullSettings = {
+        Enabled = false,
+        Roots = {},
+        NextScanAt = 0,
+        Connection = nil,
+        LastStatus = nil
+}
+
+local ObjectPull = {}
+
 local Window
 local stopVehicleFlyRuntime
 local restartVehicleFly
@@ -3789,6 +3799,261 @@ do
         end
 end
 
+-- ============================================================
+-- Object Pull: a magnet for every liftable object in range.
+--
+-- While enabled, every pullable assembly within a fixed radius
+-- is dragged straight toward the player at unlimited strength:
+-- the pull is applied as direct velocity orders, which are
+-- mass-independent - a paper cup and a concrete slab arrive at
+-- the same speed. Real replicated physics per the same
+-- ownership rules the rest of this file relies on: the engine
+-- auto-assigns nearby unanchored parts to this client, every
+-- newly found root is claimed once via SetNetworkOwner, and
+-- client-owned simulation replicates to the server and every
+-- other player. Objects decelerate as they approach (speed
+-- scales with remaining distance) and are left alone inside
+-- the arrival deadzone, so they pile up around the player
+-- instead of orbiting or smashing through.
+-- ============================================================
+do
+        local PULL_SCAN_INTERVAL = 0.1
+        local PULL_RADIUS = 300
+        local PULL_ARRIVE_DISTANCE = 7
+        local PULL_MIN_SPEED = 30
+        local PULL_SPEED_PER_STUD = 3.5
+        local PULL_MAX_SPEED = 1200
+        local PULL_QUERY_BUFFER = 4096
+
+        local function updatePullStatus(text)
+                local message = tostring(text or "Object Pull off")
+
+                if ObjectPullSettings.LastStatus == message then
+                        return
+                end
+
+                ObjectPullSettings.LastStatus = message
+
+                if type(ObjectPull.OnStatusChanged) == "function" then
+                        pcall(ObjectPull.OnStatusChanged, message)
+                end
+        end
+
+        local function hasPullBlockedAncestor(instance)
+                local current = instance
+
+                while current and current ~= Workspace do
+                        if current:IsA("Tool") then
+                                return true
+                        end
+
+                        if current:IsA("Model")
+                                and current:FindFirstChildOfClass("Humanoid") then
+                                return true
+                        end
+
+                        current = current.Parent
+                end
+
+                return false
+        end
+
+        local function isPullableRoot(root)
+                if not root
+                        or not root:IsA("BasePart")
+                        or not root.Parent
+                        or root.Anchored
+                        or root:IsA("Seat")
+                        or root:IsA("VehicleSeat")
+                        or root.AssemblyRootPart ~= root then
+                        return false
+                end
+
+                if LocalPlayer.Character
+                        and root:IsDescendantOf(LocalPlayer.Character) then
+                        return false
+                end
+
+                if VehicleSettings.CurrentModel
+                        and VehicleSettings.CurrentModel.Parent
+                        and root:IsDescendantOf(VehicleSettings.CurrentModel) then
+                        return false
+                end
+
+                local held = ObjectHoldSettings.Root
+
+                if held and held.Parent and root == held then
+                        return false
+                end
+
+                if hasPullBlockedAncestor(root) then
+                        return false
+                end
+
+                return true
+        end
+
+        local function scanPullRoots(center)
+                local filter = {}
+
+                if LocalPlayer.Character then
+                        table.insert(filter, LocalPlayer.Character)
+                end
+
+                if VehicleSettings.CurrentModel
+                        and VehicleSettings.CurrentModel.Parent then
+                        table.insert(filter, VehicleSettings.CurrentModel)
+                end
+
+                local params = OverlapParams.new()
+                params.FilterType = Enum.RaycastFilterType.Exclude
+                params.FilterDescendantsInstances = filter
+                params.MaxParts = PULL_QUERY_BUFFER
+
+                local found = Workspace:GetPartBoundsInRadius(
+                        center,
+                        PULL_RADIUS,
+                        params
+                )
+                local previous = {}
+                local roots = {}
+                local seen = {}
+
+                for _, root in ipairs(ObjectPullSettings.Roots) do
+                        previous[root] = true
+                end
+
+                for _, part in ipairs(found) do
+                        local root = part and part.AssemblyRootPart
+
+                        if root
+                                and not seen[root]
+                                and isPullableRoot(root) then
+                                seen[root] = true
+                                table.insert(roots, root)
+
+                                -- One claim per newly found object keeps
+                                -- the ownership traffic calm while still
+                                -- engaging replication immediately.
+                                if not previous[root] then
+                                        pcall(function()
+                                                root:SetNetworkOwner(LocalPlayer)
+                                        end)
+                                end
+                        end
+                end
+
+                ObjectPullSettings.Roots = roots
+        end
+
+        local function updateObjectPull()
+                if not running or not ObjectPullSettings.Enabled then
+                        return
+                end
+
+                local character = LocalPlayer.Character
+                local rootPart = character
+                        and character:FindFirstChild("HumanoidRootPart")
+
+                if not rootPart or not rootPart.Parent then
+                        updatePullStatus("Character unavailable")
+                        return
+                end
+
+                local now = os.clock()
+
+                if now >= (ObjectPullSettings.NextScanAt or 0) then
+                        ObjectPullSettings.NextScanAt = now + PULL_SCAN_INTERVAL
+                        scanPullRoots(rootPart.Position)
+                end
+
+                local center = rootPart.Position
+                local count = 0
+
+                for _, root in ipairs(ObjectPullSettings.Roots) do
+                        if root.Parent
+                                and not root.Anchored
+                                and root.AssemblyRootPart == root then
+                                local offset = center - root.Position
+                                local distance = offset.Magnitude
+
+                                if distance == distance
+                                        and distance > PULL_ARRIVE_DISTANCE then
+                                        local speed = math.clamp(
+                                                distance * PULL_SPEED_PER_STUD,
+                                                PULL_MIN_SPEED,
+                                                PULL_MAX_SPEED
+                                        )
+
+                                        root.AssemblyLinearVelocity =
+                                                offset.Unit * speed
+                                end
+
+                                count += 1
+                        end
+                end
+
+                if count > 0 then
+                        updatePullStatus("Pulling " .. count .. " objects")
+                else
+                        updatePullStatus("No liftable objects in range")
+                end
+        end
+
+        local function stopObjectPull()
+                disconnect(ObjectPullSettings.Connection)
+                ObjectPullSettings.Connection = nil
+                ObjectPullSettings.Roots = {}
+                ObjectPullSettings.NextScanAt = 0
+        end
+
+        ObjectPull.setEnabled = function(value)
+                local enabled = value and true or false
+
+                stopObjectPull()
+                ObjectPullSettings.Enabled = enabled
+
+                if type(ObjectPull.OnEnabledChanged) == "function" then
+                        pcall(ObjectPull.OnEnabledChanged, enabled)
+                end
+
+                if not enabled then
+                        updatePullStatus("Object Pull off")
+                        return
+                end
+
+                -- Same replication assists as the hold: widen the
+                -- simulation radius where the environment allows it
+                -- so far-away objects engage immediately too.
+                pcall(function()
+                        sethiddenproperty(
+                                LocalPlayer,
+                                "SimulationRadius",
+                                math.huge
+                        )
+                end)
+
+                pcall(function()
+                        setsimulationradius(math.huge, math.huge)
+                end)
+
+                updatePullStatus("No liftable objects in range")
+
+                ObjectPullSettings.Connection = RunService.Heartbeat:Connect(
+                        function()
+                                local ok, err = pcall(updateObjectPull)
+
+                                if not ok then
+                                        updatePullStatus(
+                                                "Engine error: "
+                                                        .. tostring(err):sub(1, 80)
+                                        )
+                                end
+                        end
+                )
+        end
+end
+
 local function cleanup()
         if not running then
                 return
@@ -3804,6 +4069,10 @@ local function cleanup()
         ObjectHoldSettings.Enabled = false
         pcall(function()
                 ObjectHold.setEnabled(false)
+        end)
+        ObjectPullSettings.Enabled = false
+        pcall(function()
+                ObjectPull.setEnabled(false)
         end)
         clearNoclip()
         FlingSettings.Enabled = false
@@ -3887,6 +4156,7 @@ local FunTab = Window:Tab("Fun", "star")
 ESPTab:SetColumns(2)
 MovementTab:SetColumns(2)
 VehicleMovementTab:SetColumns(2)
+FunTab:SetColumns(2)
 
 do
 local MainSection = ESPTab:Section("Player ESP")
@@ -4125,6 +4395,41 @@ ObjectHoverSection:Slider({
 
 ObjectHoverSection:Paragraph({
         Text = "Green objects are liftable. Click one and it flies in on real physics and floats over your head - collisions, riders and the release toss are all genuine and visible to every player. Click it again or hit Release to drop it. It automatically matches your speed, and the slot positions itself: just above your head normally, or right inside it while Noclip is on - as close to you as possible so it never gets stolen. Snappiness controls how hard it chases the slot."
+})
+
+local ObjectPullSection = FunTab:Section("Object Pull")
+
+local objectPullStatusLabel = ObjectPullSection:Paragraph({
+        Text = "Object Pull off"
+})
+
+ObjectPull.OnStatusChanged = function(status)
+        objectPullStatusLabel:Set(tostring(status or "Object Pull off"))
+end
+
+local objectPullToggleValue = false
+local objectPullToggle = ObjectPullSection:Toggle({
+        Text = "Enable Object Pull",
+        Value = false,
+        Callback = function(value)
+                objectPullToggleValue = value and true or false
+                ObjectPull.setEnabled(objectPullToggleValue)
+        end
+})
+
+ObjectPull.OnEnabledChanged = function(enabled)
+        local desiredValue = enabled and true or false
+
+        if objectPullToggleValue == desiredValue then
+                return
+        end
+
+        objectPullToggleValue = desiredValue
+        objectPullToggle:Set(desiredValue)
+end
+
+ObjectPullSection:Paragraph({
+        Text = "Drags every liftable object within range straight toward you with unlimited strength - any mass, any count, no settings. Real replicated physics visible to every player: objects fly in fast, slow down as they approach and pile up around you. Works alongside Object Hover."
 })
 end
 
