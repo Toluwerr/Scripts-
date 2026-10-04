@@ -220,6 +220,7 @@ local ObjectHold = {}
 
 local ObjectPullSettings = {
         Enabled = false,
+        KeepDistance = 7,
         Roots = {},
         NextScanAt = 0,
         Connection = nil,
@@ -3812,14 +3813,16 @@ end
 -- newly found root is claimed once via SetNetworkOwner, and
 -- client-owned simulation replicates to the server and every
 -- other player. Objects decelerate as they approach (speed
--- scales with remaining distance) and are left alone inside
--- the arrival deadzone, so they pile up around the player
--- instead of orbiting or smashing through.
+-- scales with the remaining gap to the settle ring) and are
+-- left alone inside that ring, so they pile up around the
+-- player at the Keep Distance instead of orbiting through.
 -- ============================================================
 do
         local PULL_SCAN_INTERVAL = 0.1
         local PULL_RADIUS = 300
-        local PULL_ARRIVE_DISTANCE = 7
+        local PULL_DEFAULT_KEEP = 7
+        local PULL_MIN_KEEP = 3
+        local PULL_MAX_KEEP = 50
         local PULL_MIN_SPEED = 30
         local PULL_SPEED_PER_STUD = 3.5
         local PULL_MAX_SPEED = 1200
@@ -3968,6 +3971,12 @@ do
                 end
 
                 local center = rootPart.Position
+                local keepDistance = math.clamp(
+                        tonumber(ObjectPullSettings.KeepDistance)
+                                or PULL_DEFAULT_KEEP,
+                        PULL_MIN_KEEP,
+                        PULL_MAX_KEEP
+                )
                 local count = 0
 
                 for _, root in ipairs(ObjectPullSettings.Roots) do
@@ -3978,9 +3987,10 @@ do
                                 local distance = offset.Magnitude
 
                                 if distance == distance
-                                        and distance > PULL_ARRIVE_DISTANCE then
+                                        and distance > keepDistance then
                                         local speed = math.clamp(
-                                                distance * PULL_SPEED_PER_STUD,
+                                                (distance - keepDistance)
+                                                        * PULL_SPEED_PER_STUD,
                                                 PULL_MIN_SPEED,
                                                 PULL_MAX_SPEED
                                         )
@@ -4428,8 +4438,18 @@ ObjectPull.OnEnabledChanged = function(enabled)
         objectPullToggle:Set(desiredValue)
 end
 
+ObjectPullSection:Slider({
+        Text = "Keep Distance",
+        Min = 3,
+        Max = 50,
+        Value = ObjectPullSettings.KeepDistance,
+        Callback = function(value)
+                ObjectPullSettings.KeepDistance = tonumber(value) or 7
+        end
+})
+
 ObjectPullSection:Paragraph({
-        Text = "Drags every liftable object within range straight toward you with unlimited strength - any mass, any count, no settings. Real replicated physics visible to every player: objects fly in fast, slow down as they approach and pile up around you. Works alongside Object Hover."
+        Text = "Drags every liftable object within range straight toward you with unlimited strength - any mass, any count. Real replicated physics visible to every player: objects fly in fast, slow down as they approach and settle around you. Keep Distance sets how far from you they stop and pile up. Works alongside Object Hover."
 })
 end
 
