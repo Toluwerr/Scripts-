@@ -231,12 +231,11 @@ local ObjectHold = {}
 local ObjectPullSettings = {
         Enabled = false,
         KeepDistance = 7,
-        Roots = {},
-        NextScanAt = 0,
-        NextEnvAt = 0,
         SimBoost = false,
         Connection = nil,
-        LastStatus = nil
+        LastStatus = nil,
+        NextEnvAt = 0,
+        NextPassAt = 0
 }
 
 local ObjectPull = {}
@@ -4065,37 +4064,47 @@ do
 end
 
 -- ============================================================
--- Object Pull: a magnet for everything in range, built the way
--- working Natural Disaster Survival scripts actually do it.
+-- Object Pull: rebuilt from five working sources - the Project
+-- Gravity engine (the NDS blackhole script), Bring Loose Parts
+-- (open source), the classic telekinesis holds, the tornado
+-- windfields, and the devforum thread that documented the
+-- client side ownership check.
 --
--- The engine only lets a client's velocity orders matter on parts
--- that client simulates, and SetNetworkOwner simply errors when
--- called from a client - so the real technique is the simulation
--- radius war: our own MaximumSimulationRadius and (hidden)
--- SimulationRadius get pushed to 9e9 while every other player's get
--- pinned to zero, refreshed every half second. Auto-owned debris
--- arbitration then lands on us for the whole island, and our
--- velocity writes become real replicated physics. ReplicationFocus
--- follows the pull and sleep is disabled so nothing dozes off
--- mid-flight. Held roots are turned featherweight and ghosted
--- (density 0.001, no collisions) so the swarm flows into the ring
--- instead of crushing us, and everything is restored on release.
--- Filters keep out characters and tools, burning debris (NDS fire
--- rides parts as a Fire child), and ocean/lava slabs. Range stays
--- at the engine's honest ~1000 stud simulation cap. One servo
--- formula aims every root at its own ring point, the spot Keep
--- Distance studs along its approach direction: far objects race
--- in, arrivals brake smoothly, objects inside the ring get pushed
--- back out to it, and the position gain absorbs gravity while they
--- hover there.
+-- Claiming stays the simulation radius war: our own radius is
+-- re-asserted every single frame and everyone else's gets
+-- pinned to zero twice a second, so debris all over the island
+-- arbitrates to our client and what we do to it becomes real
+-- replicated physics. The movement itself is now the puppet
+-- pattern the working bring-parts scripts use: each claimed
+-- assembly gets a tiny invisible anchored target part plus an
+-- AlignPosition and AlignOrientation with unlimited force, and
+-- the pull just moves the target. The engine's own constraint
+-- solver then accelerates, brakes, fights gravity and holds the
+-- ring on every physics substep - which per-frame velocity
+-- writes (the old version) can never do, and why the old ring
+-- bobbed and sagged. A constraint on an assembly we do not
+-- simulate does nothing at all, so there is no fake client-only
+-- dragging either. Anchored parts are seized the Project
+-- Gravity way (local unanchor) but only while the sim boost
+-- read-back is live, and ReceiveAge - zero means the assembly
+-- is genuinely ours, the devforum-verified check - reports how
+-- much of the swarm is really held. The old radius query
+-- silently truncated at 8192 parts and missed most of a busy
+-- NDS island, so a throttled full-workspace walk now claims
+-- everything, and debris that appears mid-disaster is picked up
+-- by the next pass. Small velocity pokes keep assemblies from
+-- dozing off mid-flight.
 -- ============================================================
 do
-        local SCAN_INTERVAL = 0.4
-        local SCAN_RADIUS = 1000
-        local QUERY_LIMIT = 8192
         local ENV_INTERVAL = 0.5
-        local SPEED_GAIN = 6
-        local MAX_SPEED = 300
+        local SCAN_RADIUS = 1000
+        local PASS_INTERVAL = 1.5
+        local WALK_INSTANCES = 2000
+        local WALK_SECONDS = 0.002
+        local POKE_INTERVAL = 3
+        local ALIGN_RESPONSIVENESS = 200
+        local ALIGN_MAX_VELOCITY = 800
+        local ANTI_SLEEP = Vector3.new(0.5, 0.5, 0.5)
         local MAX_DIMENSION = 120
         local DEFAULT_KEEP = 7
         local MIN_KEEP = 3
@@ -4107,13 +4116,18 @@ do
                 Terrain = true,
                 Baseplate = true,
                 HumanoidRootPart = true,
-                Handle = true
+                Handle = true,
+                ["__PlayerToolsPlatform"] = true
         }
 
         local claimedRoots = setmetatable({}, { __mode = "k" })
         local claimedParts = setmetatable({}, { __mode = "k" })
         local envOriginals = setmetatable({}, { __mode = "k" })
         local allowSleepSaved = nil
+        local pullFolder = nil
+        local walkStack = {}
+        local walkSeen = setmetatable({}, { __mode = "k" })
+        local frameTick = 0
 
         local function updatePullStatus(text)
                 local message = tostring(text or "Object Pull off")
@@ -4190,23 +4204,33 @@ do
         end
 
         local function pullSimBoostActive()
+                -- The engine's own default radius is 1000 studs; anything
+                -- six orders of magnitude above that means the hidden
+                -- write genuinely took on this executor.
                 local radius = pullReadProperty(LocalPlayer, "SimulationRadius", true)
 
-                if type(radius) == "number" and radius >= SIM_RADIUS * 0.5 then
+                if type(radius) == "number" and radius >= 1e6 then
                         return true
                 end
 
                 local maximum = pullReadProperty(LocalPlayer, "MaximumSimulationRadius", false)
 
-                return type(maximum) == "number" and maximum >= SIM_RADIUS * 0.5
+                return type(maximum) == "number" and maximum >= 1e6
+        end
+
+        local function assertSelfBoost()
+                -- Re-asserted every single frame, exactly like the
+                -- working bring-parts scripts: the boost decays the
+                -- moment you stop writing it.
+                pullRemember(LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
+                pullRemember(LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
+                pullRemember(LocalPlayer, "NetworkIsSleeping", false, true)
         end
 
         local function applyPullEnvironment(rootPart)
                 -- Ourselves: maximum simulation reach, always awake,
                 -- replication centred where the pull is.
-                pullRemember(LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
-                pullRemember(LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
-                pullRemember(LocalPlayer, "NetworkIsSleeping", false, true)
+                assertSelfBoost()
                 pullRemember(LocalPlayer, "ReplicationFocus", rootPart.CFrame)
 
                 if allowSleepSaved == nil then
@@ -4257,12 +4281,19 @@ do
                         return
                 end
 
+                if not pullFolder then
+                        pullFolder = Instance.new("Folder")
+                        pullFolder.Name = "__ObjectPullRuntime"
+                        pullFolder.Parent = Workspace
+                end
+
                 -- The whole assembly is claimed, not just the root:
-                -- welded buildings flow in as one piece instead of
-                -- snagging on their still-collidable children. Player
-                -- character parts are skipped - never theirs to
-                -- touch, even when a seat welds a driver into the
-                -- assembly.
+                -- welded structures flow in as one piece. GetConnectedParts
+                -- never includes the root itself, so it is added first -
+                -- the old version skipped it, which left solo debris (most
+                -- of a disaster) unfeathered and collidable. Player
+                -- character parts are skipped - never theirs to touch,
+                -- even when a seat welds a driver into the assembly.
                 local characters = {}
 
                 for _, player in ipairs(Players:GetPlayers()) do
@@ -4271,50 +4302,125 @@ do
                         end
                 end
 
+                local parts = { root }
+                local seize = root.Anchored and ObjectPullSettings.SimBoost
+
+                pcall(function()
+                        for _, part in ipairs(root:GetConnectedParts(true)) do
+                                if part and part:IsA("BasePart") and part.Parent then
+                                        table.insert(parts, part)
+                                end
+                        end
+                end)
+
                 local list = {}
 
-                for _, part in ipairs(root:GetConnectedParts()) do
-                        if part and part:IsA("BasePart") and part.Parent then
-                                local inCharacter = false
+                for _, part in ipairs(parts) do
+                        local inCharacter = false
 
-                                for _, character in ipairs(characters) do
-                                        if part:IsDescendantOf(character) then
-                                                inCharacter = true
-                                                break
-                                        end
+                        for _, character in ipairs(characters) do
+                                if part:IsDescendantOf(character) then
+                                        inCharacter = true
+                                        break
+                                end
+                        end
+
+                        if not inCharacter then
+                                if claimedParts[part] == nil then
+                                        claimedParts[part] = {
+                                                canCollide = part.CanCollide,
+                                                physics = part.CustomPhysicalProperties or false,
+                                                anchored = part.Anchored
+                                        }
+
+                                        pcall(function()
+                                                part.CanCollide = false
+                                                part.CustomPhysicalProperties = LIGHT_PHYSICS
+                                                part.Anchored = false
+                                        end)
                                 end
 
-                                if not inCharacter then
-                                        if claimedParts[part] == nil then
-                                                claimedParts[part] = {
-                                                        canCollide = part.CanCollide,
-                                                        physics = part.CustomPhysicalProperties or false
-                                                }
-
-                                                pcall(function()
-                                                        part.CanCollide = false
-                                                        part.CustomPhysicalProperties = LIGHT_PHYSICS
-                                                end)
-                                        end
-
-                                        table.insert(list, part)
-                                end
+                                table.insert(list, part)
                         end
                 end
 
-                claimedRoots[root] = list
+                -- The puppet: an invisible anchored target the assembly
+                -- is strung to with unlimited-force aligns. Moving the
+                -- target IS the pull - the engine's constraint solver
+                -- does the acceleration, braking and gravity fighting on
+                -- every physics substep, and on an assembly we do not
+                -- simulate the constraints simply do nothing, so nothing
+                -- ever fakes.
+                local target = Instance.new("Part")
+                target.Name = "PullTarget"
+                target.Size = Vector3.new(0.2, 0.2, 0.2)
+                target.Transparency = 1
+                target.Anchored = true
+                target.CanCollide = false
+                target.CanTouch = false
+                target.CanQuery = false
+                target.CastShadow = false
+                target.CFrame = root.CFrame
+                target.Parent = pullFolder
+
+                local targetAttachment = Instance.new("Attachment")
+                targetAttachment.Parent = target
+
+                local attachment = Instance.new("Attachment")
+                attachment.Parent = root
+
+                local align = Instance.new("AlignPosition")
+                -- Singular "TwoAttachment" - the live API enum is
+                -- PositionAlignmentMode.TwoAttachment, and the plural
+                -- spelling would nil-index and kill every claim.
+                align.Mode = Enum.PositionAlignmentMode.TwoAttachment
+                align.Attachment0 = attachment
+                align.Attachment1 = targetAttachment
+                align.MaxForce = math.huge
+                align.MaxVelocity = ALIGN_MAX_VELOCITY
+                align.Responsiveness = ALIGN_RESPONSIVENESS
+                align.ApplyAtCenterOfMass = true
+                align.RigidityEnabled = false
+                align.Parent = root
+
+                local orient = Instance.new("AlignOrientation")
+                orient.Mode = Enum.OrientationAlignmentMode.TwoAttachment
+                orient.Attachment0 = attachment
+                orient.Attachment1 = targetAttachment
+                orient.MaxTorque = math.huge
+                orient.MaxAngularVelocity = math.huge
+                orient.Responsiveness = ALIGN_RESPONSIVENESS
+                orient.RigidityEnabled = false
+                orient.Parent = root
+
+                claimedRoots[root] = {
+                        target = target,
+                        attachment = attachment,
+                        align = align,
+                        orient = orient,
+                        parts = list,
+                        rotation = root.CFrame - root.CFrame.Position,
+                        seized = seize or nil
+                }
         end
 
         local function releasePullRoot(root)
-                local list = claimedRoots[root]
+                local rec = claimedRoots[root]
 
-                if not list then
+                if not rec then
                         return
                 end
 
                 claimedRoots[root] = nil
 
-                for _, part in ipairs(list) do
+                pcall(function()
+                        rec.align:Destroy()
+                        rec.orient:Destroy()
+                        rec.attachment:Destroy()
+                        rec.target:Destroy()
+                end)
+
+                for _, part in ipairs(rec.parts) do
                         local saved = claimedParts[part]
 
                         if saved then
@@ -4325,6 +4431,7 @@ do
                                                 part.CanCollide = saved.canCollide
                                                 part.CustomPhysicalProperties =
                                                         saved.physics == false and nil or saved.physics
+                                                part.Anchored = saved.anchored
                                         end)
                                 end
                         end
@@ -4335,8 +4442,19 @@ do
                 if not root
                         or not root:IsA("BasePart")
                         or not root.Parent
-                        or root.Anchored
                         or root.AssemblyRootPart ~= root then
+                        return false
+                end
+
+                if pullFolder and root:IsDescendantOf(pullFolder) then
+                        return false
+                end
+
+                -- Anchored parts can only be seized while the sim boost
+                -- read-back is actually live; without it a local unanchor
+                -- would be client-only smoke, and this feature does not
+                -- do fake.
+                if root.Anchored and not ObjectPullSettings.SimBoost then
                         return false
                 end
 
@@ -4398,64 +4516,92 @@ do
                 return true
         end
 
-        local function scanPullRoots(center)
-                local filter = {}
+        local function startWalkPass()
+                table.clear(walkStack)
+                table.clear(walkSeen)
 
-                if LocalPlayer.Character then
-                        table.insert(filter, LocalPlayer.Character)
+                for _, child in ipairs(Workspace:GetChildren()) do
+                        table.insert(walkStack, child)
                 end
+        end
 
-                if VehicleSettings.CurrentModel
-                        and VehicleSettings.CurrentModel.Parent then
-                        table.insert(filter, VehicleSettings.CurrentModel)
-                end
+        local function processWalk(center)
+                -- The old radius query truncated at 8192 parts and never
+                -- told anyone, which on a busy NDS island meant most of
+                -- the map never even got claimed. A throttled walk of the
+                -- whole workspace claims everything pullable within a
+                -- hard per-frame budget instead.
+                local deadline = os.clock() + WALK_SECONDS
+                local processed = 0
 
-                local params = OverlapParams.new()
-                params.FilterType = Enum.RaycastFilterType.Exclude
-                params.FilterDescendantsInstances = filter
-                params.MaxParts = QUERY_LIMIT
+                while #walkStack > 0
+                        and processed < WALK_INSTANCES
+                        and os.clock() < deadline do
+                        local instance = walkStack[#walkStack]
+                        walkStack[#walkStack] = nil
+                        processed += 1
 
-                local found = Workspace:GetPartBoundsInRadius(
-                        center,
-                        SCAN_RADIUS,
-                        params
-                )
-                local roots = {}
-                local seen = {}
+                        if instance:IsA("BasePart") then
+                                local root = instance.AssemblyRootPart
 
-                for _, part in ipairs(found) do
-                        local root = part and part.AssemblyRootPart
+                                if root and not walkSeen[root] then
+                                        walkSeen[root] = true
 
-                        if root
-                                and not seen[root]
-                                and isPullableRoot(root) then
-                                seen[root] = true
-                                table.insert(roots, root)
-                                claimPullRoot(root)
+                                        if isPullableRoot(root) then
+                                                local offset = root.Position - center
+
+                                                if offset:Dot(offset) <= SCAN_RADIUS * SCAN_RADIUS then
+                                                        claimPullRoot(root)
+                                                end
+                                        end
+                                end
+                        else
+                                local children = instance:GetChildren()
+
+                                for index = #children, 1, -1 do
+                                        walkStack[#walkStack + 1] = children[index]
+                                end
                         end
                 end
+
+                return #walkStack > 0
+        end
+
+        local function finishWalkPass(center)
+                -- Drop anything that left the range or got cleaned up
+                -- while the pass was running.
+                local limit = (SCAN_RADIUS + 100) * (SCAN_RADIUS + 100)
 
                 for root in pairs(claimedRoots) do
-                        if not seen[root] then
+                        if not root.Parent then
                                 releasePullRoot(root)
+                        else
+                                local offset = root.Position - center
+
+                                if offset:Dot(offset) > limit then
+                                        releasePullRoot(root)
+                                end
                         end
                 end
+        end
 
-                ObjectPullSettings.Roots = roots
+        local function updatePullStatusCounts()
+                -- ReceiveAge is zero only on assemblies our client
+                -- actually simulates - the devforum-verified client side
+                -- ownership check - so this counts what is really held
+                -- instead of what was merely claimed.
+                local held = 0
+                local seized = 0
+                local contested = 0
 
-                local keep = getKeepDistance()
-                local active = 0
-                local total = 0
-
-                for _, root in ipairs(roots) do
-                        local offset = center - root.Position
-                        local distance = offset.Magnitude
-
-                        if distance == distance then
-                                total += 1
-
-                                if distance > keep then
-                                        active += 1
+                for root, rec in pairs(claimedRoots) do
+                        if root.Parent then
+                                if rec.seized then
+                                        seized += 1
+                                elseif root.ReceiveAge == 0 then
+                                        held += 1
+                                else
+                                        contested += 1
                                 end
                         end
                 end
@@ -4464,13 +4610,22 @@ do
                         and ""
                         or " (no sim boost - executor limited)"
 
-                if active > 0 then
-                        updatePullStatus("Pulling " .. active .. " objects" .. suffix)
-                elseif total > 0 then
-                        updatePullStatus(total .. " objects gathered" .. suffix)
-                else
+                if held + seized + contested == 0 then
                         updatePullStatus("No liftable objects in range" .. suffix)
+                        return
                 end
+
+                local text = "Holding " .. held
+
+                if seized > 0 then
+                        text = text .. " + " .. seized .. " anchored seized"
+                end
+
+                if contested > 0 then
+                        text = text .. " + " .. contested .. " contested"
+                end
+
+                updatePullStatus(text .. suffix)
         end
 
         local function updateObjectPull()
@@ -4489,38 +4644,74 @@ do
 
                 local now = os.clock()
 
+                frameTick += 1
+
+                -- The boost is re-asserted every frame; the rest of the
+                -- environment war runs on its own cadence.
+                assertSelfBoost()
+
                 if now >= (ObjectPullSettings.NextEnvAt or 0) then
                         ObjectPullSettings.NextEnvAt = now + ENV_INTERVAL
                         applyPullEnvironment(rootPart)
-                end
 
-                if now >= (ObjectPullSettings.NextScanAt or 0) then
-                        ObjectPullSettings.NextScanAt = now + SCAN_INTERVAL
-                        scanPullRoots(rootPart.Position)
+                        -- Between passes only: the moment a pass is due,
+                        -- let the walk start and speak through its own
+                        -- results instead of flashing a zero count.
+                        if #walkStack == 0
+                                and now < (ObjectPullSettings.NextPassAt or 0) then
+                                updatePullStatusCounts()
+                        end
                 end
 
                 local center = rootPart.Position
-                local keep = getKeepDistance()
 
-                for _, root in ipairs(ObjectPullSettings.Roots) do
-                        if root.Parent
-                                and not root.Anchored
-                                and root.AssemblyRootPart == root then
+                if #walkStack == 0
+                        and now >= (ObjectPullSettings.NextPassAt or 0) then
+                        ObjectPullSettings.NextPassAt = now + PASS_INTERVAL
+                        startWalkPass()
+                end
+
+                if #walkStack > 0 then
+                        processWalk(center)
+
+                        if #walkStack == 0 then
+                                finishWalkPass(center)
+                                updatePullStatusCounts()
+                        end
+                end
+
+                -- The puppet show: each target is placed on its own ring
+                -- point, Keep Distance studs from us along the assembly's
+                -- approach direction, and the aligns do the rest. Far
+                -- objects race in at the MaxVelocity cap, arrivals brake
+                -- on the responsiveness curve, and the hold has no
+                -- gravity sag because the constraint never sleeps
+                -- between frames. A small poke keeps the assembly from
+                -- dozing off mid-flight.
+                local keep = getKeepDistance()
+                local poke = frameTick % POKE_INTERVAL == 0
+
+                for root, rec in pairs(claimedRoots) do
+                        if not root.Parent then
+                                releasePullRoot(root)
+                        elseif not rec.target.Parent then
+                                -- A destroyed puppet (some games sweep the
+                                -- workspace client-side) must not be allowed
+                                -- to abort the whole servo through an error.
+                                releasePullRoot(root)
+                        else
                                 local toPlayer = center - root.Position
                                 local gap = toPlayer.Magnitude
 
                                 if gap == gap and gap > 0.01 then
-                                        local toRing = toPlayer
-                                                - toPlayer.Unit * keep
-                                        local speed = math.min(
-                                                toRing.Magnitude * SPEED_GAIN,
-                                                MAX_SPEED
-                                        )
+                                        local ringPos = center - toPlayer.Unit * keep
+                                        rec.target.CFrame = CFrame.new(ringPos) * rec.rotation
+                                end
 
-                                        if speed > 0.05 then
-                                                root.AssemblyLinearVelocity =
-                                                        toRing.Unit * speed
-                                        end
+                                if poke then
+                                        pcall(function()
+                                                root.AssemblyLinearVelocity = ANTI_SLEEP
+                                        end)
                                 end
                         end
                 end
@@ -4529,12 +4720,23 @@ do
         local function stopObjectPull()
                 disconnect(ObjectPullSettings.Connection)
                 ObjectPullSettings.Connection = nil
-                ObjectPullSettings.Roots = {}
-                ObjectPullSettings.NextScanAt = 0
                 ObjectPullSettings.NextEnvAt = 0
+                ObjectPullSettings.NextPassAt = 0
 
                 for root in pairs(claimedRoots) do
                         releasePullRoot(root)
+                end
+
+                table.clear(walkStack)
+                table.clear(walkSeen)
+
+                if pullFolder then
+                        local folder = pullFolder
+                        pullFolder = nil
+
+                        pcall(function()
+                                folder:Destroy()
+                        end)
                 end
 
                 restorePullEnvironment()
@@ -4555,6 +4757,10 @@ do
                         return
                 end
 
+                pullFolder = Instance.new("Folder")
+                pullFolder.Name = "__ObjectPullRuntime"
+                pullFolder.Parent = Workspace
+
                 local rootPart = LocalPlayer.Character
                         and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 
@@ -4562,9 +4768,9 @@ do
                         applyPullEnvironment(rootPart)
                 end
 
-                ObjectPullSettings.SimBoost = pullSimBoostActive()
+                ObjectPullSettings.NextPassAt = 0
 
-                updatePullStatus("No liftable objects in range")
+                updatePullStatus("Scanning for objects...")
 
                 ObjectPullSettings.Connection = RunService.Heartbeat:Connect(
                         function()
