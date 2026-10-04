@@ -97,11 +97,13 @@ local AimlockSettings = {
 
 local FlingSettings = {
         Enabled = false,
-        Power = 100,
+        Power = 100000,
         WorkerToken = 0,
         AntiFling = false,
         AntiFlingConnections = {},
-        CollisionStates = setmetatable({}, {__mode = "k"})
+        SafeRoot = nil,
+        SafeCFrame = nil,
+        SafeVelocity = nil
 }
 
 local FlySettings = {
@@ -2726,85 +2728,76 @@ local function disconnectAntiFlingConnections()
         table.clear(FlingSettings.AntiFlingConnections)
 end
 
-local function restoreAntiFlingCollisions()
-        for part, originalCanCollide in pairs(FlingSettings.CollisionStates) do
-                if part and part.Parent then
-                        pcall(function()
-                                part.CanCollide = originalCanCollide
-                        end)
-                end
-        end
-
-        FlingSettings.CollisionStates = setmetatable({}, {__mode = "k"})
-end
-
-local function applyNoCollision(character)
-        if not character then
-                return
-        end
-
-        for _, object in ipairs(character:GetDescendants()) do
-                if object:IsA("BasePart") then
-                        if FlingSettings.CollisionStates[object] == nil then
-                                FlingSettings.CollisionStates[object] = object.CanCollide
-                        end
-
-                        pcall(function()
-                                object.CanCollide = false
-                        end)
-                end
-        end
-end
-
-local function watchNoCollisionCharacter(character)
-        if not character then
-                return
-        end
-
-        applyNoCollision(character)
-
-        table.insert(FlingSettings.AntiFlingConnections, character.DescendantAdded:Connect(function(object)
-                if FlingSettings.AntiFling and object:IsA("BasePart") then
-                        if FlingSettings.CollisionStates[object] == nil then
-                                FlingSettings.CollisionStates[object] = object.CanCollide
-                        end
-
-                        object.CanCollide = false
-                end
-        end))
-end
+-- Anti Fling: every fling is a physics contact impulse, and every
+-- contact impulse on our own character is resolved by THIS client
+-- (we own our character assembly). It shows up as a sudden huge jump
+-- in root velocity between two frames. Legit motion - walking,
+-- falling, our own Fly - always changes velocity smoothly, so a
+-- one-frame jump of hundreds of studs/s can only be a fling. When
+-- that happens we snap the root back to the last safe pose; since we
+-- own the assembly, the correction replicates and nobody sees us
+-- move. Catches touch flings, spin flings and tool flings alike.
+local ANTI_FLING_VELOCITY_JUMP = 500
 
 local function disableAntiFling()
         FlingSettings.AntiFling = false
         disconnectAntiFlingConnections()
-        restoreAntiFlingCollisions()
+        FlingSettings.SafeRoot = nil
+        FlingSettings.SafeCFrame = nil
+        FlingSettings.SafeVelocity = nil
 end
 
 local function enableAntiFling()
         disableAntiFling()
         FlingSettings.AntiFling = true
 
-        local function watchPlayer(player)
-                if player == LocalPlayer then
+        -- Stepped fires right before physics. The Fling feature's huge
+        -- velocity is always restored before Stepped, so both toggles
+        -- can run at once without the watchdog eating our own fling.
+        table.insert(FlingSettings.AntiFlingConnections, RunService.Stepped:Connect(function()
+                if not FlingSettings.AntiFling then
                         return
                 end
 
-                if player.Character then
-                        watchNoCollisionCharacter(player.Character)
+                local character = LocalPlayer.Character
+                local root = getRoot(character)
+
+                if not root or not root.Parent then
+                        return
                 end
 
-                table.insert(FlingSettings.AntiFlingConnections, player.CharacterAdded:Connect(function(character)
-                        if FlingSettings.AntiFling then
-                                watchNoCollisionCharacter(character)
+                local velocity = root.AssemblyLinearVelocity
+                local nan = velocity.X ~= velocity.X
+                        or velocity.Y ~= velocity.Y
+                        or velocity.Z ~= velocity.Z
+
+                if root ~= FlingSettings.SafeRoot then
+                        -- fresh or respawned character: re-baseline
+                        FlingSettings.SafeRoot = root
+                        FlingSettings.SafeCFrame = root.CFrame
+                        FlingSettings.SafeVelocity = velocity
+                        return
+                end
+
+                local humanoid = character:FindFirstChildOfClass("Humanoid")
+                local seated = humanoid ~= nil and humanoid.SeatPart ~= nil
+
+                if not seated
+                        and (nan or (velocity - FlingSettings.SafeVelocity).Magnitude > ANTI_FLING_VELOCITY_JUMP) then
+                        root.CFrame = FlingSettings.SafeCFrame
+                        root.AssemblyLinearVelocity = FlingSettings.SafeVelocity
+                        root.AssemblyAngularVelocity = Vector3.zero
+
+                        if humanoid then
+                                pcall(function()
+                                        humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+                                end)
                         end
-                end))
-        end
-
-        for _, player in ipairs(Players:GetPlayers()) do
-                watchPlayer(player)
-        end
-
-        table.insert(FlingSettings.AntiFlingConnections, Players.PlayerAdded:Connect(watchPlayer))
+                else
+                        FlingSettings.SafeCFrame = root.CFrame
+                        FlingSettings.SafeVelocity = velocity
+                end
+        end))
 end
 
 local function setAntiFlingEnabled(value)
@@ -2832,8 +2825,6 @@ local function setFlingEnabled(value)
         local workerToken = FlingSettings.WorkerToken
 
         task.spawn(function()
-                local verticalJitter = 0.1
-
                 while running
                         and FlingSettings.Enabled
                         and workerToken == FlingSettings.WorkerToken do
@@ -2849,8 +2840,14 @@ local function setFlingEnabled(value)
 
                         if root and root.Parent then
                                 local savedVelocity = root.AssemblyLinearVelocity
-                                local power = math.clamp(tonumber(FlingSettings.Power) or 100, 1, 1000)
+                                local power = math.clamp(tonumber(FlingSettings.Power) or 100000, 1, 1000000)
 
+                                -- Classic touch fling: a monster velocity for the
+                                -- window between Heartbeat and the next
+                                -- RenderStepped. No physics step runs inside that
+                                -- window, so we never actually move - but the
+                                -- velocity replicates out, and anyone touching us
+                                -- eats the full impulse and gets launched.
                                 root.AssemblyLinearVelocity = savedVelocity * power + Vector3.new(0, power, 0)
 
                                 RunService.RenderStepped:Wait()
@@ -2861,17 +2858,6 @@ local function setFlingEnabled(value)
                                         and root
                                         and root.Parent then
                                         root.AssemblyLinearVelocity = savedVelocity
-                                end
-
-                                RunService.Stepped:Wait()
-
-                                if running
-                                        and FlingSettings.Enabled
-                                        and workerToken == FlingSettings.WorkerToken
-                                        and root
-                                        and root.Parent then
-                                        root.AssemblyLinearVelocity = savedVelocity + Vector3.new(0, verticalJitter, 0)
-                                        verticalJitter = -verticalJitter
                                 end
                         end
                 end
@@ -4536,12 +4522,12 @@ FlingSection:Toggle({
 FlingSection:Input({
         Text = "Fling Power",
         Value = tostring(FlingSettings.Power),
-        Placeholder = "100",
+        Placeholder = "100000",
         Callback = function(value)
                 local parsed = tonumber(value)
 
                 if parsed then
-                        FlingSettings.Power = math.clamp(parsed, 1, 1000)
+                        FlingSettings.Power = math.clamp(parsed, 1, 1000000)
                 end
         end
 })
