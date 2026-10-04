@@ -3809,13 +3809,15 @@ end
 -- mass-independent - a paper cup and a concrete slab arrive at
 -- the same speed. Real replicated physics per the same
 -- ownership rules the rest of this file relies on: the engine
--- auto-assigns nearby unanchored parts to this client, every
--- newly found root is claimed once via SetNetworkOwner, and
+-- auto-assigns nearby unanchored parts to this client, roots
+-- are claimed via rate-limited SetNetworkOwner calls, and
 -- client-owned simulation replicates to the server and every
--- other player. Objects decelerate as they approach (speed
--- scales with the remaining gap to the settle ring) and are
--- left alone inside that ring, so they pile up around the
--- player at the Keep Distance instead of orbiting through.
+-- other player. The pull is deliberately violent: speed scales
+-- at 6 studs/s per stud of remaining gap, up to 2000, so far
+-- objects rocket in and only ease off as they close on the
+-- Keep Distance ring. A convergence watchdog re-claims any
+-- object that stalls outside the ring - the classic sign that
+-- the assembly is not ours to simulate.
 -- ============================================================
 do
         local PULL_SCAN_INTERVAL = 0.1
@@ -3823,10 +3825,18 @@ do
         local PULL_DEFAULT_KEEP = 7
         local PULL_MIN_KEEP = 3
         local PULL_MAX_KEEP = 50
-        local PULL_MIN_SPEED = 30
-        local PULL_SPEED_PER_STUD = 3.5
-        local PULL_MAX_SPEED = 1200
-        local PULL_QUERY_BUFFER = 4096
+        local PULL_MIN_SPEED = 50
+        local PULL_SPEED_PER_STUD = 6
+        local PULL_MAX_SPEED = 2000
+        local PULL_QUERY_BUFFER = 8192
+        local PULL_CLAIM_BURST = 20
+        local PULL_RESCUE_FIRST = 0.75
+        local PULL_RESCUE_SPREAD = 0.5
+        local PULL_RESCUE_INTERVAL = 0.5
+        local PULL_RESCUE_STALL = 1.5
+
+        local claimedRoots = {}
+        local rescueWatch = {}
 
         local function updatePullStatus(text)
                 local message = tostring(text or "Object Pull off")
@@ -3918,13 +3928,9 @@ do
                         PULL_RADIUS,
                         params
                 )
-                local previous = {}
                 local roots = {}
                 local seen = {}
-
-                for _, root in ipairs(ObjectPullSettings.Roots) do
-                        previous[root] = true
-                end
+                local claims = 0
 
                 for _, part in ipairs(found) do
                         local root = part and part.AssemblyRootPart
@@ -3935,14 +3941,34 @@ do
                                 seen[root] = true
                                 table.insert(roots, root)
 
-                                -- One claim per newly found object keeps
-                                -- the ownership traffic calm while still
-                                -- engaging replication immediately.
-                                if not previous[root] then
+                                -- Claims are remembered and rate-limited:
+                                -- a swarm is claimed over several scan
+                                -- ticks instead of one huge burst, and a
+                                -- root that leaves and re-enters range
+                                -- gets claimed again.
+                                if not claimedRoots[root]
+                                        and claims < PULL_CLAIM_BURST then
+                                        claims += 1
+                                        claimedRoots[root] = true
+
                                         pcall(function()
-                                                root:SetNetworkOwner(LocalPlayer)
+                                                root:SetNetworkOwner(
+                                                        LocalPlayer
+                                                )
                                         end)
                                 end
+                        end
+                end
+
+                for root in pairs(claimedRoots) do
+                        if not seen[root] then
+                                claimedRoots[root] = nil
+                        end
+                end
+
+                for root in pairs(rescueWatch) do
+                        if not seen[root] then
+                                rescueWatch[root] = nil
                         end
                 end
 
@@ -3977,7 +4003,8 @@ do
                         PULL_MIN_KEEP,
                         PULL_MAX_KEEP
                 )
-                local count = 0
+                local activeCount = 0
+                local totalCount = 0
 
                 for _, root in ipairs(ObjectPullSettings.Roots) do
                         if root.Parent
@@ -3986,25 +4013,69 @@ do
                                 local offset = center - root.Position
                                 local distance = offset.Magnitude
 
-                                if distance == distance
-                                        and distance > keepDistance then
-                                        local speed = math.clamp(
-                                                (distance - keepDistance)
-                                                        * PULL_SPEED_PER_STUD,
-                                                PULL_MIN_SPEED,
-                                                PULL_MAX_SPEED
-                                        )
+                                if distance == distance then
+                                        totalCount += 1
 
-                                        root.AssemblyLinearVelocity =
-                                                offset.Unit * speed
+                                        if distance > keepDistance then
+                                                activeCount += 1
+
+                                                local speed = math.clamp(
+                                                        (distance - keepDistance)
+                                                                * PULL_SPEED_PER_STUD,
+                                                        PULL_MIN_SPEED,
+                                                        PULL_MAX_SPEED
+                                                )
+
+                                                root.AssemblyLinearVelocity =
+                                                        offset.Unit * speed
+
+                                                -- Convergence watchdog: an
+                                                -- object outside the ring
+                                                -- that is not getting
+                                                -- closer is not ours to
+                                                -- simulate - re-claim it
+                                                -- on a calm staggered
+                                                -- cadence until it moves.
+                                                local watch = rescueWatch[root]
+
+                                                if not watch then
+                                                        rescueWatch[root] = {
+                                                                Distance = distance,
+                                                                NextClaimAt = now
+                                                                        + PULL_RESCUE_FIRST
+                                                                        + math.random()
+                                                                                * PULL_RESCUE_SPREAD
+                                                        }
+                                                elseif now >= watch.NextClaimAt then
+                                                        if distance
+                                                                > (watch.Distance or 0)
+                                                                        - PULL_RESCUE_STALL then
+                                                                pcall(function()
+                                                                        root:SetNetworkOwner(
+                                                                                LocalPlayer
+                                                                        )
+                                                                end)
+                                                        end
+
+                                                        watch.Distance = distance
+                                                        watch.NextClaimAt = now
+                                                                + PULL_RESCUE_INTERVAL
+                                                end
+                                        else
+                                                rescueWatch[root] = nil
+                                        end
                                 end
-
-                                count += 1
                         end
                 end
 
-                if count > 0 then
-                        updatePullStatus("Pulling " .. count .. " objects")
+                if activeCount > 0 then
+                        updatePullStatus(
+                                "Pulling " .. activeCount .. " objects"
+                        )
+                elseif totalCount > 0 then
+                        updatePullStatus(
+                                totalCount .. " objects gathered"
+                        )
                 else
                         updatePullStatus("No liftable objects in range")
                 end
@@ -4015,6 +4086,14 @@ do
                 ObjectPullSettings.Connection = nil
                 ObjectPullSettings.Roots = {}
                 ObjectPullSettings.NextScanAt = 0
+
+                for root in pairs(claimedRoots) do
+                        claimedRoots[root] = nil
+                end
+
+                for root in pairs(rescueWatch) do
+                        rescueWatch[root] = nil
+                end
         end
 
         ObjectPull.setEnabled = function(value)
