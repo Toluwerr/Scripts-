@@ -3819,11 +3819,11 @@ end
 -- objects rocket in and only ease off as they close on the
 -- Keep Distance ring. A convergence watchdog re-claims any
 -- object that stalls outside the ring - the classic sign that
--- the assembly is not ours to simulate. Assemblies containing
--- a seat anywhere (cars and other rideables, occupied or not)
--- are left out entirely: yanking an occupied vehicle means
--- fighting its rider's client for ownership, which just
--- rubber-bands forever.
+-- the assembly is not ours to simulate. Vehicles are fair
+-- game: unoccupied ones get claimed and yanked like anything
+-- else, while one with a rider welded in is watched but not
+-- fought over - its ownership is locked to the rider's
+-- client, so it is pounced on the moment they hop out.
 -- ============================================================
 do
         local PULL_SCAN_INTERVAL = 0.1
@@ -3898,31 +3898,44 @@ do
                 return false
         end
 
-        -- A chassis-rooted car slips past a root-level Seat
-        -- check, and once someone sits in it their character
-        -- welds into the assembly - pulling it would fling the
-        -- rider and fight their client for ownership forever.
-        -- So any assembly with a Seat (or VehicleSeat, which
-        -- FindFirstChildWhichIsA also matches) anywhere in it
-        -- counts as a vehicle, cached briefly so big assemblies
-        -- are not re-walked every scan.
-        local function assemblyHasSeat(root)
+        -- Sitting welds the rider's character into the vehicle
+        -- assembly, which locks network ownership to their
+        -- client - an occupied vehicle can never be pulled, and
+        -- trying just burns claim traffic. So the seat walk
+        -- reports whether anyone is seated; the state is cached
+        -- briefly so big assemblies are not re-walked every
+        -- scan.
+        local function assemblySeatState(root)
                 local now = os.clock()
                 local cached = seatAssemblyCache[root]
 
                 if cached and now - cached.At < PULL_SEAT_CACHE_TTL then
-                        return cached.HasSeat
+                        return cached.HasSeat, cached.Occupied
                 end
 
                 local hasSeat = root:IsA("Seat")
-                        or root:FindFirstChildWhichIsA("Seat", true) ~= nil
+                local occupied = hasSeat and root.Occupant ~= nil
+
+                if not occupied then
+                        for _, child in ipairs(root:GetDescendants()) do
+                                if child:IsA("Seat") then
+                                        hasSeat = true
+
+                                        if child.Occupant then
+                                                occupied = true
+                                                break
+                                        end
+                                end
+                        end
+                end
 
                 seatAssemblyCache[root] = {
                         HasSeat = hasSeat,
+                        Occupied = occupied,
                         At = now
                 }
 
-                return hasSeat
+                return hasSeat, occupied
         end
 
         local function isPullableRoot(root)
@@ -3930,7 +3943,6 @@ do
                         or not root:IsA("BasePart")
                         or not root.Parent
                         or root.Anchored
-                        or assemblyHasSeat(root)
                         or root.AssemblyRootPart ~= root then
                         return false
                 end
@@ -3995,6 +4007,9 @@ do
                                 seen[root] = true
                                 table.insert(roots, root)
 
+                                local _, occupied =
+                                        assemblySeatState(root)
+
                                 -- Claims are remembered and rate-limited:
                                 -- a swarm is claimed over several scan
                                 -- ticks instead of one huge burst. The
@@ -4003,20 +4018,25 @@ do
                                 -- not re-claimed on every flicker in
                                 -- and out of the query sphere; a root
                                 -- that is genuinely gone is forgotten
-                                -- shortly after.
-                                if not claimedRoots[root] then
-                                        if claims < PULL_CLAIM_BURST then
-                                                claims += 1
-                                                claimedRoots[root] = stamp
+                                -- shortly after. An occupied vehicle is
+                                -- never claimed - its assembly is welded
+                                -- to the rider's character, and that
+                                -- ownership is not ours to take.
+                                if not occupied then
+                                        if not claimedRoots[root] then
+                                                if claims < PULL_CLAIM_BURST then
+                                                        claims += 1
+                                                        claimedRoots[root] = stamp
 
-                                                pcall(function()
-                                                        root:SetNetworkOwner(
-                                                                LocalPlayer
-                                                        )
-                                                end)
+                                                        pcall(function()
+                                                                root:SetNetworkOwner(
+                                                                        LocalPlayer
+                                                                )
+                                                        end)
+                                                end
+                                        else
+                                                claimedRoots[root] = stamp
                                         end
-                                else
-                                        claimedRoots[root] = stamp
                                 end
                         end
                 end
@@ -4073,6 +4093,7 @@ do
                 local activeCount = 0
                 local totalCount = 0
                 local stuckCount = 0
+                local occupiedCount = 0
                 local rescueBudget = PULL_RESCUE_BUDGET
 
                 for _, root in ipairs(ObjectPullSettings.Roots) do
@@ -4083,10 +4104,23 @@ do
                                 local distance = offset.Magnitude
 
                                 if distance == distance then
-                                        totalCount += 1
+                                        local _, occupied =
+                                                assemblySeatState(root)
 
-                                        if distance > keepDistance then
+                                        if occupied then
+                                                -- A rider is welded into
+                                                -- the assembly: ownership
+                                                -- is locked to their
+                                                -- client, so writes and
+                                                -- rescue claims are
+                                                -- pointless - just watch
+                                                -- it and pounce the
+                                                -- moment they hop out.
+                                                occupiedCount += 1
+                                                rescueWatch[root] = nil
+                                        elseif distance > keepDistance then
                                                 activeCount += 1
+                                                totalCount += 1
 
                                                 local speed = math.clamp(
                                                         (distance - keepDistance)
@@ -4164,6 +4198,7 @@ do
                                                 end
                                         else
                                                 rescueWatch[root] = nil
+                                                totalCount += 1
                                         end
                                 end
                         end
@@ -4179,6 +4214,11 @@ do
                         end
 
                         updatePullStatus(statusText)
+                elseif occupiedCount > 0 then
+                        updatePullStatus(
+                                "Waiting on " .. occupiedCount
+                                        .. " occupied vehicles"
+                        )
                 elseif totalCount > 0 then
                         updatePullStatus(
                                 totalCount .. " objects gathered"
