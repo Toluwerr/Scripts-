@@ -223,8 +223,10 @@ local ObjectPullSettings = {
         KeepDistance = 7,
         Roots = {},
         NextScanAt = 0,
+        NextStatusAt = 0,
         Connection = nil,
-        LastStatus = nil
+        LastStatus = nil,
+        LastStatusKind = nil
 }
 
 local ObjectPull = {}
@@ -3817,7 +3819,11 @@ end
 -- objects rocket in and only ease off as they close on the
 -- Keep Distance ring. A convergence watchdog re-claims any
 -- object that stalls outside the ring - the classic sign that
--- the assembly is not ours to simulate.
+-- the assembly is not ours to simulate. Assemblies containing
+-- a seat anywhere (cars and other rideables, occupied or not)
+-- are left out entirely: yanking an occupied vehicle means
+-- fighting its rider's client for ownership, which just
+-- rubber-bands forever.
 -- ============================================================
 do
         local PULL_SCAN_INTERVAL = 0.1
@@ -3838,9 +3844,12 @@ do
         local PULL_RESCUE_BUDGET = 5
         local PULL_RESCUE_RETRY = 6
         local PULL_RESCUE_CONCEDE = 2
+        local PULL_STATUS_INTERVAL = 0.25
+        local PULL_SEAT_CACHE_TTL = 2
 
         local claimedRoots = {}
         local rescueWatch = {}
+        local seatAssemblyCache = {}
 
         local function updatePullStatus(text)
                 local message = tostring(text or "Object Pull off")
@@ -3849,7 +3858,21 @@ do
                         return
                 end
 
+                -- Count-only changes are throttled so a busy pull
+                -- does not repaint the label every single frame;
+                -- kind changes (pulling / gathered / off / error)
+                -- always pass through immediately.
+                local now = os.clock()
+                local kind = message:gsub("%d+", "#")
+
+                if kind == (ObjectPullSettings.LastStatusKind or "")
+                        and now < (ObjectPullSettings.NextStatusAt or 0) then
+                        return
+                end
+
                 ObjectPullSettings.LastStatus = message
+                ObjectPullSettings.LastStatusKind = kind
+                ObjectPullSettings.NextStatusAt = now + PULL_STATUS_INTERVAL
 
                 if type(ObjectPull.OnStatusChanged) == "function" then
                         pcall(ObjectPull.OnStatusChanged, message)
@@ -3875,13 +3898,39 @@ do
                 return false
         end
 
+        -- A chassis-rooted car slips past a root-level Seat
+        -- check, and once someone sits in it their character
+        -- welds into the assembly - pulling it would fling the
+        -- rider and fight their client for ownership forever.
+        -- So any assembly with a Seat (or VehicleSeat, which
+        -- FindFirstChildWhichIsA also matches) anywhere in it
+        -- counts as a vehicle, cached briefly so big assemblies
+        -- are not re-walked every scan.
+        local function assemblyHasSeat(root)
+                local now = os.clock()
+                local cached = seatAssemblyCache[root]
+
+                if cached and now - cached.At < PULL_SEAT_CACHE_TTL then
+                        return cached.HasSeat
+                end
+
+                local hasSeat = root:IsA("Seat")
+                        or root:FindFirstChildWhichIsA("Seat", true) ~= nil
+
+                seatAssemblyCache[root] = {
+                        HasSeat = hasSeat,
+                        At = now
+                }
+
+                return hasSeat
+        end
+
         local function isPullableRoot(root)
                 if not root
                         or not root:IsA("BasePart")
                         or not root.Parent
                         or root.Anchored
-                        or root:IsA("Seat")
-                        or root:IsA("VehicleSeat")
+                        or assemblyHasSeat(root)
                         or root.AssemblyRootPart ~= root then
                         return false
                 end
@@ -3984,6 +4033,12 @@ do
                         end
                 end
 
+                for root in pairs(seatAssemblyCache) do
+                        if not seen[root] then
+                                seatAssemblyCache[root] = nil
+                        end
+                end
+
                 ObjectPullSettings.Roots = roots
         end
 
@@ -4017,6 +4072,7 @@ do
                 )
                 local activeCount = 0
                 local totalCount = 0
+                local stuckCount = 0
                 local rescueBudget = PULL_RESCUE_BUDGET
 
                 for _, root in ipairs(ObjectPullSettings.Roots) do
@@ -4065,7 +4121,8 @@ do
                                                                         + PULL_RESCUE_FIRST
                                                                         + math.random()
                                                                                 * PULL_RESCUE_SPREAD,
-                                                                Claims = 0
+                                                                Claims = 0,
+                                                                Conceded = false
                                                         }
                                                 elseif now >= watch.NextClaimAt then
                                                         local stalled = distance
@@ -4089,15 +4146,21 @@ do
                                                                 watch.NextClaimAt = now
                                                                         + PULL_RESCUE_INTERVAL
                                                         elseif stalled then
+                                                                watch.Conceded = true
                                                                 watch.NextClaimAt = now
                                                                         + PULL_RESCUE_CONCEDE
                                                         else
                                                                 watch.Claims = 0
+                                                                watch.Conceded = false
                                                                 watch.NextClaimAt = now
                                                                         + PULL_RESCUE_INTERVAL
                                                         end
 
                                                         watch.Distance = distance
+                                                end
+
+                                                if watch and watch.Conceded then
+                                                        stuckCount += 1
                                                 end
                                         else
                                                 rescueWatch[root] = nil
@@ -4107,9 +4170,15 @@ do
                 end
 
                 if activeCount > 0 then
-                        updatePullStatus(
+                        local statusText =
                                 "Pulling " .. activeCount .. " objects"
-                        )
+
+                        if stuckCount > 0 then
+                                statusText = statusText
+                                        .. " (" .. stuckCount .. " stuck)"
+                        end
+
+                        updatePullStatus(statusText)
                 elseif totalCount > 0 then
                         updatePullStatus(
                                 totalCount .. " objects gathered"
@@ -4124,6 +4193,8 @@ do
                 ObjectPullSettings.Connection = nil
                 ObjectPullSettings.Roots = {}
                 ObjectPullSettings.NextScanAt = 0
+                ObjectPullSettings.NextStatusAt = 0
+                ObjectPullSettings.LastStatusKind = nil
 
                 for root in pairs(claimedRoots) do
                         claimedRoots[root] = nil
@@ -4131,6 +4202,10 @@ do
 
                 for root in pairs(rescueWatch) do
                         rescueWatch[root] = nil
+                end
+
+                for root in pairs(seatAssemblyCache) do
+                        seatAssemblyCache[root] = nil
                 end
         end
 
