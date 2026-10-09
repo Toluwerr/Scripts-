@@ -240,6 +240,17 @@ local ObjectPullSettings = {
 
 local ObjectPull = {}
 
+local ShakerSettings = {
+        Enabled = false,
+        SimBoost = false,
+        Connection = nil,
+        LastStatus = nil,
+        NextEnvAt = 0,
+        NextScanAt = 0
+}
+
+local Shaker = {}
+
 local Window
 local stopVehicleFlyRuntime
 local restartVehicleFly
@@ -4787,6 +4798,562 @@ do
         end
 end
 
+-- ============================================================
+-- Object Shaker: the Fun tab storm engine. Every assembly near
+-- the player - loose debris, welded structure chunks still
+-- joined together, anything hanging on a hinge - is claimed
+-- through the same simulation radius war as Object Pull, then
+-- whipped with a fresh violent velocity on every single
+-- Heartbeat: a random direction at full chaos speed, a pull
+-- toward the player so the storm gravitates around them, an
+-- upward lift so it stays airborne, and a random spin so parts
+-- tumble as they fly. Joints are never touched, so assemblies
+-- keep their welds and hinges the whole time and flail around
+-- as connected pieces instead of dissolving into confetti.
+-- Anchored parts are seized the Project Gravity way (local
+-- unanchor while the sim boost read-back is live) so this also
+-- works on the pristine island between disasters. Claimed parts
+-- go non-collidable while shaken so the storm cannot smash the
+-- player running it, and collision and anchoring are restored
+-- exactly on release. No sliders on purpose: the storm is tuned
+-- once and hardcoded.
+-- ============================================================
+do
+        local ENV_INTERVAL = 0.5
+        local SHAKE_RADIUS = 100
+        local RELEASE_SLACK = 40
+        local SCAN_INTERVAL = 0.5
+        local MAX_DIMENSION = 120
+        local SIM_RADIUS = 9e9
+        local CHAOS_SPEED = 260
+        local PULL_SPEED = 120
+        local LIFT_SPEED = 80
+        local SPIN_SPEED = 70
+
+        local EXCLUDED_NAMES = {
+                Terrain = true,
+                Baseplate = true,
+                HumanoidRootPart = true,
+                Handle = true,
+                ["__PlayerToolsPlatform"] = true
+        }
+
+        local claimedRoots = setmetatable({}, { __mode = "k" })
+        local claimedParts = setmetatable({}, { __mode = "k" })
+        local envOriginals = setmetatable({}, { __mode = "k" })
+        local allowSleepSaved = nil
+
+        local function updateShakeStatus(text)
+                local message = tostring(text or "Object Shaker off")
+
+                if ShakerSettings.LastStatus == message then
+                        return
+                end
+
+                ShakerSettings.LastStatus = message
+
+                if type(Shaker.OnStatusChanged) == "function" then
+                        pcall(Shaker.OnStatusChanged, message)
+                end
+        end
+
+        local function randomUnit()
+                local vector = Vector3.new(
+                        math.random() * 2 - 1,
+                        math.random() * 2 - 1,
+                        math.random() * 2 - 1
+                )
+
+                if vector.Magnitude < 0.05 then
+                        return Vector3.new(0, 1, 0)
+                end
+
+                return vector.Unit
+        end
+
+        local function shakeReadProperty(object, key, hidden)
+                if hidden and type(gethiddenproperty) == "function" then
+                        local ok, value = pcall(gethiddenproperty, object, key)
+
+                        if ok then
+                                return value
+                        end
+                end
+
+                local ok, value = pcall(function()
+                        return object[key]
+                end)
+
+                if ok then
+                        return value
+                end
+
+                return nil
+        end
+
+        local function shakeWriteProperty(object, key, value, hidden)
+                if hidden and type(sethiddenproperty) == "function" then
+                        local ok = pcall(sethiddenproperty, object, key, value)
+
+                        if ok then
+                                return true
+                        end
+                end
+
+                return pcall(function()
+                        object[key] = value
+                end)
+        end
+
+        local function shakeRemember(object, key, value, hidden)
+                local saved = envOriginals[object]
+
+                if not saved then
+                        saved = {}
+                        envOriginals[object] = saved
+                end
+
+                if saved[key] == nil then
+                        saved[key] = {
+                                value = shakeReadProperty(object, key, hidden),
+                                hidden = hidden
+                        }
+                end
+
+                shakeWriteProperty(object, key, value, hidden)
+        end
+
+        local function shakeSimBoostActive()
+                -- Same read-back contract as the pull: the engine's own
+                -- default radius is 1000 studs, so anything six orders of
+                -- magnitude above that means the hidden write genuinely
+                -- took on this executor.
+                local radius = shakeReadProperty(LocalPlayer, "SimulationRadius", true)
+
+                if type(radius) == "number" and radius >= 1e6 then
+                        return true
+                end
+
+                local maximum = shakeReadProperty(LocalPlayer, "MaximumSimulationRadius", false)
+
+                return type(maximum) == "number" and maximum >= 1e6
+        end
+
+        local function assertSelfBoost()
+                -- Re-asserted every single frame exactly like the pull:
+                -- the boost decays the moment you stop writing it.
+                shakeRemember(LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
+                shakeRemember(LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
+                shakeRemember(LocalPlayer, "NetworkIsSleeping", false, true)
+        end
+
+        local function applyShakeEnvironment(rootPart)
+                assertSelfBoost()
+                shakeRemember(LocalPlayer, "ReplicationFocus", rootPart.CFrame)
+
+                if allowSleepSaved == nil then
+                        local ok, value = pcall(function()
+                                return settings().Physics.AllowSleep
+                        end)
+
+                        allowSleepSaved = ok and value or false
+                end
+
+                pcall(function()
+                        settings().Physics.AllowSleep = false
+                end)
+
+                -- Everyone else pinned to zero radius so every loose
+                -- assembly near them arbitrates to us instead.
+                for _, player in ipairs(Players:GetPlayers()) do
+                        if player ~= LocalPlayer then
+                                shakeRemember(player, "MaximumSimulationRadius", 0)
+                                shakeRemember(player, "SimulationRadius", 0, true)
+                        end
+                end
+
+                ShakerSettings.SimBoost = shakeSimBoostActive()
+        end
+
+        local function restoreShakeEnvironment()
+                for object, saved in pairs(envOriginals) do
+                        for key, original in pairs(saved) do
+                                pcall(shakeWriteProperty, object, key, original.value, original.hidden)
+                        end
+                end
+
+                table.clear(envOriginals)
+
+                if allowSleepSaved ~= nil then
+                        pcall(function()
+                                settings().Physics.AllowSleep = allowSleepSaved
+                        end)
+
+                        allowSleepSaved = nil
+                end
+        end
+
+        local function claimShakeRoot(root)
+                if claimedRoots[root] then
+                        return
+                end
+
+                -- The whole assembly is claimed, not just the root, so
+                -- welded structures flail as one connected piece. Player
+                -- character parts are skipped - never theirs to touch,
+                -- even when a seat welds a driver into the assembly.
+                local characters = {}
+
+                for _, player in ipairs(Players:GetPlayers()) do
+                        if player.Character then
+                                table.insert(characters, player.Character)
+                        end
+                end
+
+                local parts = { root }
+                local seized = root.Anchored and ShakerSettings.SimBoost or nil
+
+                pcall(function()
+                        for _, part in ipairs(root:GetConnectedParts(true)) do
+                                if part and part:IsA("BasePart") and part.Parent then
+                                        table.insert(parts, part)
+                                end
+                        end
+                end)
+
+                local list = {}
+
+                for _, part in ipairs(parts) do
+                        local inCharacter = false
+
+                        for _, character in ipairs(characters) do
+                                if part:IsDescendantOf(character) then
+                                        inCharacter = true
+                                        break
+                                end
+                        end
+
+                        if not inCharacter then
+                                if claimedParts[part] == nil then
+                                        claimedParts[part] = {
+                                                canCollide = part.CanCollide,
+                                                anchored = part.Anchored
+                                        }
+
+                                        pcall(function()
+                                                part.CanCollide = false
+                                                part.Anchored = false
+                                        end)
+                                end
+
+                                table.insert(list, part)
+                        end
+                end
+
+                claimedRoots[root] = {
+                        parts = list,
+                        seized = seized or nil
+                }
+        end
+
+        local function releaseShakeRoot(root)
+                local rec = claimedRoots[root]
+
+                if not rec then
+                        return
+                end
+
+                claimedRoots[root] = nil
+
+                for _, part in ipairs(rec.parts) do
+                        local saved = claimedParts[part]
+
+                        if saved then
+                                claimedParts[part] = nil
+
+                                if part and part.Parent then
+                                        pcall(function()
+                                                part.CanCollide = saved.canCollide
+                                                part.Anchored = saved.anchored
+                                        end)
+                                end
+                        end
+                end
+        end
+
+        local function isShakableRoot(root)
+                if not root
+                        or not root:IsA("BasePart")
+                        or not root.Parent
+                        or root.AssemblyRootPart ~= root then
+                        return false
+                end
+
+                -- Anchored parts can only be seized while the sim boost
+                -- read-back is actually live; without it a local unanchor
+                -- would be client-only smoke, and this feature does not
+                -- do fake.
+                if root.Anchored and not ShakerSettings.SimBoost then
+                        return false
+                end
+
+                if EXCLUDED_NAMES[root.Name] then
+                        return false
+                end
+
+                -- Giant slabs: oceans, tsunami water, lava planes.
+                local size = root.Size
+
+                if size.X > MAX_DIMENSION
+                        or size.Y > MAX_DIMENSION
+                        or size.Z > MAX_DIMENSION then
+                        return false
+                end
+
+                -- Burning debris: NDS fire rides on parts as a Fire
+                -- child, and whipping it past us would set us on fire.
+                if root:FindFirstChildOfClass("Fire") then
+                        return false
+                end
+
+                -- Characters, NPCs, tools and accessories are never ours
+                -- to shake: walk the ancestors and bail on any humanoid
+                -- rig or gear.
+                local target = root.Parent
+
+                while target and target ~= Workspace and target ~= game do
+                        if target:IsA("Accessory") or target:IsA("Tool") then
+                                return false
+                        end
+
+                        if target:IsA("Model")
+                                and (target:FindFirstChildOfClass("Humanoid")
+                                        or target:FindFirstChildOfClass("AnimationController")) then
+                                return false
+                        end
+
+                        target = target.Parent
+                end
+
+                if LocalPlayer.Character
+                        and root:IsDescendantOf(LocalPlayer.Character) then
+                        return false
+                end
+
+                if VehicleSettings.CurrentModel
+                        and VehicleSettings.CurrentModel.Parent
+                        and root:IsDescendantOf(VehicleSettings.CurrentModel) then
+                        return false
+                end
+
+                local held = ObjectHoldSettings.Root
+
+                if held and held.Parent and root == held then
+                        return false
+                end
+
+                return true
+        end
+
+        local function updateShakeStatusCounts()
+                -- ReceiveAge is zero only on assemblies our client
+                -- actually simulates, so this counts what is really being
+                -- shaken instead of what was merely claimed.
+                local held = 0
+                local seized = 0
+                local contested = 0
+
+                for root, rec in pairs(claimedRoots) do
+                        if root.Parent then
+                                if rec.seized then
+                                        seized += 1
+                                elseif root.ReceiveAge == 0 then
+                                        held += 1
+                                else
+                                        contested += 1
+                                end
+                        end
+                end
+
+                local suffix = ShakerSettings.SimBoost
+                        and ""
+                        or " (no sim boost - executor limited)"
+
+                if held + seized + contested == 0 then
+                        updateShakeStatus("Nothing to shake nearby" .. suffix)
+                        return
+                end
+
+                local text = "Shaking " .. held
+
+                if seized > 0 then
+                        text = text .. " + " .. seized .. " anchored seized"
+                end
+
+                if contested > 0 then
+                        text = text .. " + " .. contested .. " contested"
+                end
+
+                updateShakeStatus(text .. suffix)
+        end
+
+        local function updateObjectShaker()
+                if not running or not ShakerSettings.Enabled then
+                        return
+                end
+
+                local character = LocalPlayer.Character
+                local rootPart = character
+                        and character:FindFirstChild("HumanoidRootPart")
+
+                if not rootPart or not rootPart.Parent then
+                        updateShakeStatus("Character unavailable")
+                        return
+                end
+
+                local now = os.clock()
+
+                assertSelfBoost()
+
+                if now >= (ShakerSettings.NextEnvAt or 0) then
+                        ShakerSettings.NextEnvAt = now + ENV_INTERVAL
+                        applyShakeEnvironment(rootPart)
+                end
+
+                local center = rootPart.Position
+
+                if now >= (ShakerSettings.NextScanAt or 0) then
+                        ShakerSettings.NextScanAt = now + SCAN_INTERVAL
+
+                        -- Release pass first: anything destroyed or flung
+                        -- beyond the storm's edge is let go with whatever
+                        -- velocity it already carries.
+                        local limit = (SHAKE_RADIUS + RELEASE_SLACK)
+                                * (SHAKE_RADIUS + RELEASE_SLACK)
+
+                        for root in pairs(claimedRoots) do
+                                if not root.Parent then
+                                        releaseShakeRoot(root)
+                                else
+                                        local offset = root.Position - center
+
+                                        if offset:Dot(offset) > limit then
+                                                releaseShakeRoot(root)
+                                        end
+                                end
+                        end
+
+                        -- Claim pass: one native spatial query for the
+                        -- bubble, mapped onto assembly roots, so welded
+                        -- structures arrive as one piece each.
+                        local found = Workspace:GetPartBoundsInRadius(
+                                center,
+                                SHAKE_RADIUS
+                        )
+
+                        for _, part in ipairs(found) do
+                                local root = part.AssemblyRootPart
+
+                                if root
+                                        and not claimedRoots[root]
+                                        and isShakableRoot(root) then
+                                        local offset = root.Position - center
+
+                                        if offset:Dot(offset) <= SHAKE_RADIUS * SHAKE_RADIUS then
+                                                claimShakeRoot(root)
+                                        end
+                                end
+                        end
+
+                        updateShakeStatusCounts()
+                end
+
+                -- The storm itself: a fresh violent velocity every
+                -- Heartbeat. Between writes the engine integrates the
+                -- last one, so every physics substep of the frame moves
+                -- at full violence, and joints are never touched - the
+                -- assembly keeps its welds and hinges and flails as a
+                -- connected piece.
+                for root in pairs(claimedRoots) do
+                        if not root.Parent then
+                                releaseShakeRoot(root)
+                        else
+                                local toPlayer = center - root.Position
+                                local pullDir
+
+                                if toPlayer.Magnitude == toPlayer.Magnitude
+                                        and toPlayer.Magnitude > 0.05 then
+                                        pullDir = toPlayer.Unit
+                                else
+                                        pullDir = Vector3.new(0, 1, 0)
+                                end
+
+                                pcall(function()
+                                        root.AssemblyLinearVelocity =
+                                                randomUnit() * CHAOS_SPEED
+                                                + pullDir * PULL_SPEED
+                                                + Vector3.new(0, LIFT_SPEED, 0)
+                                        root.AssemblyAngularVelocity =
+                                                randomUnit() * SPIN_SPEED
+                                end)
+                        end
+                end
+        end
+
+        local function stopObjectShaker()
+                disconnect(ShakerSettings.Connection)
+                ShakerSettings.Connection = nil
+                ShakerSettings.NextEnvAt = 0
+                ShakerSettings.NextScanAt = 0
+
+                for root in pairs(claimedRoots) do
+                        releaseShakeRoot(root)
+                end
+
+                restoreShakeEnvironment()
+        end
+
+        Shaker.setEnabled = function(value)
+                local enabled = value and true or false
+
+                stopObjectShaker()
+                ShakerSettings.Enabled = enabled
+
+                if type(Shaker.OnEnabledChanged) == "function" then
+                        pcall(Shaker.OnEnabledChanged, enabled)
+                end
+
+                if not enabled then
+                        updateShakeStatus("Object Shaker off")
+                        return
+                end
+
+                local rootPart = LocalPlayer.Character
+                        and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+                if rootPart and rootPart.Parent then
+                        applyShakeEnvironment(rootPart)
+                end
+
+                ShakerSettings.NextScanAt = 0
+
+                updateShakeStatus("Scanning for objects...")
+
+                ShakerSettings.Connection = RunService.Heartbeat:Connect(
+                        function()
+                                local ok, err = pcall(updateObjectShaker)
+
+                                if not ok then
+                                        updateShakeStatus(
+                                                "Engine error: "
+                                                        .. tostring(err):sub(1, 80)
+                                        )
+                                end
+                        end
+                )
+        end
+end
+
 local function cleanup()
         if not running then
                 return
@@ -4806,6 +5373,10 @@ local function cleanup()
         ObjectPullSettings.Enabled = false
         pcall(function()
                 ObjectPull.setEnabled(false)
+        end)
+        ShakerSettings.Enabled = false
+        pcall(function()
+                Shaker.setEnabled(false)
         end)
         clearNoclip()
         stopFling()
@@ -5165,6 +5736,37 @@ ObjectPullSection:Slider({
                 ObjectPullSettings.KeepDistance = tonumber(value) or 7
         end
 })
+
+local ObjectShakerSection = FunTab:Section("Object Shaker")
+
+local objectShakerStatusLabel = ObjectShakerSection:Paragraph({
+        Text = "Object Shaker off"
+})
+
+Shaker.OnStatusChanged = function(status)
+        objectShakerStatusLabel:Set(tostring(status or "Object Shaker off"))
+end
+
+local objectShakerToggleValue = false
+local objectShakerToggle = ObjectShakerSection:Toggle({
+        Text = "Enable Object Shaker",
+        Value = false,
+        Callback = function(value)
+                objectShakerToggleValue = value and true or false
+                Shaker.setEnabled(objectShakerToggleValue)
+        end
+})
+
+Shaker.OnEnabledChanged = function(enabled)
+        local desiredValue = enabled and true or false
+
+        if objectShakerToggleValue == desiredValue then
+                return
+        end
+
+        objectShakerToggleValue = desiredValue
+        objectShakerToggle:Set(desiredValue)
+end
 end
 
 do
