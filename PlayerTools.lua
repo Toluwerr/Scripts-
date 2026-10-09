@@ -4095,11 +4095,13 @@ end
 -- writes (the old version) can never do, and why the old ring
 -- bobbed and sagged. A constraint on an assembly we do not
 -- simulate does nothing at all, so there is no fake client-only
--- dragging either. Anchored parts are seized the Project
--- Gravity way (local unanchor) but only while the sim boost
--- read-back is live, and ReceiveAge - zero means the assembly
--- is genuinely ours, the devforum-verified check - reports how
--- much of the swarm is really held. The old radius query
+-- dragging either. Anchored parts are no longer touched at all:
+-- an anchored part is server-static, no client can ever move it
+-- for real, so the old seizure was client-side theatre. Only
+-- genuinely unanchored assemblies are claimed, and ReceiveAge -
+-- zero means the assembly is genuinely ours, the
+-- devforum-verified check - reports how much of the swarm is
+-- really held. The old radius query
 -- silently truncated at 8192 parts and missed most of a busy
 -- NDS island, so a throttled full-workspace walk now claims
 -- everything, and debris that appears mid-disaster is picked up
@@ -4128,7 +4130,8 @@ do
                 Baseplate = true,
                 HumanoidRootPart = true,
                 Handle = true,
-                ["__PlayerToolsPlatform"] = true
+                ["__PlayerToolsPlatform"] = true,
+                ["__ObjectShakerTarget"] = true
         }
 
         local claimedRoots = setmetatable({}, { __mode = "k" })
@@ -4314,7 +4317,6 @@ do
                 end
 
                 local parts = { root }
-                local seize = root.Anchored and ObjectPullSettings.SimBoost
 
                 pcall(function()
                         for _, part in ipairs(root:GetConnectedParts(true)) do
@@ -4340,14 +4342,12 @@ do
                                 if claimedParts[part] == nil then
                                         claimedParts[part] = {
                                                 canCollide = part.CanCollide,
-                                                physics = part.CustomPhysicalProperties or false,
-                                                anchored = part.Anchored
+                                                physics = part.CustomPhysicalProperties or false
                                         }
 
                                         pcall(function()
                                                 part.CanCollide = false
                                                 part.CustomPhysicalProperties = LIGHT_PHYSICS
-                                                part.Anchored = false
                                         end)
                                 end
 
@@ -4410,8 +4410,7 @@ do
                         align = align,
                         orient = orient,
                         parts = list,
-                        rotation = root.CFrame - root.CFrame.Position,
-                        seized = seize or nil
+                        rotation = root.CFrame - root.CFrame.Position
                 }
         end
 
@@ -4442,7 +4441,6 @@ do
                                                 part.CanCollide = saved.canCollide
                                                 part.CustomPhysicalProperties =
                                                         saved.physics == false and nil or saved.physics
-                                                part.Anchored = saved.anchored
                                         end)
                                 end
                         end
@@ -4461,11 +4459,10 @@ do
                         return false
                 end
 
-                -- Anchored parts can only be seized while the sim boost
-                -- read-back is actually live; without it a local unanchor
-                -- would be client-only smoke, and this feature does not
-                -- do fake.
-                if root.Anchored and not ObjectPullSettings.SimBoost then
+                -- Anchored means the server holds it static and no
+                -- client can ever move it for real, so it is not ours
+                -- to pull: the old seizure was client-side theatre.
+                if root.Anchored then
                         return false
                 end
 
@@ -4521,6 +4518,10 @@ do
                 local held = ObjectHoldSettings.Root
 
                 if held and held.Parent and root == held then
+                        return false
+                end
+
+                if Shaker.IsClaimed and Shaker.IsClaimed(root) then
                         return false
                 end
 
@@ -4602,14 +4603,11 @@ do
                 -- ownership check - so this counts what is really held
                 -- instead of what was merely claimed.
                 local held = 0
-                local seized = 0
                 local contested = 0
 
-                for root, rec in pairs(claimedRoots) do
+                for root in pairs(claimedRoots) do
                         if root.Parent then
-                                if rec.seized then
-                                        seized += 1
-                                elseif root.ReceiveAge == 0 then
+                                if root.ReceiveAge == 0 then
                                         held += 1
                                 else
                                         contested += 1
@@ -4621,16 +4619,12 @@ do
                         and ""
                         or " (no sim boost - executor limited)"
 
-                if held + seized + contested == 0 then
+                if held + contested == 0 then
                         updatePullStatus("No liftable objects in range" .. suffix)
                         return
                 end
 
                 local text = "Holding " .. held
-
-                if seized > 0 then
-                        text = text .. " + " .. seized .. " anchored seized"
-                end
 
                 if contested > 0 then
                         text = text .. " + " .. contested .. " contested"
@@ -4753,6 +4747,12 @@ do
                 restorePullEnvironment()
         end
 
+        -- Shared with the shaker so the two storm engines never
+        -- claim the same assembly and fight over it.
+        ObjectPull.IsClaimed = function(root)
+                return claimedRoots[root] ~= nil
+        end
+
         ObjectPull.setEnabled = function(value)
                 local enabled = value and true or false
 
@@ -4799,36 +4799,50 @@ do
 end
 
 -- ============================================================
--- Object Shaker: the Fun tab storm engine. Every assembly near
--- the player - loose debris, welded structure chunks still
--- joined together, anything hanging on a hinge - is claimed
--- through the same simulation radius war as Object Pull, then
--- whipped with a fresh violent velocity on every single
--- Heartbeat: a random direction at full chaos speed, a pull
--- toward the player so the storm gravitates around them, an
--- upward lift so it stays airborne, and a random spin so parts
--- tumble as they fly. Joints are never touched, so assemblies
--- keep their welds and hinges the whole time and flail around
--- as connected pieces instead of dissolving into confetti.
--- Anchored parts are seized the Project Gravity way (local
--- unanchor while the sim boost read-back is live) so this also
--- works on the pristine island between disasters. Claimed parts
--- go non-collidable while shaken so the storm cannot smash the
--- player running it, and collision and anchoring are restored
--- exactly on release. No sliders on purpose: the storm is tuned
--- once and hardcoded.
+-- Object Shaker v2: the Fun tab storm engine, rebuilt on the
+-- puppet actuation the pull uses. The v40 velocity writes
+-- re-randomized every Heartbeat produced a random walk that
+-- barely moved anywhere, and on assemblies we do not simulate
+-- they were local writes the server instantly corrected -
+-- that is where most of the jitter came from. The v40 anchored
+-- seizure is gone entirely: an anchored part is server-static,
+-- no client can ever move it for real, so shaking it was pure
+-- client-side theatre. Only genuinely unanchored assemblies
+-- are claimed now, and each gets an invisible anchored whip
+-- target strung to it with unlimited-force AlignPosition and
+-- AlignOrientation, exactly like the pull's puppet. The target
+-- orbits the player on a random axis at 5-13 rad/s on a 10-26
+-- stud shell, and every quarter second or so the whole orbit
+-- is re-thrown onto a completely new axis, radius, speed and
+-- orientation - so every part is perpetually either whipping
+-- around the player or tearing across the shell at the 800
+-- studs/s solver cap, tumbling the entire time. Joints are
+-- never touched: assemblies keep their welds and hinges and
+-- flail as connected pieces. The shell tracks the player every
+-- frame, so the whole storm travels with you. Claimed parts go
+-- non-collidable while shaken so the storm cannot smash the
+-- player running it; collision is restored exactly on release.
+-- Constraints no-op on assemblies we do not simulate, so
+-- nothing can ever fake. No sliders on purpose.
 -- ============================================================
 do
         local ENV_INTERVAL = 0.5
         local SHAKE_RADIUS = 100
         local RELEASE_SLACK = 40
         local SCAN_INTERVAL = 0.5
+        local POKE_INTERVAL = 3
         local MAX_DIMENSION = 120
         local SIM_RADIUS = 9e9
-        local CHAOS_SPEED = 260
-        local PULL_SPEED = 120
-        local LIFT_SPEED = 80
-        local SPIN_SPEED = 70
+        local WHIP_MIN_RADIUS = 10
+        local WHIP_MAX_RADIUS = 26
+        local WHIP_MIN_SECS = 0.2
+        local WHIP_MAX_SECS = 0.45
+        local SPIN_MIN_SPEED = 5
+        local SPIN_MAX_SPEED = 13
+        local ALIGN_RESPONSIVENESS = 200
+        local ALIGN_MAX_VELOCITY = 800
+        local ORIENT_MAX_ANGULAR = 40
+        local ANTI_SLEEP = Vector3.new(0.5, 0.5, 0.5)
 
         local EXCLUDED_NAMES = {
                 Terrain = true,
@@ -4842,6 +4856,14 @@ do
         local claimedParts = setmetatable({}, { __mode = "k" })
         local envOriginals = setmetatable({}, { __mode = "k" })
         local allowSleepSaved = nil
+        local shakerFolder = nil
+        local frameTick = 0
+
+        -- A real MaxParts budget: the v40 default query cap silently
+        -- truncated the storm on busy islands, so whole crowds of
+        -- debris never got claimed at all.
+        local overlapParams = OverlapParams.new()
+        overlapParams.MaxParts = 100000
 
         local function updateShakeStatus(text)
                 local message = tostring(text or "Object Shaker off")
@@ -4869,6 +4891,29 @@ do
                 end
 
                 return vector.Unit
+        end
+
+        local function randomWhipDirection()
+                -- Always biased above the horizon so orbits ride up
+                -- around the player instead of grinding the ground,
+                -- and normalized so the shell stays a real 10-26
+                -- studs out instead of collapsing into the player.
+                local dir = randomUnit()
+                local biased = Vector3.new(
+                        dir.X,
+                        math.abs(dir.Y) * 0.7 + 0.25,
+                        dir.Z
+                )
+
+                return biased.Unit
+        end
+
+        local function randomWhipRotation()
+                return CFrame.Angles(
+                        math.random() * math.pi * 2,
+                        math.random() * math.pi * 2,
+                        math.random() * math.pi * 2
+                )
         end
 
         local function shakeReadProperty(object, key, hidden)
@@ -4998,6 +5043,12 @@ do
                         return
                 end
 
+                if not shakerFolder then
+                        shakerFolder = Instance.new("Folder")
+                        shakerFolder.Name = "__ObjectShakerRuntime"
+                        shakerFolder.Parent = Workspace
+                end
+
                 -- The whole assembly is claimed, not just the root, so
                 -- welded structures flail as one connected piece. Player
                 -- character parts are skipped - never theirs to touch,
@@ -5011,7 +5062,6 @@ do
                 end
 
                 local parts = { root }
-                local seized = root.Anchored and ShakerSettings.SimBoost or nil
 
                 pcall(function()
                         for _, part in ipairs(root:GetConnectedParts(true)) do
@@ -5036,13 +5086,11 @@ do
                         if not inCharacter then
                                 if claimedParts[part] == nil then
                                         claimedParts[part] = {
-                                                canCollide = part.CanCollide,
-                                                anchored = part.Anchored
+                                                canCollide = part.CanCollide
                                         }
 
                                         pcall(function()
                                                 part.CanCollide = false
-                                                part.Anchored = false
                                         end)
                                 end
 
@@ -5050,9 +5098,70 @@ do
                         end
                 end
 
+                -- The puppet, same pattern as the pull: an invisible
+                -- anchored whip target the assembly is strung to with
+                -- unlimited-force aligns. The target orbits the player
+                -- and is re-thrown onto a brand new orbit every whip;
+                -- moving it IS the storm - the engine's constraint
+                -- solver does the acceleration, gravity fighting and
+                -- tumbling on every physics substep, and on an assembly
+                -- we do not simulate the constraints simply do nothing,
+                -- so nothing ever fakes.
+                local target = Instance.new("Part")
+                target.Name = "__ObjectShakerTarget"
+                target.Size = Vector3.new(0.2, 0.2, 0.2)
+                target.Transparency = 1
+                target.Anchored = true
+                target.CanCollide = false
+                target.CanTouch = false
+                target.CanQuery = false
+                target.CastShadow = false
+                target.CFrame = root.CFrame
+                target.Parent = shakerFolder
+
+                local targetAttachment = Instance.new("Attachment")
+                targetAttachment.Parent = target
+
+                local attachment = Instance.new("Attachment")
+                attachment.Parent = root
+
+                local align = Instance.new("AlignPosition")
+                align.Mode = Enum.PositionAlignmentMode.TwoAttachment
+                align.Attachment0 = attachment
+                align.Attachment1 = targetAttachment
+                align.MaxForce = math.huge
+                align.MaxVelocity = ALIGN_MAX_VELOCITY
+                align.Responsiveness = ALIGN_RESPONSIVENESS
+                align.ApplyAtCenterOfMass = true
+                align.RigidityEnabled = false
+                align.Parent = root
+
+                local orient = Instance.new("AlignOrientation")
+                orient.Mode = Enum.OrientationAlignmentMode.TwoAttachment
+                orient.Attachment0 = attachment
+                orient.Attachment1 = targetAttachment
+                orient.MaxTorque = math.huge
+                orient.MaxAngularVelocity = ORIENT_MAX_ANGULAR
+                orient.Responsiveness = ALIGN_RESPONSIVENESS
+                orient.RigidityEnabled = false
+                orient.Parent = root
+
                 claimedRoots[root] = {
+                        target = target,
+                        attachment = attachment,
+                        align = align,
+                        orient = orient,
                         parts = list,
-                        seized = seized or nil
+                        spinAxis = randomUnit(),
+                        spinPhase = math.random() * math.pi * 2,
+                        spinSpeed = SPIN_MIN_SPEED
+                                + math.random() * (SPIN_MAX_SPEED - SPIN_MIN_SPEED),
+                        startOffset = randomWhipDirection()
+                                * (WHIP_MIN_RADIUS + math.random() * (WHIP_MAX_RADIUS - WHIP_MIN_RADIUS)),
+                        whipRotation = randomWhipRotation(),
+                        nextWhipAt = os.clock()
+                                + WHIP_MIN_SECS
+                                + math.random() * (WHIP_MAX_SECS - WHIP_MIN_SECS)
                 }
         end
 
@@ -5065,6 +5174,13 @@ do
 
                 claimedRoots[root] = nil
 
+                pcall(function()
+                        rec.align:Destroy()
+                        rec.orient:Destroy()
+                        rec.attachment:Destroy()
+                        rec.target:Destroy()
+                end)
+
                 for _, part in ipairs(rec.parts) do
                         local saved = claimedParts[part]
 
@@ -5074,7 +5190,6 @@ do
                                 if part and part.Parent then
                                         pcall(function()
                                                 part.CanCollide = saved.canCollide
-                                                part.Anchored = saved.anchored
                                         end)
                                 end
                         end
@@ -5089,11 +5204,11 @@ do
                         return false
                 end
 
-                -- Anchored parts can only be seized while the sim boost
-                -- read-back is actually live; without it a local unanchor
-                -- would be client-only smoke, and this feature does not
-                -- do fake.
-                if root.Anchored and not ShakerSettings.SimBoost then
+                -- Anchored means the server holds it static and no
+                -- client can ever move it for real, so it is not ours
+                -- to shake: the v40 version locally unanchored these
+                -- and shook them, which was pure client-side theatre.
+                if root.Anchored then
                         return false
                 end
 
@@ -5152,6 +5267,10 @@ do
                         return false
                 end
 
+                if ObjectPull.IsClaimed and ObjectPull.IsClaimed(root) then
+                        return false
+                end
+
                 return true
         end
 
@@ -5160,14 +5279,11 @@ do
                 -- actually simulates, so this counts what is really being
                 -- shaken instead of what was merely claimed.
                 local held = 0
-                local seized = 0
                 local contested = 0
 
-                for root, rec in pairs(claimedRoots) do
+                for root in pairs(claimedRoots) do
                         if root.Parent then
-                                if rec.seized then
-                                        seized += 1
-                                elseif root.ReceiveAge == 0 then
+                                if root.ReceiveAge == 0 then
                                         held += 1
                                 else
                                         contested += 1
@@ -5179,16 +5295,12 @@ do
                         and ""
                         or " (no sim boost - executor limited)"
 
-                if held + seized + contested == 0 then
+                if held + contested == 0 then
                         updateShakeStatus("Nothing to shake nearby" .. suffix)
                         return
                 end
 
                 local text = "Shaking " .. held
-
-                if seized > 0 then
-                        text = text .. " + " .. seized .. " anchored seized"
-                end
 
                 if contested > 0 then
                         text = text .. " + " .. contested .. " contested"
@@ -5197,7 +5309,7 @@ do
                 updateShakeStatus(text .. suffix)
         end
 
-        local function updateObjectShaker()
+        local function updateObjectShaker(deltaTime)
                 if not running or not ShakerSettings.Enabled then
                         return
                 end
@@ -5212,6 +5324,9 @@ do
                 end
 
                 local now = os.clock()
+                local dt = math.clamp(tonumber(deltaTime) or 1 / 60, 0.001, 0.25)
+
+                frameTick += 1
 
                 assertSelfBoost()
 
@@ -5226,8 +5341,7 @@ do
                         ShakerSettings.NextScanAt = now + SCAN_INTERVAL
 
                         -- Release pass first: anything destroyed or flung
-                        -- beyond the storm's edge is let go with whatever
-                        -- velocity it already carries.
+                        -- beyond the storm's edge is let go mid-flight.
                         local limit = (SHAKE_RADIUS + RELEASE_SLACK)
                                 * (SHAKE_RADIUS + RELEASE_SLACK)
 
@@ -5243,12 +5357,15 @@ do
                                 end
                         end
 
-                        -- Claim pass: one native spatial query for the
-                        -- bubble, mapped onto assembly roots, so welded
-                        -- structures arrive as one piece each.
+                        -- Claim pass: one spatial query over the bubble
+                        -- with a real MaxParts budget (the v40 default
+                        -- silently truncated the storm), mapped onto
+                        -- assembly roots so welded structures arrive as
+                        -- one piece each.
                         local found = Workspace:GetPartBoundsInRadius(
                                 center,
-                                SHAKE_RADIUS
+                                SHAKE_RADIUS,
+                                overlapParams
                         )
 
                         for _, part in ipairs(found) do
@@ -5268,34 +5385,47 @@ do
                         updateShakeStatusCounts()
                 end
 
-                -- The storm itself: a fresh violent velocity every
-                -- Heartbeat. Between writes the engine integrates the
-                -- last one, so every physics substep of the frame moves
-                -- at full violence, and joints are never touched - the
-                -- assembly keeps its welds and hinges and flails as a
-                -- connected piece.
-                for root in pairs(claimedRoots) do
+                -- The storm: every claimed assembly's whip target orbits
+                -- the player on its own axis, and each whip re-throws it
+                -- onto a brand new orbit. The aligns drag the assembly
+                -- along; on an assembly we do not simulate they no-op,
+                -- so there is nothing to rubber-band.
+                local poke = frameTick % POKE_INTERVAL == 0
+
+                for root, rec in pairs(claimedRoots) do
                         if not root.Parent then
                                 releaseShakeRoot(root)
+                        elseif not rec.target.Parent then
+                                -- A destroyed puppet (some games sweep the
+                                -- workspace client-side) must not abort the
+                                -- whole servo through an error.
+                                releaseShakeRoot(root)
                         else
-                                local toPlayer = center - root.Position
-                                local pullDir
-
-                                if toPlayer.Magnitude == toPlayer.Magnitude
-                                        and toPlayer.Magnitude > 0.05 then
-                                        pullDir = toPlayer.Unit
-                                else
-                                        pullDir = Vector3.new(0, 1, 0)
+                                if now >= (rec.nextWhipAt or 0) then
+                                        rec.spinAxis = randomUnit()
+                                        rec.spinSpeed = SPIN_MIN_SPEED
+                                                + math.random() * (SPIN_MAX_SPEED - SPIN_MIN_SPEED)
+                                        rec.startOffset = randomWhipDirection()
+                                                * (WHIP_MIN_RADIUS + math.random() * (WHIP_MAX_RADIUS - WHIP_MIN_RADIUS))
+                                        rec.whipRotation = randomWhipRotation()
+                                        rec.nextWhipAt = now + WHIP_MIN_SECS
+                                                + math.random() * (WHIP_MAX_SECS - WHIP_MIN_SECS)
                                 end
 
-                                pcall(function()
-                                        root.AssemblyLinearVelocity =
-                                                randomUnit() * CHAOS_SPEED
-                                                + pullDir * PULL_SPEED
-                                                + Vector3.new(0, LIFT_SPEED, 0)
-                                        root.AssemblyAngularVelocity =
-                                                randomUnit() * SPIN_SPEED
-                                end)
+                                rec.spinPhase += rec.spinSpeed * dt
+
+                                local spin = CFrame.fromAxisAngle(rec.spinAxis, rec.spinPhase)
+                                local anchor = center + spin:VectorToWorldSpace(rec.startOffset)
+
+                                rec.target.CFrame = CFrame.new(anchor)
+                                        * rec.whipRotation
+                                        * spin
+
+                                if poke then
+                                        pcall(function()
+                                                root.AssemblyLinearVelocity = ANTI_SLEEP
+                                        end)
+                                end
                         end
                 end
         end
@@ -5310,7 +5440,22 @@ do
                         releaseShakeRoot(root)
                 end
 
+                if shakerFolder then
+                        local folder = shakerFolder
+                        shakerFolder = nil
+
+                        pcall(function()
+                                folder:Destroy()
+                        end)
+                end
+
                 restoreShakeEnvironment()
+        end
+
+        -- Shared with the pull so the two storm engines never claim
+        -- the same assembly and fight over it.
+        Shaker.IsClaimed = function(root)
+                return claimedRoots[root] ~= nil
         end
 
         Shaker.setEnabled = function(value)
@@ -5335,13 +5480,19 @@ do
                         applyShakeEnvironment(rootPart)
                 end
 
+                if not shakerFolder then
+                        shakerFolder = Instance.new("Folder")
+                        shakerFolder.Name = "__ObjectShakerRuntime"
+                        shakerFolder.Parent = Workspace
+                end
+
                 ShakerSettings.NextScanAt = 0
 
                 updateShakeStatus("Scanning for objects...")
 
                 ShakerSettings.Connection = RunService.Heartbeat:Connect(
-                        function()
-                                local ok, err = pcall(updateObjectShaker)
+                        function(deltaTime)
+                                local ok, err = pcall(updateObjectShaker, deltaTime)
 
                                 if not ok then
                                         updateShakeStatus(
