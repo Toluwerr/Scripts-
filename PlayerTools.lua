@@ -5564,7 +5564,7 @@ local function buildVehicleStorm()
         local SIM_RADIUS = 9e9
         local POKE_INTERVAL = 3
 
-        local MODES = { "Vortex", "Fling", "Slam", "Freeze" }
+        local MODES = { "Vortex", "Fling", "Slam", "Freeze", "Bombard" }
 
         -- The settings table rides as a field on VehicleStorm so the
         -- main chunk stays inside the engine's 200-local budget; this
@@ -5598,6 +5598,22 @@ local function buildVehicleStorm()
         local SLAM_UP_SECS = 0.5
         local SLAM_DOWN_SECS = 0.5
 
+        local BOMBARD_STAGE_MIN_RADIUS = 12
+        local BOMBARD_STAGE_MAX_RADIUS = 20
+        local BOMBARD_STAGE_MIN_HEIGHT = 8
+        local BOMBARD_STAGE_MAX_HEIGHT = 16
+        local BOMBARD_STAGE_MIN_SPIN = 1.6
+        local BOMBARD_STAGE_MAX_SPIN = 2.8
+        local BOMBARD_ARM_MIN = 0.25
+        local BOMBARD_ARM_MAX = 0.55
+        local BOMBARD_LAUNCH_MIN = 520
+        local BOMBARD_LAUNCH_MAX = 680
+        local BOMBARD_REGRAB_MIN = 1.1
+        local BOMBARD_REGRAB_MAX = 1.6
+        local BOMBARD_SPIN_MIN = 30
+        local BOMBARD_SPIN_MAX = 60
+        local BOMBARD_AIM_LIFT = 4
+
         local ALIGN_RESPONSIVENESS = 200
         local ALIGN_MAX_VELOCITY = 800
         local ORIENT_MAX_ANGULAR = 40
@@ -5619,6 +5635,20 @@ local function buildVehicleStorm()
         local stormFolder = nil
         local anchoredSkipped = 0
         local frameTick = 0
+
+        -- Driven enemy vehicles: a seated driver welds their
+        -- HumanoidRootPart into the car, so the assembly's root maps
+        -- straight back to the player driving it. Those assemblies
+        -- are simulated on the driver's client and no local write or
+        -- constraint can ever move them - they are collision targets,
+        -- nothing else. Rebuilt every scan.
+        local drivenByRoot = setmetatable({}, { __mode = "k" })
+
+        -- Every enemy vehicle in range (driven or parked) is a
+        -- Bombard target; the array form is for nearest-target picks
+        -- at launch time. Rebuilt every scan.
+        local bombardTargetRoots = setmetatable({}, { __mode = "k" })
+        local bombardTargetList = {}
 
         -- Same real MaxParts budget as the shaker: the default
         -- query cap silently truncates claims on busy islands.
@@ -5927,6 +5957,48 @@ local function buildVehicleStorm()
                 claimedRoots[root] = rec
         end
 
+        local function claimBombardAmmo(root)
+                -- Ammo claim: the piece is puppeted onto a personal
+                -- staging shell around the player until armed, then
+                -- launched with one big velocity write and left to
+                -- fly and collide as a free body - the rig is
+                -- destroyed at launch so nothing fights the throw.
+                if claimedRoots[root] then
+                        return
+                end
+
+                if not stormFolder then
+                        stormFolder = Instance.new("Folder")
+                        stormFolder.Name = "__VehicleStormRuntime"
+                        stormFolder.Parent = Workspace
+                end
+
+                local rec = {
+                        angle = math.random() * math.pi * 2,
+                        radius = BOMBARD_STAGE_MIN_RADIUS
+                                + math.random()
+                                        * (BOMBARD_STAGE_MAX_RADIUS - BOMBARD_STAGE_MIN_RADIUS),
+                        height = BOMBARD_STAGE_MIN_HEIGHT
+                                + math.random()
+                                        * (BOMBARD_STAGE_MAX_HEIGHT - BOMBARD_STAGE_MIN_HEIGHT),
+                        angular = BOMBARD_STAGE_MIN_SPIN
+                                + math.random()
+                                        * (BOMBARD_STAGE_MAX_SPIN - BOMBARD_STAGE_MIN_SPIN),
+                        spinAxis = randomUnit(),
+                        spinPhase = math.random() * math.pi * 2,
+                        spinSpeed = SPIN_MIN_SPEED
+                                + math.random() * (SPIN_MAX_SPEED - SPIN_MIN_SPEED),
+                        armAt = os.clock()
+                                + BOMBARD_ARM_MIN
+                                + math.random() * (BOMBARD_ARM_MAX - BOMBARD_ARM_MIN),
+                        flying = false,
+                        regrabAt = 0
+                }
+
+                rec.rig = buildPuppet(root)
+                claimedRoots[root] = rec
+        end
+
         local function releaseStormRoot(root)
                 local rec = claimedRoots[root]
 
@@ -5958,10 +6030,10 @@ local function buildVehicleStorm()
                 end
 
                 -- Anchored means the server holds it static and no
-                -- client can ever move it for real - counted and
-                -- skipped, never faked.
+                -- client can ever move it for real - skipped, never
+                -- faked. (Counting happens in the scan, which sees
+                -- each assembly once instead of once per part.)
                 if root.Anchored then
-                        anchoredSkipped += 1
                         return false
                 end
 
@@ -6011,6 +6083,23 @@ local function buildVehicleStorm()
                         return false
                 end
 
+                -- The assembly our own HumanoidRootPart is welded
+                -- into - the car we are currently sitting in, or our
+                -- body itself - is never stormable, however the
+                -- merged assembly is rooted. Sitting merges us into
+                -- the car's assembly and the root part can sit
+                -- outside the vehicle's Model, which is why the
+                -- character-descent test above is not enough.
+                local ownCharacter = LocalPlayer.Character
+                local ownRoot = ownCharacter
+                        and ownCharacter:FindFirstChild("HumanoidRootPart")
+
+                if ownRoot
+                        and ownRoot:IsA("BasePart")
+                        and ownRoot.AssemblyRootPart == root then
+                        return false
+                end
+
                 if VehicleSettings.CurrentModel
                         and VehicleSettings.CurrentModel.Parent
                         and root:IsDescendantOf(VehicleSettings.CurrentModel) then
@@ -6031,13 +6120,202 @@ local function buildVehicleStorm()
                         return false
                 end
 
+                -- A car with an enemy driver is simulated on that
+                -- driver's client: FilteringEnabled means no local
+                -- write or constraint on it can ever replicate, so it
+                -- is never claimed in any puppet mode. The status
+                -- counts it honestly and Bombard mode hits it with
+                -- real collisions instead - the one vector that works.
+                if drivenByRoot[root] then
+                        return false
+                end
+
                 return assemblyIsVehicle(root)
         end
 
+        local function isBombardAmmoRoot(root)
+                -- Bombard ammunition is any loose assembly our client
+                -- truly simulates (ReceiveAge zero, so the launch
+                -- velocity write is real and replicates): disaster
+                -- debris, wreck chunks, props. Vehicles are targets,
+                -- never ammo; our own body and current car never
+                -- fly; anything another engine holds stays theirs.
+                if not root
+                        or not root:IsA("BasePart")
+                        or not root.Parent
+                        or root.AssemblyRootPart ~= root
+                        or root.Anchored then
+                        return false
+                end
+
+                if EXCLUDED_NAMES[root.Name] then
+                        return false
+                end
+
+                local size = root.Size
+
+                if size.X > MAX_DIMENSION
+                        or size.Y > MAX_DIMENSION
+                        or size.Z > MAX_DIMENSION then
+                        return false
+                end
+
+                if root:FindFirstChildOfClass("Fire") then
+                        return false
+                end
+
+                -- Only assemblies we simulate can be thrown for real.
+                if root.ReceiveAge ~= 0 then
+                        return false
+                end
+
+                if bombardTargetRoots[root] then
+                        return false
+                end
+
+                local target = root.Parent
+
+                while target and target ~= Workspace and target ~= game do
+                        if target:IsA("Accessory") or target:IsA("Tool") then
+                                return false
+                        end
+
+                        if target:IsA("Model")
+                                and (target:FindFirstChildOfClass("Humanoid")
+                                        or target:FindFirstChildOfClass("AnimationController")) then
+                                return false
+                        end
+
+                        target = target.Parent
+                end
+
+                local ownCharacter = LocalPlayer.Character
+
+                if ownCharacter and root:IsDescendantOf(ownCharacter) then
+                        return false
+                end
+
+                local ownRoot = ownCharacter
+                        and ownCharacter:FindFirstChild("HumanoidRootPart")
+
+                if ownRoot
+                        and ownRoot:IsA("BasePart")
+                        and ownRoot.AssemblyRootPart == root then
+                        return false
+                end
+
+                if VehicleSettings.CurrentModel
+                        and VehicleSettings.CurrentModel.Parent
+                        and root:IsDescendantOf(VehicleSettings.CurrentModel) then
+                        return false
+                end
+
+                if VehicleSettings.CurrentRoot == root then
+                        return false
+                end
+
+                local held = ObjectHoldSettings.Root
+
+                if held and held.Parent and root == held then
+                        return false
+                end
+
+                if ObjectPull.IsClaimed and ObjectPull.IsClaimed(root) then
+                        return false
+                end
+
+                if Shaker.IsClaimed and Shaker.IsClaimed(root) then
+                        return false
+                end
+
+                -- Vehicles are Bombard targets, not ammunition.
+                if assemblyIsVehicle(root) then
+                        return false
+                end
+
+                return true
+        end
+
         local function updateStormStatusCounts()
-                -- ReceiveAge is zero only on assemblies our client
-                -- actually simulates, so this counts what is really
-                -- being driven versus merely claimed.
+                local mode = MODES[VehicleStormSettings.Mode]
+                local suffix = VehicleStormSettings.SimBoost
+                        and ""
+                        or " (no sim boost - executor limited)"
+
+                local anchoredNote = ""
+
+                if anchoredSkipped > 0 then
+                        anchoredNote = " ("
+                                .. anchoredSkipped
+                                .. " anchored ignored)"
+                end
+
+                if mode == "Bombard" then
+                        -- Bombard is the anti-driver mode: it does not
+                        -- claim vehicles at all, it throws everything
+                        -- loose we simulate at every enemy vehicle in
+                        -- range, driven or parked, as real collisions.
+                        local targets = 0
+
+                        for root in pairs(bombardTargetRoots) do
+                                if root.Parent then
+                                        targets += 1
+                                end
+                        end
+
+                        local staged = 0
+                        local flying = 0
+
+                        for root, rec in pairs(claimedRoots) do
+                                if root.Parent then
+                                        if rec.flying then
+                                                flying += 1
+                                        else
+                                                staged += 1
+                                        end
+                                end
+                        end
+
+                        if targets == 0 then
+                                updateStormStatus(
+                                        "Bombard: no vehicles within "
+                                                .. STORM_RADIUS
+                                                .. " studs"
+                                                .. anchoredNote
+                                                .. suffix
+                                )
+                                return
+                        end
+
+                        if staged + flying == 0 then
+                                updateStormStatus(
+                                        "Bombard: "
+                                                .. targets
+                                                .. " vehicles in range, no loose parts to throw"
+                                                .. suffix
+                                )
+                                return
+                        end
+
+                        updateStormStatus(
+                                "Bombard: hammering "
+                                        .. targets
+                                        .. " vehicles with "
+                                        .. staged
+                                        .. " staged + "
+                                        .. flying
+                                        .. " flying"
+                                        .. suffix
+                        )
+                        return
+                end
+
+                -- Puppet/velocity modes: ReceiveAge is zero only on
+                -- assemblies our client actually simulates, so "real"
+                -- counts what is genuinely being moved. Driven enemy
+                -- cars can never be moved from here - their driver's
+                -- client owns the physics - so they are reported
+                -- honestly and pointed at Bombard.
                 local held = 0
                 local contested = 0
 
@@ -6051,20 +6329,15 @@ local function buildVehicleStorm()
                         end
                 end
 
-                local mode = MODES[VehicleStormSettings.Mode]
-                local suffix = VehicleStormSettings.SimBoost
-                        and ""
-                        or " (no sim boost - executor limited)"
+                local driven = 0
 
-                if held + contested == 0 then
-                        local anchoredNote = ""
-
-                        if anchoredSkipped > 0 then
-                                anchoredNote = " ("
-                                        .. anchoredSkipped
-                                        .. " anchored ignored)"
+                for root in pairs(bombardTargetRoots) do
+                        if root.Parent and drivenByRoot[root] then
+                                driven += 1
                         end
+                end
 
+                if held + contested + driven == 0 then
                         updateStormStatus(
                                 mode
                                         .. ": no vehicles within "
@@ -6091,10 +6364,14 @@ local function buildVehicleStorm()
                 local text = mode .. ": " .. held .. " " .. verb
 
                 if contested > 0 then
-                        text = text .. " + " .. contested .. " contested"
+                        text = text .. ", " .. contested .. " contested"
                 end
 
-                updateStormStatus(text .. suffix)
+                if driven > 0 then
+                        text = text .. ", " .. driven .. " driven (Bombard hits those)"
+                end
+
+                updateStormStatus(text .. anchoredNote .. suffix)
         end
 
         local function updateVehicleStorm(deltaTime)
@@ -6129,14 +6406,60 @@ local function buildVehicleStorm()
                         VehicleStormSettings.NextScanAt = now + SCAN_INTERVAL
                         anchoredSkipped = 0
 
-                        -- Release pass first: destroyed wrecks and cars
-                        -- flung past the storm's edge are let go
-                        -- mid-flight with the velocity they carry.
+                        local mode = MODES[VehicleStormSettings.Mode]
+                        local bombard = mode == "Bombard"
+
+                        -- Driven enemy vehicles: a seated driver welds
+                        -- their HumanoidRootPart into the car, so the
+                        -- assembly root maps straight back to the
+                        -- player driving it. Those assemblies live on
+                        -- the driver's client and no local write can
+                        -- ever move them.
+                        table.clear(drivenByRoot)
+                        table.clear(bombardTargetRoots)
+                        table.clear(bombardTargetList)
+
+                        local ownCharacter = LocalPlayer.Character
+                        local ownRoot = ownCharacter
+                                and ownCharacter:FindFirstChild("HumanoidRootPart")
+
+                        for _, player in ipairs(Players:GetPlayers()) do
+                                if player ~= LocalPlayer then
+                                        local character = player.Character
+                                        local hrp = character
+                                                and character:FindFirstChild("HumanoidRootPart")
+
+                                        if hrp and hrp:IsA("BasePart") then
+                                                local assemblyRoot = hrp.AssemblyRootPart
+
+                                                if assemblyRoot then
+                                                        drivenByRoot[assemblyRoot] = player
+                                                end
+                                        end
+                                end
+                        end
+
+                        -- Release pass first: destroyed wrecks, cars
+                        -- flung past the storm's edge, assemblies that
+                        -- stopped being a root (a seat weld merged
+                        -- them into something bigger), and anything we
+                        -- just sat into - sitting into a claimed car
+                        -- releases it instantly instead of flinging us.
                         local limit = (STORM_RADIUS + RELEASE_SLACK)
                                 * (STORM_RADIUS + RELEASE_SLACK)
 
                         for root in pairs(claimedRoots) do
-                                if not root.Parent then
+                                if not root.Parent
+                                        or root.AssemblyRootPart ~= root
+                                        or drivenByRoot[root]
+                                        or (ownRoot
+                                                and ownRoot:IsA("BasePart")
+                                                and ownRoot.AssemblyRootPart == root) then
+                                        -- The last condition pair also covers the
+                                        -- sit-in both directions: an enemy driver
+                                        -- seating into a claimed car moves the
+                                        -- assembly onto their client (release it),
+                                        -- and us seating into one does the same.
                                         releaseStormRoot(root)
                                 else
                                         local offset = root.Position - center
@@ -6150,23 +6473,58 @@ local function buildVehicleStorm()
                         -- Claim pass: one spatial query over the bubble
                         -- mapped onto assembly roots, so every car
                         -- arrives as one connected piece, driver
-                        -- included.
+                        -- included. Each assembly is classified exactly
+                        -- once per scan.
                         local found = Workspace:GetPartBoundsInRadius(
                                 center,
                                 STORM_RADIUS,
                                 overlapParams
                         )
 
+                        local seen = {}
+
                         for _, part in ipairs(found) do
                                 local root = part.AssemblyRootPart
 
                                 if root
-                                        and not claimedRoots[root]
-                                        and isStormableVehicleRoot(root) then
+                                        and root:IsA("BasePart")
+                                        and root.Parent
+                                        and not seen[root] then
+                                        seen[root] = true
+
                                         local offset = root.Position - center
 
                                         if offset:Dot(offset) <= STORM_RADIUS * STORM_RADIUS then
-                                                claimStormRoot(root, rootPart)
+                                                local isVehicle = assemblyIsVehicle(root)
+                                                local ownMerged = ownRoot
+                                                        and ownRoot:IsA("BasePart")
+                                                        and ownRoot.AssemblyRootPart == root
+
+                                                if ownMerged then
+                                                        -- Our own body or the car we are
+                                                        -- sitting in: never touched.
+                                                elseif root.Anchored then
+                                                        if isVehicle then
+                                                                anchoredSkipped += 1
+                                                        end
+                                                elseif isVehicle then
+                                                        -- Every enemy vehicle in range is a
+                                                        -- Bombard target (driven or parked);
+                                                        -- puppet modes claim only the ones no
+                                                        -- driver's client owns.
+                                                        bombardTargetRoots[root] = true
+                                                        table.insert(bombardTargetList, root)
+
+                                                        if not bombard
+                                                                and not claimedRoots[root]
+                                                                and isStormableVehicleRoot(root) then
+                                                                claimStormRoot(root, rootPart)
+                                                        end
+                                                elseif bombard
+                                                        and not claimedRoots[root]
+                                                        and isBombardAmmoRoot(root) then
+                                                        claimBombardAmmo(root)
+                                                end
                                         end
                                 end
                         end
@@ -6180,12 +6538,14 @@ local function buildVehicleStorm()
                 for root, rec in pairs(claimedRoots) do
                         if not root.Parent then
                                 releaseStormRoot(root)
-                        elseif (mode == "Vortex" or mode == "Slam")
+                        elseif (mode == "Vortex" or mode == "Slam"
+                                        or (mode == "Bombard" and not rec.flying))
                                 and (not rec.rig or not rec.rig.target.Parent) then
                                 -- A missing or destroyed puppet (some
                                 -- games sweep the workspace client-side)
                                 -- is released so the next scan rebuilds
-                                -- a fresh rig instead of erroring.
+                                -- a fresh rig instead of erroring. Flying
+                                -- Bombard pieces carry no rig on purpose.
                                 releaseStormRoot(root)
                         elseif mode == "Vortex" then
                                 rec.angle += rec.angular * dt
@@ -6314,6 +6674,134 @@ local function buildVehicleStorm()
                                                 root.AssemblyAngularVelocity = Vector3.zero
                                         end)
                                 end
+                        elseif mode == "Bombard" then
+                                -- Staged pieces swirl on their own shell
+                                -- around the player. Armed pieces get one
+                                -- lead-aimed launch velocity, the rig is
+                                -- dropped so nothing fights the throw, and
+                                -- the piece flies as a free body - the
+                                -- impact on the target is real physics on
+                                -- the target owner's machine, which is the
+                                -- one thing that genuinely moves a car
+                                -- another player is driving.
+                                if not rec.flying and rec.rig and rec.rig.target.Parent then
+                                        rec.angle += rec.angular * dt
+                                        rec.spinPhase += rec.spinSpeed * dt
+
+                                        local radial = Vector3.new(
+                                                math.cos(rec.angle),
+                                                0,
+                                                math.sin(rec.angle)
+                                        )
+
+                                        rec.rig.target.CFrame = CFrame.new(
+                                                center
+                                                        + radial * rec.radius
+                                                        + Vector3.new(0, rec.height, 0)
+                                        ) * CFrame.fromAxisAngle(rec.spinAxis, rec.spinPhase)
+
+                                        if poke and root.ReceiveAge == 0 then
+                                                pcall(function()
+                                                        root.AssemblyLinearVelocity = ANTI_SLEEP
+                                                end)
+                                        end
+                                end
+
+                                if not rec.flying and now >= (rec.armAt or 0) then
+                                        local target = nil
+                                        local best = nil
+
+                                        for _, targetRoot in ipairs(bombardTargetList) do
+                                                if targetRoot.Parent
+                                                        and targetRoot:IsA("BasePart") then
+                                                        local offset = targetRoot.Position - root.Position
+                                                        local distance = offset.Magnitude
+
+                                                        if not best or distance < best then
+                                                                best = distance
+                                                                target = targetRoot
+                                                        end
+                                                end
+                                        end
+
+                                        if target and root.ReceiveAge == 0 then
+                                                local aim = target.Position
+                                                local speed = BOMBARD_LAUNCH_MIN
+                                                        + math.random()
+                                                                * (BOMBARD_LAUNCH_MAX - BOMBARD_LAUNCH_MIN)
+
+                                                -- One lead iteration: aim where the
+                                                -- target will be when the piece
+                                                -- arrives, not where it is now.
+                                                local ok, targetVelocity = pcall(function()
+                                                        return target.AssemblyLinearVelocity
+                                                end)
+
+                                                if ok and targetVelocity then
+                                                        local flight = (aim - root.Position).Magnitude / speed
+                                                        aim = target.Position + targetVelocity * flight
+                                                end
+
+                                                aim = aim + Vector3.new(0, BOMBARD_AIM_LIFT, 0)
+
+                                                local direction = aim - root.Position
+
+                                                if direction.Magnitude > 1 then
+                                                        -- Drop the rig first so nothing
+                                                        -- fights the launch, then one big
+                                                        -- replicated velocity write.
+                                                        if rec.rig then
+                                                                pcall(function()
+                                                                        rec.rig.align:Destroy()
+                                                                        rec.rig.orient:Destroy()
+                                                                        rec.rig.attachment:Destroy()
+                                                                        rec.rig.target:Destroy()
+                                                                end)
+
+                                                                rec.rig = nil
+                                                        end
+
+                                                        pcall(function()
+                                                                root.AssemblyLinearVelocity =
+                                                                        direction.Unit * speed
+                                                                root.AssemblyAngularVelocity = randomUnit()
+                                                                        * (BOMBARD_SPIN_MIN
+                                                                                + math.random()
+                                                                                        * (BOMBARD_SPIN_MAX - BOMBARD_SPIN_MIN))
+                                                        end)
+
+                                                        rec.flying = true
+                                                        rec.regrabAt = now
+                                                                + BOMBARD_REGRAB_MIN
+                                                                + math.random()
+                                                                        * (BOMBARD_REGRAB_MAX - BOMBARD_REGRAB_MIN)
+                                                else
+                                                        rec.armAt = now + BOMBARD_ARM_MIN
+                                                end
+                                        else
+                                                -- No live target or the piece is not
+                                                -- ours to throw right now: stay
+                                                -- staged and retry shortly.
+                                                rec.armAt = now + BOMBARD_ARM_MIN
+                                        end
+                                elseif rec.flying and now >= (rec.regrabAt or 0) then
+                                        -- Ballistic flight is over: pick the piece
+                                        -- back up if it is still in one piece,
+                                        -- still a root and still ours to move;
+                                        -- anything else is let go.
+                                        if root.Parent
+                                                and root.AssemblyRootPart == root
+                                                and root.ReceiveAge == 0 then
+                                                rec.flying = false
+                                                rec.armAt = now
+                                                        + BOMBARD_ARM_MIN
+                                                        + math.random()
+                                                                * (BOMBARD_ARM_MAX - BOMBARD_ARM_MIN)
+                                                rec.rig = buildPuppet(root)
+                                        else
+                                                releaseStormRoot(root)
+                                        end
+                                end
                         end
                 end
         end
@@ -6355,9 +6843,10 @@ local function buildVehicleStorm()
 
                 if VehicleStormSettings.Enabled then
                         -- Claims are released so the next scan re-claims
-                        -- every car with the rig the new mode needs:
-                        -- puppet modes build targets, velocity modes
-                        -- stay rig-free.
+                        -- everything with the rig the new mode needs:
+                        -- puppet modes build vehicle rigs, velocity
+                        -- modes stay rig-free, Bombard stages loose
+                        -- parts as ammunition instead of claiming cars.
                         for root in pairs(claimedRoots) do
                                 releaseStormRoot(root)
                         end
