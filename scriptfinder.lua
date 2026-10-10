@@ -5,7 +5,9 @@ local Players = game:GetService("Players")
 local API_BASE = "https://api.rscripts.net"
 local SITE_BASE = "https://rscripts.net"
 local FOLDER = "scriptfinder"
-local KEY_FILE = FOLDER .. "/apikey.txt"
+-- rscripts wants a key even for read-only routes, so this one ships with
+-- the script; nobody should have to make a dashboard account just to browse
+local API_KEY = "rsc_live_zA1n48C_ZCzYLOr_AvGyGBrcctAp7bLH"
 local FAVORITES_FILE = FOLDER .. "/favorites.json"
 local HISTORY_FILE = FOLDER .. "/history.json"
 local PAGE_SIZE = 10
@@ -67,10 +69,6 @@ local Clipboard = pickFunction(
 
 local CanWrite = type(writefile) == "function"
 local CanRead = type(readfile) == "function"
-
-local Api = {
-        Key = "",
-}
 
 local Session = {
         Dead = false,
@@ -176,14 +174,6 @@ local function timeLabel(stamp)
         end
 
         return tostring(stamp)
-end
-
-local function maskKey(key)
-        if #key <= 8 then
-                return string.rep("*", #key)
-        end
-
-        return key:sub(1, 4) .. "..." .. key:sub(-4)
 end
 
 -- small file helpers; everything degrades to memory when the executor
@@ -460,16 +450,12 @@ local function apiGet(path, params)
                 return nil, "this executor has no request function that can send headers"
         end
 
-        if Api.Key == "" then
-                return nil, "no api key - paste one in on the settings tab"
-        end
-
         local response
         local ok = pcall(function()
                 response = HttpRequest({
                         Url = buildUrl(path, params),
                         Method = "GET",
-                        Headers = { ["X-Api-Key"] = Api.Key },
+                        Headers = { ["X-Api-Key"] = API_KEY },
                 })
         end)
 
@@ -560,11 +546,8 @@ local function fetchSource(url)
         return body
 end
 
--- persisted state, loaded before the ui exists so it can seed the inputs
+-- persisted state, loaded before the ui exists so the lists start populated
 do
-        local keyText = readFile(KEY_FILE)
-        Api.Key = (keyText and trimToNil(keyText)) or ""
-
         local favorites = loadJsonArray(FAVORITES_FILE)
 
         if favorites then
@@ -1260,61 +1243,6 @@ local function refreshGameScripts()
         })
 end
 
-local function keyStatusText(key)
-        if key == "" then
-                return "no key saved · free one at rscripts.net/dashboard/api"
-        end
-
-        return "key saved: " .. maskKey(key) .. (CanWrite and " · scriptfinder/apikey.txt" or " · in memory only (no writefile)")
-end
-
-local KeyStatus
-
-local function saveKey(key)
-        Api.Key = key or ""
-
-        if CanWrite then
-                ensureFolder()
-                pcall(function()
-                        writefile(KEY_FILE, Api.Key)
-                end)
-        end
-
-        if KeyStatus then
-                KeyStatus:Set(keyStatusText(Api.Key))
-        end
-
-        if Api.Key == "" then
-                notify("info", "Key cleared", "search and trending will ask for one again")
-        else
-                notify("success", "Key saved", maskKey(Api.Key))
-        end
-end
-
-local function testKey()
-        if Api.Key == "" then
-                notify("error", "No key", "paste a key in first")
-
-                return
-        end
-
-        notify("info", "Testing", "asking rscripts for one result...")
-
-        task.spawn(function()
-                local _, err = apiGet("/v1/search", { q = "hub", limit = 1 })
-
-                if Session.Dead then
-                        return
-                end
-
-                if err then
-                        notify("error", "Key rejected", err)
-                else
-                        notify("success", "Key works", "rscripts accepted it")
-                end
-        end)
-end
-
 local function capabilityReport()
         local name = "unknown"
 
@@ -1576,7 +1504,7 @@ RisingSection:Button({
 })
 
 TrendingBrowser.RisingStatus = RisingSection:Paragraph({
-        Text = Api.Key ~= "" and "not loaded yet" or "needs an api key (settings tab)",
+        Text = "not loaded yet",
 })
 
 TrendingBrowser.RisingRows = buildResultRows(RisingSection, TRENDING_SIZE)
@@ -1584,7 +1512,7 @@ TrendingBrowser.RisingRows = buildResultRows(RisingSection, TRENDING_SIZE)
 local HotSection = TrendingTab:Section("Hot")
 
 TrendingBrowser.HotStatus = HotSection:Paragraph({
-        Text = Api.Key ~= "" and "not loaded yet" or "needs an api key (settings tab)",
+        Text = "not loaded yet",
 })
 
 TrendingBrowser.HotRows = buildResultRows(HotSection, TRENDING_SIZE)
@@ -1688,25 +1616,7 @@ do
 local ApiSection = SettingsTab:Section("Rscripts API")
 
 ApiSection:Paragraph({
-        Text = "the rscripts api is read-only and needs a free key · make one at rscripts.net/dashboard/api (site account required) and paste it below",
-})
-
-KeyStatus = ApiSection:Paragraph({ Text = keyStatusText(Api.Key) })
-
-ApiSection:Input({
-        Text = "API Key",
-        Value = Api.Key,
-        Placeholder = "paste your rscripts api key",
-        Tooltip = "saved to scriptfinder/apikey.txt when the field loses focus",
-        Callback = function(text)
-                saveKey(trimToNil(text) or "")
-        end,
-})
-
-ApiSection:Button({
-        Text = "Test Key",
-        Primary = true,
-        Callback = testKey,
+        Text = "api key is baked in · search and trending work right away, nothing to paste",
 })
 
 local InterfaceSection = SettingsTab:Section("Interface")
@@ -1759,11 +1669,7 @@ end)
 renderSaved()
 detectGame()
 
-if Api.Key ~= "" then
-        refreshTrending()
-        refreshGameScripts()
+refreshTrending()
+refreshGameScripts()
 
-        notify("info", "ScriptFinder", "ready · right shift hides the window")
-else
-        notify("error", "No api key", "get a free one at rscripts.net/dashboard/api, then paste it in on the settings tab")
-end
+notify("info", "ScriptFinder", "ready · right shift hides the window")
