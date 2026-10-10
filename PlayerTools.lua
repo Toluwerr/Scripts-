@@ -251,6 +251,18 @@ local ShakerSettings = {
 
 local Shaker = {}
 
+local VehicleStorm = {
+        Settings = {
+                Enabled = false,
+                Mode = 1,
+                SimBoost = false,
+                Connection = nil,
+                LastStatus = nil,
+                NextEnvAt = 0,
+                NextScanAt = 0
+        }
+}
+
 local Window
 local stopVehicleFlyRuntime
 local restartVehicleFly
@@ -4525,6 +4537,10 @@ do
                         return false
                 end
 
+                if VehicleStorm.IsClaimed and VehicleStorm.IsClaimed(root) then
+                        return false
+                end
+
                 return true
         end
 
@@ -5271,6 +5287,10 @@ do
                         return false
                 end
 
+                if VehicleStorm.IsClaimed and VehicleStorm.IsClaimed(root) then
+                        return false
+                end
+
                 return true
         end
 
@@ -5505,6 +5525,907 @@ do
         end
 end
 
+-- ============================================================
+-- Vehicle Storm: the Fun tab vehicle engine. Every other
+-- player's car - anything seat-and-wheel shaped - within the
+-- bubble is claimed as a whole assembly, driver included since
+-- the seat welds them into it, and driven through four modes
+-- cycled from one button, no sliders on purpose. Vortex drags
+-- them into a rising tornado shell around the player. Fling
+-- re-launches them skyward on random tangents. Slam hoists
+-- each one up a column in front of the player and hammers it
+-- into the ground on a loop. Freeze zeroes their velocities
+-- every frame so traffic stops dead in the air. Vortex and
+-- Slam act through the same puppet rig the pull and shaker
+-- use - an invisible anchored target strung to the assembly
+-- with unlimited-force aligns - and constraints no-op on
+-- assemblies we do not simulate, so those modes can never
+-- fake. Fling and Freeze write velocities, and every write is
+-- gated on ReceiveAge == 0, so they only ever land on
+-- assemblies our client genuinely simulates - the same honest
+-- contract the pull and shaker hold. No part properties are
+-- touched on vehicles: collisions stay on, cars smash into
+-- each other, the map and their drivers exactly as the engine
+-- intends, and there is nothing to restore on release. Own
+-- character, own current vehicle, hover-held, pull-claimed
+-- and shaker-claimed assemblies are excluded so the three
+-- engines never fight over the same root.
+-- ============================================================
+-- The engine lives inside a function instead of a plain do-block:
+-- the main chunk rides close to the engine's 200-active-locals
+-- budget already (the pull and shaker blocks sit in it), and a
+-- function scope gets a fresh budget of its own.
+local function buildVehicleStorm()
+        local ENV_INTERVAL = 0.5
+        local SCAN_INTERVAL = 0.5
+        local STORM_RADIUS = 130
+        local RELEASE_SLACK = 60
+        local MAX_DIMENSION = 120
+        local SIM_RADIUS = 9e9
+        local POKE_INTERVAL = 3
+
+        local MODES = { "Vortex", "Fling", "Slam", "Freeze" }
+
+        -- The settings table rides as a field on VehicleStorm so the
+        -- main chunk stays inside the engine's 200-local budget; this
+        -- block-scoped alias keeps the engine code identical to the
+        -- pull's and shaker's.
+        local VehicleStormSettings = VehicleStorm.Settings
+
+        local VORTEX_MIN_RADIUS = 30
+        local VORTEX_MAX_RADIUS = 55
+        local VORTEX_MIN_SPEED = 3.2
+        local VORTEX_MAX_SPEED = 4.8
+        local VORTEX_LIFT_MIN = 8
+        local VORTEX_LIFT_SPAN = 26
+        local VORTEX_LIFT_CYCLE = 3
+        local SPIN_MIN_SPEED = 2
+        local SPIN_MAX_SPEED = 5
+
+        local FLING_MIN_SECS = 0.55
+        local FLING_MAX_SECS = 0.9
+        local FLING_UP_MIN = 260
+        local FLING_UP_MAX = 340
+        local FLING_SIDE_MIN = 320
+        local FLING_SIDE_MAX = 420
+        local FLING_SPIN_MIN = 50
+        local FLING_SPIN_MAX = 90
+
+        local SLAM_COLUMN_DISTANCE = 30
+        local SLAM_RING_MIN = 10
+        local SLAM_RING_MAX = 22
+        local SLAM_UP_HEIGHT = 75
+        local SLAM_UP_SECS = 0.5
+        local SLAM_DOWN_SECS = 0.5
+
+        local ALIGN_RESPONSIVENESS = 200
+        local ALIGN_MAX_VELOCITY = 800
+        local ORIENT_MAX_ANGULAR = 40
+        local ANTI_SLEEP = Vector3.new(0.5, 0.5, 0.5)
+
+        local EXCLUDED_NAMES = {
+                Terrain = true,
+                Baseplate = true,
+                HumanoidRootPart = true,
+                Handle = true,
+                ["__PlayerToolsPlatform"] = true,
+                ["__ObjectShakerTarget"] = true
+        }
+
+        local claimedRoots = setmetatable({}, { __mode = "k" })
+        local vehicleCheckCache = setmetatable({}, { __mode = "k" })
+        local envOriginals = setmetatable({}, { __mode = "k" })
+        local allowSleepSaved = nil
+        local stormFolder = nil
+        local anchoredSkipped = 0
+        local frameTick = 0
+
+        -- Same real MaxParts budget as the shaker: the default
+        -- query cap silently truncates claims on busy islands.
+        local overlapParams = OverlapParams.new()
+        overlapParams.MaxParts = 100000
+
+        local function updateStormStatus(text)
+                local message = tostring(text or "Vehicle Storm off")
+
+                if VehicleStormSettings.LastStatus == message then
+                        return
+                end
+
+                VehicleStormSettings.LastStatus = message
+
+                if type(VehicleStorm.OnStatusChanged) == "function" then
+                        pcall(VehicleStorm.OnStatusChanged, message)
+                end
+        end
+
+        local function randomUnit()
+                local vector = Vector3.new(
+                        math.random() * 2 - 1,
+                        math.random() * 2 - 1,
+                        math.random() * 2 - 1
+                )
+
+                if vector.Magnitude < 0.05 then
+                        return Vector3.new(0, 1, 0)
+                end
+
+                return vector.Unit
+        end
+
+        local function stormReadProperty(object, key, hidden)
+                if hidden and type(gethiddenproperty) == "function" then
+                        local ok, value = pcall(gethiddenproperty, object, key)
+
+                        if ok then
+                                return value
+                        end
+                end
+
+                local ok, value = pcall(function()
+                        return object[key]
+                end)
+
+                if ok then
+                        return value
+                end
+
+                return nil
+        end
+
+        local function stormWriteProperty(object, key, value, hidden)
+                if hidden and type(sethiddenproperty) == "function" then
+                        local ok = pcall(sethiddenproperty, object, key, value)
+
+                        if ok then
+                                return true
+                        end
+                end
+
+                return pcall(function()
+                        object[key] = value
+                end)
+        end
+
+        local function stormRemember(object, key, value, hidden)
+                local saved = envOriginals[object]
+
+                if not saved then
+                        saved = {}
+                        envOriginals[object] = saved
+                end
+
+                if saved[key] == nil then
+                        saved[key] = {
+                                value = stormReadProperty(object, key, hidden),
+                                hidden = hidden
+                        }
+                end
+
+                stormWriteProperty(object, key, value, hidden)
+        end
+
+        local function stormSimBoostActive()
+                -- Same read-back contract as the pull and shaker: the
+                -- engine default radius is 1000 studs, so six orders of
+                -- magnitude above it means the hidden write genuinely
+                -- took on this executor.
+                local radius = stormReadProperty(LocalPlayer, "SimulationRadius", true)
+
+                if type(radius) == "number" and radius >= 1e6 then
+                        return true
+                end
+
+                local maximum = stormReadProperty(LocalPlayer, "MaximumSimulationRadius", false)
+
+                return type(maximum) == "number" and maximum >= 1e6
+        end
+
+        local function assertSelfBoost()
+                -- Re-asserted every single frame exactly like the pull
+                -- and shaker: the boost decays the moment you stop.
+                stormRemember(LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
+                stormRemember(LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
+                stormRemember(LocalPlayer, "NetworkIsSleeping", false, true)
+        end
+
+        local function applyStormEnvironment(rootPart)
+                assertSelfBoost()
+                stormRemember(LocalPlayer, "ReplicationFocus", rootPart.CFrame)
+
+                if allowSleepSaved == nil then
+                        local ok, value = pcall(function()
+                                return settings().Physics.AllowSleep
+                        end)
+
+                        allowSleepSaved = ok and value or false
+                end
+
+                pcall(function()
+                        settings().Physics.AllowSleep = false
+                end)
+
+                for _, player in ipairs(Players:GetPlayers()) do
+                        if player ~= LocalPlayer then
+                                stormRemember(player, "MaximumSimulationRadius", 0)
+                                stormRemember(player, "SimulationRadius", 0, true)
+                        end
+                end
+
+                VehicleStormSettings.SimBoost = stormSimBoostActive()
+        end
+
+        local function restoreStormEnvironment()
+                for object, saved in pairs(envOriginals) do
+                        for key, original in pairs(saved) do
+                                pcall(stormWriteProperty, object, key, original.value, original.hidden)
+                        end
+                end
+
+                table.clear(envOriginals)
+
+                if allowSleepSaved ~= nil then
+                        pcall(function()
+                                settings().Physics.AllowSleep = allowSleepSaved
+                        end)
+
+                        allowSleepSaved = nil
+                end
+        end
+
+        local function assemblyIsVehicle(root)
+                -- Positive vehicle test on the whole assembly, cached
+                -- per root: a VehicleSeat welded in, or a plain Seat
+                -- riding with wheel/tire named parts. Chairs and
+                -- benches have seats but no wheels, so they stay out.
+                local cached = vehicleCheckCache[root]
+
+                if cached ~= nil then
+                        return cached
+                end
+
+                local hasVehicleSeat = false
+                local hasSeat = false
+                local hasWheel = false
+
+                pcall(function()
+                        for _, part in ipairs(root:GetConnectedParts(true)) do
+                                if part:IsA("VehicleSeat") then
+                                        hasVehicleSeat = true
+                                elseif part:IsA("Seat") then
+                                        hasSeat = true
+                                else
+                                        local name = string.lower(part.Name)
+
+                                        if string.find(name, "wheel", 1, true)
+                                                or string.find(name, "tire", 1, true) then
+                                                hasWheel = true
+                                        end
+                                end
+                        end
+                end)
+
+                local result = hasVehicleSeat or (hasSeat and hasWheel)
+
+                vehicleCheckCache[root] = result
+
+                return result
+        end
+
+        local function buildPuppet(root)
+                -- Same invisible anchored whip target as the pull and
+                -- shaker: moving the target IS the mode, the solver
+                -- does the dragging, and on an assembly we do not
+                -- simulate the constraints simply do nothing.
+                local target = Instance.new("Part")
+                target.Name = "__VehicleStormTarget"
+                target.Size = Vector3.new(0.2, 0.2, 0.2)
+                target.Transparency = 1
+                target.Anchored = true
+                target.CanCollide = false
+                target.CanTouch = false
+                target.CanQuery = false
+                target.CastShadow = false
+                target.CFrame = root.CFrame
+                target.Parent = stormFolder
+
+                local targetAttachment = Instance.new("Attachment")
+                targetAttachment.Parent = target
+
+                local attachment = Instance.new("Attachment")
+                attachment.Parent = root
+
+                local align = Instance.new("AlignPosition")
+                align.Mode = Enum.PositionAlignmentMode.TwoAttachment
+                align.Attachment0 = attachment
+                align.Attachment1 = targetAttachment
+                align.MaxForce = math.huge
+                align.MaxVelocity = ALIGN_MAX_VELOCITY
+                align.Responsiveness = ALIGN_RESPONSIVENESS
+                align.ApplyAtCenterOfMass = true
+                align.RigidityEnabled = false
+                align.Parent = root
+
+                local orient = Instance.new("AlignOrientation")
+                orient.Mode = Enum.OrientationAlignmentMode.TwoAttachment
+                orient.Attachment0 = attachment
+                orient.Attachment1 = targetAttachment
+                orient.MaxTorque = math.huge
+                orient.MaxAngularVelocity = ORIENT_MAX_ANGULAR
+                orient.Responsiveness = ALIGN_RESPONSIVENESS
+                orient.RigidityEnabled = false
+                orient.Parent = root
+
+                return {
+                        target = target,
+                        attachment = attachment,
+                        align = align,
+                        orient = orient
+                }
+        end
+
+        local function modeUsesPuppet()
+                local mode = MODES[VehicleStormSettings.Mode]
+
+                return mode == "Vortex" or mode == "Slam"
+        end
+
+        local function claimStormRoot(root, rootPart)
+                if claimedRoots[root] then
+                        return
+                end
+
+                if not stormFolder then
+                        stormFolder = Instance.new("Folder")
+                        stormFolder.Name = "__VehicleStormRuntime"
+                        stormFolder.Parent = Workspace
+                end
+
+                -- Slam column direction is locked to the player's look
+                -- at claim time so turning the camera never whips the
+                -- whole column around; the column itself still tracks
+                -- the player every frame.
+                local look = rootPart.CFrame.LookVector
+                local flat = Vector3.new(look.X, 0, look.Z)
+
+                if flat.Magnitude < 0.05 then
+                        flat = Vector3.new(0, 0, -1)
+                end
+
+                local ringAngle = math.random() * math.pi * 2
+                local ringDistance = SLAM_RING_MIN
+                        + math.random() * (SLAM_RING_MAX - SLAM_RING_MIN)
+
+                local rec = {
+                        angle = math.random() * math.pi * 2,
+                        radius = VORTEX_MIN_RADIUS
+                                + math.random() * (VORTEX_MAX_RADIUS - VORTEX_MIN_RADIUS),
+                        angular = VORTEX_MIN_SPEED
+                                + math.random() * (VORTEX_MAX_SPEED - VORTEX_MIN_SPEED),
+                        spinAxis = randomUnit(),
+                        spinPhase = math.random() * math.pi * 2,
+                        spinSpeed = SPIN_MIN_SPEED
+                                + math.random() * (SPIN_MAX_SPEED - SPIN_MIN_SPEED),
+                        liftT = math.random() * VORTEX_LIFT_CYCLE,
+                        liftCycle = 0,
+                        nextFlingAt = os.clock()
+                                + math.random() * FLING_MAX_SECS,
+                        columnDir = flat.Unit,
+                        ringOffset = Vector3.new(
+                                math.cos(ringAngle) * ringDistance,
+                                0,
+                                math.sin(ringAngle) * ringDistance
+                        ),
+                        phase = 0,
+                        phaseT = math.random() * 0.5
+                }
+
+                if modeUsesPuppet() then
+                        rec.rig = buildPuppet(root)
+                end
+
+                claimedRoots[root] = rec
+        end
+
+        local function releaseStormRoot(root)
+                local rec = claimedRoots[root]
+
+                if not rec then
+                        return
+                end
+
+                claimedRoots[root] = nil
+
+                -- No part properties are ever saved or restored on
+                -- vehicles: released mid-flight with whatever velocity
+                -- they already carry, exactly how they should be.
+                if rec.rig then
+                        pcall(function()
+                                rec.rig.align:Destroy()
+                                rec.rig.orient:Destroy()
+                                rec.rig.attachment:Destroy()
+                                rec.rig.target:Destroy()
+                        end)
+                end
+        end
+
+        local function isStormableVehicleRoot(root)
+                if not root
+                        or not root:IsA("BasePart")
+                        or not root.Parent
+                        or root.AssemblyRootPart ~= root then
+                        return false
+                end
+
+                -- Anchored means the server holds it static and no
+                -- client can ever move it for real - counted and
+                -- skipped, never faked.
+                if root.Anchored then
+                        anchoredSkipped += 1
+                        return false
+                end
+
+                if EXCLUDED_NAMES[root.Name] then
+                        return false
+                end
+
+                -- Giant slabs: oceans, tsunami water, lava planes.
+                local size = root.Size
+
+                if size.X > MAX_DIMENSION
+                        or size.Y > MAX_DIMENSION
+                        or size.Z > MAX_DIMENSION then
+                        return false
+                end
+
+                -- Burning wrecks: NDS fire rides on parts as a Fire
+                -- child, and dragging one through us would set us on
+                -- fire.
+                if root:FindFirstChildOfClass("Fire") then
+                        return false
+                end
+
+                -- Characters, NPCs, tools and accessories are never
+                -- ours: walk the ancestors and bail on any humanoid
+                -- rig or gear. The driver is never excluded by this -
+                -- they are welded INTO the car assembly, not parented
+                -- under it.
+                local target = root.Parent
+
+                while target and target ~= Workspace and target ~= game do
+                        if target:IsA("Accessory") or target:IsA("Tool") then
+                                return false
+                        end
+
+                        if target:IsA("Model")
+                                and (target:FindFirstChildOfClass("Humanoid")
+                                        or target:FindFirstChildOfClass("AnimationController")) then
+                                return false
+                        end
+
+                        target = target.Parent
+                end
+
+                if LocalPlayer.Character
+                        and root:IsDescendantOf(LocalPlayer.Character) then
+                        return false
+                end
+
+                if VehicleSettings.CurrentModel
+                        and VehicleSettings.CurrentModel.Parent
+                        and root:IsDescendantOf(VehicleSettings.CurrentModel) then
+                        return false
+                end
+
+                local held = ObjectHoldSettings.Root
+
+                if held and held.Parent and root == held then
+                        return false
+                end
+
+                if ObjectPull.IsClaimed and ObjectPull.IsClaimed(root) then
+                        return false
+                end
+
+                if Shaker.IsClaimed and Shaker.IsClaimed(root) then
+                        return false
+                end
+
+                return assemblyIsVehicle(root)
+        end
+
+        local function updateStormStatusCounts()
+                -- ReceiveAge is zero only on assemblies our client
+                -- actually simulates, so this counts what is really
+                -- being driven versus merely claimed.
+                local held = 0
+                local contested = 0
+
+                for root in pairs(claimedRoots) do
+                        if root.Parent then
+                                if root.ReceiveAge == 0 then
+                                        held += 1
+                                else
+                                        contested += 1
+                                end
+                        end
+                end
+
+                local mode = MODES[VehicleStormSettings.Mode]
+                local suffix = VehicleStormSettings.SimBoost
+                        and ""
+                        or " (no sim boost - executor limited)"
+
+                if held + contested == 0 then
+                        local anchoredNote = ""
+
+                        if anchoredSkipped > 0 then
+                                anchoredNote = " ("
+                                        .. anchoredSkipped
+                                        .. " anchored ignored)"
+                        end
+
+                        updateStormStatus(
+                                mode
+                                        .. ": no vehicles within "
+                                        .. STORM_RADIUS
+                                        .. " studs"
+                                        .. anchoredNote
+                                        .. suffix
+                        )
+                        return
+                end
+
+                local verb = "held"
+
+                if mode == "Vortex" then
+                        verb = "orbiting"
+                elseif mode == "Fling" then
+                        verb = "launching"
+                elseif mode == "Slam" then
+                        verb = "slamming"
+                elseif mode == "Freeze" then
+                        verb = "frozen"
+                end
+
+                local text = mode .. ": " .. held .. " " .. verb
+
+                if contested > 0 then
+                        text = text .. " + " .. contested .. " contested"
+                end
+
+                updateStormStatus(text .. suffix)
+        end
+
+        local function updateVehicleStorm(deltaTime)
+                if not running or not VehicleStormSettings.Enabled then
+                        return
+                end
+
+                local character = LocalPlayer.Character
+                local rootPart = character
+                        and character:FindFirstChild("HumanoidRootPart")
+
+                if not rootPart or not rootPart.Parent then
+                        updateStormStatus("Character unavailable")
+                        return
+                end
+
+                local now = os.clock()
+                local dt = math.clamp(tonumber(deltaTime) or 1 / 60, 0.001, 0.25)
+
+                frameTick += 1
+
+                assertSelfBoost()
+
+                if now >= (VehicleStormSettings.NextEnvAt or 0) then
+                        VehicleStormSettings.NextEnvAt = now + ENV_INTERVAL
+                        applyStormEnvironment(rootPart)
+                end
+
+                local center = rootPart.Position
+
+                if now >= (VehicleStormSettings.NextScanAt or 0) then
+                        VehicleStormSettings.NextScanAt = now + SCAN_INTERVAL
+                        anchoredSkipped = 0
+
+                        -- Release pass first: destroyed wrecks and cars
+                        -- flung past the storm's edge are let go
+                        -- mid-flight with the velocity they carry.
+                        local limit = (STORM_RADIUS + RELEASE_SLACK)
+                                * (STORM_RADIUS + RELEASE_SLACK)
+
+                        for root in pairs(claimedRoots) do
+                                if not root.Parent then
+                                        releaseStormRoot(root)
+                                else
+                                        local offset = root.Position - center
+
+                                        if offset:Dot(offset) > limit then
+                                                releaseStormRoot(root)
+                                        end
+                                end
+                        end
+
+                        -- Claim pass: one spatial query over the bubble
+                        -- mapped onto assembly roots, so every car
+                        -- arrives as one connected piece, driver
+                        -- included.
+                        local found = Workspace:GetPartBoundsInRadius(
+                                center,
+                                STORM_RADIUS,
+                                overlapParams
+                        )
+
+                        for _, part in ipairs(found) do
+                                local root = part.AssemblyRootPart
+
+                                if root
+                                        and not claimedRoots[root]
+                                        and isStormableVehicleRoot(root) then
+                                        local offset = root.Position - center
+
+                                        if offset:Dot(offset) <= STORM_RADIUS * STORM_RADIUS then
+                                                claimStormRoot(root, rootPart)
+                                        end
+                                end
+                        end
+
+                        updateStormStatusCounts()
+                end
+
+                local mode = MODES[VehicleStormSettings.Mode]
+                local poke = frameTick % POKE_INTERVAL == 0
+
+                for root, rec in pairs(claimedRoots) do
+                        if not root.Parent then
+                                releaseStormRoot(root)
+                        elseif (mode == "Vortex" or mode == "Slam")
+                                and (not rec.rig or not rec.rig.target.Parent) then
+                                -- A missing or destroyed puppet (some
+                                -- games sweep the workspace client-side)
+                                -- is released so the next scan rebuilds
+                                -- a fresh rig instead of erroring.
+                                releaseStormRoot(root)
+                        elseif mode == "Vortex" then
+                                rec.angle += rec.angular * dt
+                                rec.liftT += dt
+                                rec.spinPhase += rec.spinSpeed * dt
+
+                                -- Every lift cycle the orbit is
+                                -- re-thrown onto a fresh radius and
+                                -- speed, so the tornado never settles
+                                -- into one hypnotic ring.
+                                local cycle = math.floor(rec.liftT / VORTEX_LIFT_CYCLE)
+
+                                if cycle ~= rec.liftCycle then
+                                        rec.liftCycle = cycle
+                                        rec.radius = VORTEX_MIN_RADIUS
+                                                + math.random()
+                                                        * (VORTEX_MAX_RADIUS - VORTEX_MIN_RADIUS)
+                                        rec.angular = VORTEX_MIN_SPEED
+                                                + math.random()
+                                                        * (VORTEX_MAX_SPEED - VORTEX_MIN_SPEED)
+                                end
+
+                                local radial = Vector3.new(
+                                        math.cos(rec.angle),
+                                        0,
+                                        math.sin(rec.angle)
+                                )
+                                local height = VORTEX_LIFT_MIN
+                                        + VORTEX_LIFT_SPAN
+                                        * ((rec.liftT % VORTEX_LIFT_CYCLE) / VORTEX_LIFT_CYCLE)
+
+                                rec.rig.target.CFrame = CFrame.new(
+                                        center
+                                                + radial * rec.radius
+                                                + Vector3.new(0, height, 0)
+                                ) * CFrame.fromAxisAngle(rec.spinAxis, rec.spinPhase)
+
+                                if poke and root.ReceiveAge == 0 then
+                                        pcall(function()
+                                                root.AssemblyLinearVelocity = ANTI_SLEEP
+                                        end)
+                                end
+                        elseif mode == "Slam" then
+                                rec.phaseT += dt
+                                rec.spinPhase += rec.spinSpeed * dt
+
+                                if rec.phase == 0 then
+                                        if rec.phaseT >= SLAM_UP_SECS then
+                                                rec.phase = 1
+                                                rec.phaseT = 0
+                                        end
+                                else
+                                        if rec.phaseT >= SLAM_DOWN_SECS then
+                                                rec.phase = 0
+                                                rec.phaseT = 0
+                                        end
+                                end
+
+                                local span = rec.phase == 0
+                                        and SLAM_UP_SECS
+                                        or SLAM_DOWN_SECS
+                                local progress = math.clamp(rec.phaseT / span, 0, 1)
+                                local height = rec.phase == 0
+                                        and SLAM_UP_HEIGHT * progress
+                                        or SLAM_UP_HEIGHT * (1 - progress)
+
+                                local columnBase = center
+                                        + rec.columnDir * SLAM_COLUMN_DISTANCE
+                                        + rec.ringOffset
+
+                                rec.rig.target.CFrame = CFrame.new(
+                                        columnBase + Vector3.new(0, height, 0)
+                                ) * CFrame.fromAxisAngle(rec.spinAxis, rec.spinPhase)
+
+                                if poke and root.ReceiveAge == 0 then
+                                        pcall(function()
+                                                root.AssemblyLinearVelocity = ANTI_SLEEP
+                                        end)
+                                end
+                        elseif mode == "Fling" then
+                                if now >= (rec.nextFlingAt or 0) then
+                                        rec.nextFlingAt = now + FLING_MIN_SECS
+                                                + math.random()
+                                                        * (FLING_MAX_SECS - FLING_MIN_SECS)
+
+                                        -- One big impulse per beat, then
+                                        -- hands off so it actually flies.
+                                        -- The ReceiveAge gate means the
+                                        -- write only ever lands on an
+                                        -- assembly we truly simulate -
+                                        -- no local-only theatre.
+                                        if root.ReceiveAge == 0 then
+                                                local side = randomUnit()
+                                                local flat = Vector3.new(side.X, 0, side.Z)
+
+                                                if flat.Magnitude < 0.05 then
+                                                        flat = Vector3.new(1, 0, 0)
+                                                end
+
+                                                local speed = FLING_SIDE_MIN
+                                                        + math.random()
+                                                                * (FLING_SIDE_MAX - FLING_SIDE_MIN)
+                                                local lift = FLING_UP_MIN
+                                                        + math.random()
+                                                                * (FLING_UP_MAX - FLING_UP_MIN)
+
+                                                pcall(function()
+                                                        root.AssemblyLinearVelocity =
+                                                                flat.Unit * speed
+                                                                + Vector3.new(0, lift, 0)
+                                                        root.AssemblyAngularVelocity = randomUnit()
+                                                                * (FLING_SPIN_MIN
+                                                                        + math.random()
+                                                                                * (FLING_SPIN_MAX - FLING_SPIN_MIN))
+                                                end)
+                                        end
+                                end
+                        elseif mode == "Freeze" then
+                                -- Zeroing velocity every frame on an
+                                -- assembly we simulate is a real freeze:
+                                -- gravity's per-step gain is cancelled
+                                -- before it can ever show.
+                                if root.ReceiveAge == 0 then
+                                        pcall(function()
+                                                root.AssemblyLinearVelocity = Vector3.zero
+                                                root.AssemblyAngularVelocity = Vector3.zero
+                                        end)
+                                end
+                        end
+                end
+        end
+
+        local function stopVehicleStorm()
+                disconnect(VehicleStormSettings.Connection)
+                VehicleStormSettings.Connection = nil
+                VehicleStormSettings.NextEnvAt = 0
+                VehicleStormSettings.NextScanAt = 0
+
+                for root in pairs(claimedRoots) do
+                        releaseStormRoot(root)
+                end
+
+                if stormFolder then
+                        local folder = stormFolder
+                        stormFolder = nil
+
+                        pcall(function()
+                                folder:Destroy()
+                        end)
+                end
+
+                restoreStormEnvironment()
+        end
+
+        -- Shared with the pull and shaker so the three engines never
+        -- claim the same assembly and fight over it.
+        VehicleStorm.IsClaimed = function(root)
+                return claimedRoots[root] ~= nil
+        end
+
+        VehicleStorm.getModeName = function()
+                return MODES[VehicleStormSettings.Mode] or MODES[1]
+        end
+
+        VehicleStorm.cycleMode = function()
+                VehicleStormSettings.Mode = (VehicleStormSettings.Mode % #MODES) + 1
+
+                if VehicleStormSettings.Enabled then
+                        -- Claims are released so the next scan re-claims
+                        -- every car with the rig the new mode needs:
+                        -- puppet modes build targets, velocity modes
+                        -- stay rig-free.
+                        for root in pairs(claimedRoots) do
+                                releaseStormRoot(root)
+                        end
+
+                        VehicleStormSettings.NextScanAt = 0
+                        updateStormStatus(VehicleStorm.getModeName() .. ": scanning...")
+                else
+                        updateStormStatus(
+                                "Vehicle Storm off - mode "
+                                        .. VehicleStorm.getModeName()
+                        )
+                end
+        end
+
+        VehicleStorm.setEnabled = function(value)
+                local enabled = value and true or false
+
+                stopVehicleStorm()
+                VehicleStormSettings.Enabled = enabled
+
+                if type(VehicleStorm.OnEnabledChanged) == "function" then
+                        pcall(VehicleStorm.OnEnabledChanged, enabled)
+                end
+
+                if not enabled then
+                        updateStormStatus(
+                                "Vehicle Storm off - mode "
+                                        .. VehicleStorm.getModeName()
+                        )
+                        return
+                end
+
+                local rootPart = LocalPlayer.Character
+                        and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+                if rootPart and rootPart.Parent then
+                        applyStormEnvironment(rootPart)
+                end
+
+                if not stormFolder then
+                        stormFolder = Instance.new("Folder")
+                        stormFolder.Name = "__VehicleStormRuntime"
+                        stormFolder.Parent = Workspace
+                end
+
+                VehicleStormSettings.NextScanAt = 0
+
+                updateStormStatus(
+                        VehicleStorm.getModeName() .. ": scanning for vehicles..."
+                )
+
+                VehicleStormSettings.Connection = RunService.Heartbeat:Connect(
+                        function(deltaTime)
+                                local ok, err = pcall(updateVehicleStorm, deltaTime)
+
+                                if not ok then
+                                        updateStormStatus(
+                                                "Engine error: "
+                                                        .. tostring(err):sub(1, 80)
+                                        )
+                                end
+                        end
+                )
+        end
+end
+
+buildVehicleStorm()
+
 local function cleanup()
         if not running then
                 return
@@ -5528,6 +6449,10 @@ local function cleanup()
         ShakerSettings.Enabled = false
         pcall(function()
                 Shaker.setEnabled(false)
+        end)
+        VehicleStorm.Settings.Enabled = false
+        pcall(function()
+                VehicleStorm.setEnabled(false)
         end)
         clearNoclip()
         stopFling()
@@ -5917,6 +6842,46 @@ Shaker.OnEnabledChanged = function(enabled)
 
         objectShakerToggleValue = desiredValue
         objectShakerToggle:Set(desiredValue)
+end
+end
+
+do
+local VehicleStormSection = FunTab:Section("Vehicle Storm")
+
+local vehicleStormStatusLabel = VehicleStormSection:Paragraph({
+        Text = "Vehicle Storm off"
+})
+
+VehicleStorm.OnStatusChanged = function(status)
+        vehicleStormStatusLabel:Set(tostring(status or "Vehicle Storm off"))
+end
+
+VehicleStormSection:Button({
+        Text = "Next Mode",
+        Callback = function()
+                VehicleStorm.cycleMode()
+        end
+})
+
+local vehicleStormToggleValue = false
+local vehicleStormToggle = VehicleStormSection:Toggle({
+        Text = "Enable Vehicle Storm",
+        Value = false,
+        Callback = function(value)
+                vehicleStormToggleValue = value and true or false
+                VehicleStorm.setEnabled(vehicleStormToggleValue)
+        end
+})
+
+VehicleStorm.OnEnabledChanged = function(enabled)
+        local desiredValue = enabled and true or false
+
+        if vehicleStormToggleValue == desiredValue then
+                return
+        end
+
+        vehicleStormToggleValue = desiredValue
+        vehicleStormToggle:Set(desiredValue)
 end
 end
 
