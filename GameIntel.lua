@@ -232,6 +232,112 @@ local function runExtract()
                                 end
                         end
 
+                        local liveContainers = {}
+                        local legacyContainers = {}
+
+                        do
+                                local function addContainer(container, legacyToo)
+                                        if container then
+                                                liveContainers[#liveContainers + 1] = container
+
+                                                if legacyToo then
+                                                        legacyContainers[#legacyContainers + 1] = container
+                                                end
+                                        end
+                                end
+
+                                addContainer(game:GetService("ReplicatedFirst"), true)
+                                addContainer(game:GetService("ReplicatedStorage"), false)
+
+                                for _, className in ipairs({ "PlayerScripts", "PlayerGui", "Backpack" }) do
+                                        addContainer(LocalPlayer:FindFirstChildOfClass(className), true)
+                                end
+
+                                addContainer(LocalPlayer.Character, true)
+                                addContainer(Workspace, false)
+                        end
+
+                        local function inLiveContainer(instance)
+                                for _, container in ipairs(liveContainers) do
+                                        if instance:IsDescendantOf(container) then
+                                                return true
+                                        end
+                                end
+
+                                return false
+                        end
+
+                        local DEFAULT_SCRIPT_NAMES = {
+                                PlayerModule = true,
+                                PlayerScriptsLoader = true,
+                                RbxCharacterSounds = true,
+                                ChatScript = true
+                        }
+
+                        local function isRobloxDefaultScript(instance)
+                                local node = instance
+
+                                while node and node ~= game do
+                                        if DEFAULT_SCRIPT_NAMES[node.Name] then
+                                                return true
+                                        end
+
+                                        node = node.Parent
+                                end
+
+                                return false
+                        end
+
+                        local characterOwnerCache = {}
+
+                        local function isOtherPlayersCopy(instance)
+                                local node = instance.Parent
+
+                                while node and node ~= Workspace do
+                                        if node.Parent == Workspace then
+                                                local known = characterOwnerCache[node]
+
+                                                if known == nil then
+                                                        local player = Players:GetPlayerFromCharacter(node)
+                                                        known = (player ~= nil and player ~= LocalPlayer) or false
+                                                        characterOwnerCache[node] = known
+                                                end
+
+                                                return known
+                                        end
+
+                                        node = node.Parent
+                                end
+
+                                return false
+                        end
+
+                        local function shouldExtractScript(instance)
+                                if not inLiveContainer(instance) then
+                                        return false, "outside"
+                                end
+
+                                if isRobloxDefaultScript(instance) then
+                                        return false, "default"
+                                end
+
+                                if isOtherPlayersCopy(instance) then
+                                        return false, "otherplayer"
+                                end
+
+                                return true, nil
+                        end
+
+                        local function runsLegacyClient(instance)
+                                for _, container in ipairs(legacyContainers) do
+                                        if instance:IsDescendantOf(container) then
+                                                return true
+                                        end
+                                end
+
+                                return false
+                        end
+
                         setStatus("Walking instance tree...")
 
                         local descendants = game:GetDescendants()
@@ -248,8 +354,33 @@ local function runExtract()
                         local anchoredCount = 0
                         local collideOffCount = 0
                         local serverScriptCount = 0
+                        local skippedDefaults = 0
+                        local skippedOtherPlayers = 0
+                        local skippedOutside = 0
                         local boundsMin = nil
                         local boundsMax = nil
+
+                        local function classifyScript(instance)
+                                local extract, why = shouldExtractScript(instance)
+
+                                if extract then
+                                        scriptEntries[#scriptEntries + 1] = {
+                                                instance = instance,
+                                                className = instance.ClassName,
+                                                name = instance.Name,
+                                                path = instance:GetFullName()
+                                        }
+                                        return
+                                end
+
+                                if why == "default" then
+                                        skippedDefaults = skippedDefaults + 1
+                                elseif why == "otherplayer" then
+                                        skippedOtherPlayers = skippedOtherPlayers + 1
+                                else
+                                        skippedOutside = skippedOutside + 1
+                                end
+                        end
 
                         for i, instance in ipairs(descendants) do
                                 local className = instance.ClassName
@@ -285,24 +416,20 @@ local function runExtract()
                                 end
 
                                 if className == "LocalScript" or className == "ModuleScript" then
-                                        scriptEntries[#scriptEntries + 1] = {
-                                                instance = instance,
-                                                className = className,
-                                                name = instance.Name,
-                                                path = instance:GetFullName()
-                                        }
+                                        classifyScript(instance)
                                 elseif className == "Script" then
                                         local contextOk, runContext = pcall(function()
                                                 return instance.RunContext
                                         end)
 
-                                        if contextOk and runContext == Enum.RunContext.Client then
-                                                scriptEntries[#scriptEntries + 1] = {
-                                                        instance = instance,
-                                                        className = className,
-                                                        name = instance.Name,
-                                                        path = instance:GetFullName()
-                                                }
+                                        local clientSide = contextOk and runContext == Enum.RunContext.Client
+
+                                        if not clientSide and (not contextOk or runContext == Enum.RunContext.Legacy) then
+                                                clientSide = runsLegacyClient(instance)
+                                        end
+
+                                        if clientSide then
+                                                classifyScript(instance)
                                         else
                                                 serverScriptCount = serverScriptCount + 1
                                         end
@@ -395,11 +522,12 @@ local function runExtract()
                         local manifestLines = {
                                 "Game: " .. placeName .. " (" .. tostring(game.PlaceId) .. ")",
                                 "Generated: " .. generatedAt,
+                                "Scope: game scripts only - live copies under ReplicatedStorage, ReplicatedFirst, Workspace, your PlayerScripts, PlayerGui, Backpack and character; Roblox defaults, other players' copies and everything else are skipped",
                                 ""
                         }
 
                         if #scriptEntries == 0 then
-                                manifestLines[#manifestLines + 1] = "no client-visible scripts found in this game"
+                                manifestLines[#manifestLines + 1] = "no game scripts found in ReplicatedStorage, ReplicatedFirst, Workspace, PlayerScripts, PlayerGui or Backpack"
                         elseif type(decompile) ~= "function" then
                                 manifestLines[#manifestLines + 1] = "executor has no decompile() - "
                                         .. #scriptEntries
@@ -458,6 +586,14 @@ local function runExtract()
                                 .. #scriptEntries
                                 .. ", failed: "
                                 .. failedCount
+
+                        manifestLines[#manifestLines + 1] = "skipped: "
+                                .. skippedDefaults
+                                .. " roblox defaults, "
+                                .. skippedOtherPlayers
+                                .. " other player copies, "
+                                .. skippedOutside
+                                .. " outside game containers"
 
                         writeFile(scriptsDir .. "/manifest.txt", table.concat(manifestLines, "\n") .. "\n")
 
@@ -533,6 +669,9 @@ local function runExtract()
                                         clientScripts = #scriptEntries,
                                         scriptsDecompiled = decompiledCount,
                                         scriptsFailed = failedCount,
+                                        skippedRobloxDefaults = skippedDefaults,
+                                        skippedOtherPlayerCopies = skippedOtherPlayers,
+                                        skippedOutsideGameContainers = skippedOutside,
                                         decompilerAvailable = type(decompile) == "function",
                                         serverScriptsVisibleButNotReadable = serverScriptCount
                                 }
@@ -548,7 +687,7 @@ local function runExtract()
                                 .. decompiledCount
                                 .. "/"
                                 .. #scriptEntries
-                                .. " scripts, "
+                                .. " game scripts, "
                                 .. #remotesLines
                                 .. " remotes, "
                                 .. #assetsLines
@@ -583,7 +722,7 @@ local ExtractTab = Window:Tab("Extract", "search")
 local ExtractSection = ExtractTab:Section("Game Extract")
 
 statusLabel = ExtractSection:Paragraph({
-        Text = "Idle. One click dumps everything this game shows your client into a folder in your executor's workspace directory."
+        Text = "Idle. One click dumps the game into a folder in your executor's workspace directory - scripts are filtered to the game's own code."
 })
 
 ExtractSection:Button({
@@ -651,7 +790,7 @@ ExtractSection:Button({
 })
 
 ExtractSection:Paragraph({
-        Text = "Writes overview.json (game + map census), tree.txt (every instance), remotes.txt (Remote/Bindable events), assets.txt (sound/mesh/animation ids) and scripts/ (decompiled LocalScripts + ModuleScripts with a manifest)."
+        Text = "Writes overview.json (game + map census), tree.txt (every instance), remotes.txt (Remote/Bindable events), assets.txt (sound/mesh/animation ids) and scripts/ (decompiled game scripts + manifest - Roblox defaults like PlayerModule, other players' copies and non-game containers are skipped)."
 })
 
 local function cleanup()
