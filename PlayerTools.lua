@@ -5727,24 +5727,35 @@ local speedToggle = MovementSection:Toggle({
         end
 })
 
-local speedSlider = MovementSection:Slider({
+local speedInput = MovementSection:Input({
         Text = "Walk Speed",
-        Min = 0,
-        -- Uncapped per user request: the engine applies whatever
-        -- WalkSpeed it is given with no clamp of its own, so the
-        -- slider was the only thing holding it back.
-        Max = 10000,
-        Value = 16,
-        Callback = function(value)
+        Value = tostring(MovementSettings.Speed),
+        Placeholder = "any number",
+        Callback = function(text)
+                -- Free-form entry: whatever number lands here is
+                -- applied verbatim - the engine clamps nothing, and
+                -- the input box clamps nothing. Anything that is not
+                -- a non-negative number is bounced back to the
+                -- current speed instead of silently zeroing it.
+                local value = tonumber(tostring(text):match("^%s*(.-)%s*$"))
+
+                if value == nil or value < 0 or value ~= value then
+                        speedInput:Set(tostring(MovementSettings.Speed))
+                        return
+                end
+
                 MovementSettings.Speed = value
                 applySpeed()
+                speedInput:Set(tostring(value))
         end
 })
 
 MovementSection:Button({
         Text = "Set Normal Speed",
         Callback = function()
-                speedSlider:Set(16, true)
+                MovementSettings.Speed = 16
+                applySpeed()
+                speedInput:Set("16")
         end
 })
 
