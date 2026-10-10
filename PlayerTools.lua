@@ -1125,7 +1125,7 @@ local function applyVehicleSeatSpeed()
                 return
         end
 
-        local speed = math.clamp(tonumber(VehicleSettings.Speed) or 60, 0, 500)
+        local speed = tonumber(VehicleSettings.Speed) or 60
 
         pcall(function()
                 if VehicleSettings.OriginalMaxSpeed[seat] == nil then
@@ -1150,7 +1150,7 @@ local function applyVehicleSeatSteering()
                 return
         end
 
-        local strength = math.clamp(tonumber(VehicleSettings.SteeringStrength) or 8, 0, 50)
+        local strength = tonumber(VehicleSettings.SteeringStrength) or 8
 
         pcall(function()
                 if VehicleSettings.OriginalTurnSpeed[seat] == nil then
@@ -1319,7 +1319,7 @@ local function updateVehicleBoost(deltaTime)
                         forward = forward.Unit
 
                         local throttle = getVehicleThrottle(seat)
-                        local speed = math.clamp(tonumber(VehicleSettings.Speed) or 60, 0, 500)
+                        local speed = tonumber(VehicleSettings.Speed) or 60
                         local velocity = root.AssemblyLinearVelocity
                         local forwardSpeed = velocity:Dot(forward)
                         local targetSpeed = throttle * speed
@@ -1327,7 +1327,7 @@ local function updateVehicleBoost(deltaTime)
                         if isVehicleSpeedBoostActive() then
                                 targetSpeed = math.max(
                                         targetSpeed,
-                                        math.clamp(tonumber(VehicleSpeedBoostSettings.Power) or 160, 20, 600)
+                                        tonumber(VehicleSpeedBoostSettings.Power) or 160
                                 )
                         end
 
@@ -1341,7 +1341,7 @@ local function updateVehicleBoost(deltaTime)
                         local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
                         local movementFactor = math.clamp(horizontalSpeed / math.max(speed, 1), 0, 1)
                         local targetYaw = -steer
-                                * math.clamp(tonumber(VehicleSettings.SteeringStrength) or 8, 0, 50)
+                                * (tonumber(VehicleSettings.SteeringStrength) or 8)
                                 * movementFactor
                         local angularVelocity = root.AssemblyAngularVelocity
                         local steeringAlpha = 1 - math.exp(-14 * delta)
@@ -1394,7 +1394,7 @@ local function jumpVehicle()
 
         local seat = VehicleSettings.CurrentSeat
         local root = VehicleSettings.CurrentRoot
-        local power = math.clamp(tonumber(VehicleJumpSettings.Power) or 90, 20, 250)
+        local power = tonumber(VehicleJumpSettings.Power) or 90
         local velocity = root.AssemblyLinearVelocity
         local forward = Vector3.new(seat.CFrame.LookVector.X, 0, seat.CFrame.LookVector.Z)
 
@@ -1581,7 +1581,7 @@ local function boostVehicleSpeed()
 
         forward = forward.Unit
 
-        local power = math.clamp(tonumber(VehicleSpeedBoostSettings.Power) or 160, 20, 600)
+        local power = tonumber(VehicleSpeedBoostSettings.Power) or 160
         local velocity = root.AssemblyLinearVelocity
         local forwardSpeed = velocity:Dot(forward)
         local lateralVelocity = velocity - forward * forwardSpeed
@@ -6043,24 +6043,36 @@ end
 do
 local VehicleSection = VehicleMovementTab:Section("Vehicle Speed")
 
-VehicleSection:Slider({
+VehicleSection:Input({
         Text = "Vehicle Speed",
-        Min = 0,
-        Max = 500,
-        Value = VehicleSettings.Speed,
+        Value = tostring(VehicleSettings.Speed),
+        Placeholder = "any number",
         Callback = function(value)
-                VehicleSettings.Speed = value
+                -- Free-form entry, uncapped: the engine applies
+                -- whatever it reads with no clamp of its own.
+                local parsed = tonumber(tostring(value):match("^%s*(.-)%s*$"))
+
+                if parsed == nil or parsed < 0 or parsed ~= parsed then
+                        return
+                end
+
+                VehicleSettings.Speed = parsed
                 applyVehicleSeatSpeed()
         end
 })
 
-VehicleSection:Slider({
+VehicleSection:Input({
         Text = "Steering Strength",
-        Min = 0,
-        Max = 50,
-        Value = VehicleSettings.SteeringStrength,
+        Value = tostring(VehicleSettings.SteeringStrength),
+        Placeholder = "any number",
         Callback = function(value)
-                VehicleSettings.SteeringStrength = value
+                local parsed = tonumber(tostring(value):match("^%s*(.-)%s*$"))
+
+                if parsed == nil or parsed < 0 or parsed ~= parsed then
+                        return
+                end
+
+                VehicleSettings.SteeringStrength = parsed
                 applyVehicleSeatSteering()
         end
 })
@@ -6077,13 +6089,18 @@ VehicleFlySection:Toggle({
         end
 })
 
-VehicleFlySection:Slider({
+VehicleFlySection:Input({
         Text = "Vehicle Fly Speed",
-        Min = 10,
-        Max = 250,
-        Value = VehicleFlySettings.Speed,
+        Value = tostring(VehicleFlySettings.Speed),
+        Placeholder = "any number",
         Callback = function(value)
-                VehicleFlySettings.Speed = value
+                local parsed = tonumber(tostring(value):match("^%s*(.-)%s*$"))
+
+                if parsed == nil or parsed < 0 or parsed ~= parsed then
+                        return
+                end
+
+                VehicleFlySettings.Speed = parsed
         end
 })
 end
@@ -6091,13 +6108,18 @@ end
 do
 local VehicleJumpSection = VehicleMovementTab:Section("Vehicle Jump")
 
-VehicleJumpSection:Slider({
+VehicleJumpSection:Input({
         Text = "Jump Power",
-        Min = 20,
-        Max = 250,
-        Value = VehicleJumpSettings.Power,
+        Value = tostring(VehicleJumpSettings.Power),
+        Placeholder = "any number",
         Callback = function(value)
-                VehicleJumpSettings.Power = value
+                local parsed = tonumber(tostring(value):match("^%s*(.-)%s*$"))
+
+                if parsed == nil or parsed < 0 or parsed ~= parsed then
+                        return
+                end
+
+                VehicleJumpSettings.Power = parsed
         end
 })
 end
@@ -6105,13 +6127,18 @@ end
 do
 local VehicleSpeedBoostSection = VehicleMovementTab:Section("Vehicle Speed Boost")
 
-VehicleSpeedBoostSection:Slider({
+VehicleSpeedBoostSection:Input({
         Text = "Boost Speed",
-        Min = 20,
-        Max = 600,
-        Value = VehicleSpeedBoostSettings.Power,
+        Value = tostring(VehicleSpeedBoostSettings.Power),
+        Placeholder = "any number",
         Callback = function(value)
-                VehicleSpeedBoostSettings.Power = value
+                local parsed = tonumber(tostring(value):match("^%s*(.-)%s*$"))
+
+                if parsed == nil or parsed < 0 or parsed ~= parsed then
+                        return
+                end
+
+                VehicleSpeedBoostSettings.Power = parsed
         end
 })
 end
@@ -6134,9 +6161,11 @@ VehicleFlingSection:Input({
         Callback = function(value)
                 local parsed = tonumber(value)
 
-                if parsed then
-                        VehicleFlingSettings.Power = math.clamp(parsed, 1, 1000)
+                if parsed == nil or parsed < 0 or parsed ~= parsed then
+                        return
                 end
+
+                VehicleFlingSettings.Power = parsed
         end
 })
 end
