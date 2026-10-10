@@ -5730,7 +5730,10 @@ local speedToggle = MovementSection:Toggle({
 local speedSlider = MovementSection:Slider({
         Text = "Walk Speed",
         Min = 0,
-        Max = 250,
+        -- Uncapped per user request: the engine applies whatever
+        -- WalkSpeed it is given with no clamp of its own, so the
+        -- slider was the only thing holding it back.
+        Max = 10000,
         Value = 16,
         Callback = function(value)
                 MovementSettings.Speed = value
