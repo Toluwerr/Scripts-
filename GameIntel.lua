@@ -146,6 +146,179 @@ local function setStatus(text)
         end
 end
 
+local workspaceBase = nil
+
+do
+        local candidates = {
+                "getworkspacepath",
+                "getworkspacefolder",
+                "getworkspacedirectory",
+                "getexecutorpath",
+                "getexecutordirectory",
+                "getexecutorfolder"
+        }
+
+        for _, candidateName in ipairs(candidates) do
+                local candidate = rawget(Global, candidateName) or rawget(_G, candidateName)
+
+                if type(candidate) == "function" then
+                        local ok, result = pcall(candidate)
+
+                        if ok and type(result) == "string" then
+                                result = result:gsub("[/\\]+$", "")
+
+                                if #result > 0 then
+                                        if result:lower():find("%.exe$") then
+                                                result = result:gsub("[^/\\]+$", ""):gsub("[/\\]+$", "")
+                                                local sep = result:find("\\", 1, true) and "\\" or "/"
+                                                result = result .. sep .. "workspace"
+                                        end
+
+                                        workspaceBase = result
+                                        break
+                                end
+                        end
+                end
+        end
+end
+
+local function toFullPath(relativePath)
+        if not workspaceBase or not relativePath then
+                return tostring(relativePath or "")
+        end
+
+        local sep = workspaceBase:find("\\", 1, true) and "\\" or "/"
+        return workspaceBase .. sep .. (tostring(relativePath):gsub("/", sep))
+end
+
+local CRC_TABLE = nil
+
+local function buildCrcTable()
+        if CRC_TABLE then
+                return CRC_TABLE
+        end
+
+        CRC_TABLE = {}
+
+        for i = 0, 255 do
+                local c = i
+
+                for _ = 1, 8 do
+                        if c % 2 == 1 then
+                                c = bit32.bxor(0xEDB88320, bit32.rshift(c, 1))
+                        else
+                                c = bit32.rshift(c, 1)
+                        end
+                end
+
+                CRC_TABLE[i] = c
+        end
+
+        return CRC_TABLE
+end
+
+local function crc32Of(data)
+        local crcTable = buildCrcTable()
+        local crc = 0xFFFFFFFF
+
+        for i = 1, #data do
+                crc = bit32.bxor(crcTable[bit32.band(bit32.bxor(crc, string.byte(data, i)), 0xFF)], bit32.rshift(crc, 8))
+        end
+
+        return bit32.bxor(crc, 0xFFFFFFFF)
+end
+
+local function packU16(value)
+        return string.char(bit32.band(value, 0xFF), bit32.band(bit32.rshift(value, 8), 0xFF))
+end
+
+local function packU32(value)
+        return string.char(
+                bit32.band(value, 0xFF),
+                bit32.band(bit32.rshift(value, 8), 0xFF),
+                bit32.band(bit32.rshift(value, 16), 0xFF),
+                bit32.band(bit32.rshift(value, 24), 0xFF)
+        )
+end
+
+local SIG_LOCAL = "PK" .. string.char(3, 4)
+local SIG_CENTRAL = "PK" .. string.char(1, 2)
+local SIG_EOCD = "PK" .. string.char(5, 6)
+
+local function buildZip(entries)
+        buildCrcTable()
+
+        local timeInfo = os.date("*t")
+        local dosTime = bit32.bor(
+                bit32.lshift(timeInfo.hour % 32, 11),
+                bit32.bor(bit32.lshift(timeInfo.min, 5), math.floor(timeInfo.sec / 2))
+        )
+        local dosDate = bit32.bor(
+                bit32.lshift((timeInfo.year - 1980) % 128, 9),
+                bit32.bor(bit32.lshift(timeInfo.month, 5), timeInfo.day)
+        )
+
+        local localParts = {}
+        local centralParts = {}
+        local offset = 0
+
+        for _, entry in ipairs(entries) do
+                local name = entry.path
+                local data = entry.content
+                local crc = crc32Of(data)
+
+                local header = SIG_LOCAL
+                        .. packU16(20)
+                        .. packU16(0)
+                        .. packU16(0)
+                        .. packU16(dosTime)
+                        .. packU16(dosDate)
+                        .. packU32(crc)
+                        .. packU32(#data)
+                        .. packU32(#data)
+                        .. packU16(#name)
+                        .. packU16(0)
+                        .. name
+
+                localParts[#localParts + 1] = header
+                localParts[#localParts + 1] = data
+
+                centralParts[#centralParts + 1] = SIG_CENTRAL
+                        .. packU16(20)
+                        .. packU16(20)
+                        .. packU16(0)
+                        .. packU16(0)
+                        .. packU16(dosTime)
+                        .. packU16(dosDate)
+                        .. packU32(crc)
+                        .. packU32(#data)
+                        .. packU32(#data)
+                        .. packU16(#name)
+                        .. packU16(0)
+                        .. packU16(0)
+                        .. packU16(0)
+                        .. packU16(0)
+                        .. packU32(0)
+                        .. packU32(offset)
+                        .. name
+
+                offset = offset + #header + #data
+        end
+
+        local centralData = table.concat(centralParts)
+
+        return table.concat(localParts)
+                .. centralData
+                .. SIG_EOCD
+                .. packU16(0)
+                .. packU16(0)
+                .. packU16(#entries)
+                .. packU16(#entries)
+                .. packU32(#centralData)
+                .. packU32(offset)
+                .. packU16(0)
+end
+
 local ASSET_PROPS = {
         Sound = { "SoundId" },
         Animation = { "AnimationId" },
@@ -171,26 +344,47 @@ local REMOTE_CLASSES = {
 
 local extracting = false
 local cancelRequested = false
-local lastFolderPath = nil
+local outputAsZip = false
+local lastOutputPath = nil
 
 local function runExtract()
         if extracting then
-                setStatus("Already extracting - watch this line for progress")
+                setStatus("Already extracting")
                 return
         end
 
-        if type(writefile) ~= "function"
-                or type(makefolder) ~= "function"
-                or type(isfolder) ~= "function" then
-                setStatus("This executor cannot write files (writefile/makefolder missing) - extraction needs file access")
+        if type(writefile) ~= "function" then
+                setStatus("This executor cannot write files")
                 return
         end
+
+        if not outputAsZip
+                and (type(makefolder) ~= "function" or type(isfolder) ~= "function") then
+                setStatus("This executor cannot create folders - turn on Output as ZIP")
+                return
+        end
+
+        local asZip = outputAsZip
 
         cancelRequested = false
 
         extracting = true
 
         task.spawn(function()
+                local zipEntries = {}
+                local zipPath = nil
+
+                local function writeZipNow()
+                        local zipData = buildZip(zipEntries)
+                        local zipOk, zipErr = pcall(writefile, zipPath, zipData)
+
+                        if not zipOk then
+                                error("zip write failed: " .. tostring(zipErr))
+                        end
+
+                        lastOutputPath = zipPath
+                end
+
                 local ok, err = pcall(function()
                         local function abortNow()
                                 return (not running) or cancelRequested
@@ -210,21 +404,34 @@ local function runExtract()
                         local root = "GameIntel/" .. tostring(game.PlaceId) .. "_" .. sanitizeName(placeName, 40)
                         local scriptsDir = root .. "/scripts"
 
-                        if not isfolder("GameIntel") then
-                                makefolder("GameIntel")
-                        end
+                        if asZip then
+                                zipPath = "GameIntel_"
+                                        .. tostring(game.PlaceId)
+                                        .. "_"
+                                        .. sanitizeName(placeName, 40)
+                                        .. ".zip"
+                        else
+                                if not isfolder("GameIntel") then
+                                        makefolder("GameIntel")
+                                end
 
-                        if not isfolder(root) then
-                                makefolder(root)
-                        end
+                                if not isfolder(root) then
+                                        makefolder(root)
+                                end
 
-                        if not isfolder(scriptsDir) then
-                                makefolder(scriptsDir)
-                        end
+                                if not isfolder(scriptsDir) then
+                                        makefolder(scriptsDir)
+                                end
 
-                        lastFolderPath = root
+                                lastOutputPath = root
+                        end
 
                         local function writeFile(path, content)
+                                if asZip then
+                                        zipEntries[#zipEntries + 1] = { path = path, content = content }
+                                        return
+                                end
+
                                 local writeOk, writeErr = pcall(writefile, path, content)
 
                                 if not writeOk then
@@ -545,7 +752,7 @@ local function runExtract()
 
                                         if decompileOk and type(source) == "string" and #source > 0 then
                                                 local fileName = string.format("%03d_%s.lua", i, sanitizeName(entry.name, 50))
-                                                local writeOk, writeErr = pcall(writefile, scriptsDir .. "/" .. fileName, source)
+                                                local writeOk, writeErr = pcall(writeFile, scriptsDir .. "/" .. fileName, source)
 
                                                 if writeOk then
                                                         decompiledCount = decompiledCount + 1
@@ -679,6 +886,17 @@ local function runExtract()
 
                         writeFile(root .. "/overview.json", jsonEncode(overview, 0) .. "\n")
 
+                        if asZip then
+                                setStatus("Packing zip (" .. #zipEntries .. " files)...")
+                                task.wait()
+
+                                if abortNow() then
+                                        return
+                                end
+
+                                writeZipNow()
+                        end
+
                         setStatus("Done: "
                                 .. total
                                 .. " instances, "
@@ -692,8 +910,7 @@ local function runExtract()
                                 .. " remotes, "
                                 .. #assetsLines
                                 .. " assets -> "
-                                .. root
-                                .. "/ (Copy Folder Path copies this)")
+                                .. toFullPath(asZip and zipPath or root))
                 end)
 
                 local wasCancelled = cancelRequested
@@ -704,8 +921,20 @@ local function runExtract()
                 if not ok then
                         setStatus("Extract failed: " .. tostring(err):sub(1, 140))
                 elseif wasCancelled then
-                        if lastFolderPath then
-                                setStatus("Cancelled - partial files kept in " .. lastFolderPath .. "/ (in your executor's workspace folder)")
+                        if asZip then
+                                if #zipEntries > 0 and zipPath then
+                                        local packOk, packErr = pcall(writeZipNow)
+
+                                        if packOk then
+                                                setStatus("Cancelled - zip written: " .. toFullPath(zipPath))
+                                        else
+                                                setStatus("Cancelled - " .. tostring(packErr):sub(1, 100))
+                                        end
+                                else
+                                        setStatus("Cancelled - nothing was written")
+                                end
+                        elseif lastOutputPath then
+                                setStatus("Cancelled - partial files kept in " .. toFullPath(lastOutputPath))
                         else
                                 setStatus("Cancelled - nothing was written")
                         end
@@ -722,7 +951,15 @@ local ExtractTab = Window:Tab("Extract", "search")
 local ExtractSection = ExtractTab:Section("Game Extract")
 
 statusLabel = ExtractSection:Paragraph({
-        Text = "Idle. One click dumps the game into a folder in your executor's workspace directory - scripts are filtered to the game's own code."
+        Text = "Idle."
+})
+
+ExtractSection:Toggle({
+        Text = "Output as ZIP",
+        Value = false,
+        Callback = function(value)
+                outputAsZip = value and true or false
+        end
 })
 
 ExtractSection:Button({
@@ -742,25 +979,25 @@ ExtractSection:Button({
                 end
 
                 if cancelRequested then
-                        setStatus("Already cancelling - stopping after the current batch...")
+                        setStatus("Already cancelling")
                         return
                 end
 
                 cancelRequested = true
-                setStatus("Cancelling - stopping after the current batch...")
+                setStatus("Cancelling...")
         end
 })
 
 ExtractSection:Button({
-        Text = "Copy Folder Path",
+        Text = "Copy Path",
         Callback = function()
                 if extracting then
-                        setStatus("Still extracting - the folder path will be copyable when it finishes.")
+                        setStatus("Still extracting")
                         return
                 end
 
-                if not lastFolderPath then
-                        setStatus("Nothing to copy yet - press Extract first.")
+                if not lastOutputPath then
+                        setStatus("Nothing to copy yet")
                         return
                 end
 
@@ -774,23 +1011,21 @@ ExtractSection:Button({
                         clip = set_clipboard
                 end
 
+                local fullPath = toFullPath(lastOutputPath)
+
                 if not clip then
-                        setStatus("This executor has no clipboard function - folder: " .. lastFolderPath)
+                        setStatus("No clipboard function: " .. fullPath)
                         return
                 end
 
-                local copyOk = pcall(clip, lastFolderPath)
+                local copyOk = pcall(clip, fullPath)
 
                 if copyOk then
-                        setStatus("Copied: " .. lastFolderPath .. " (relative to your executor's workspace folder)")
+                        setStatus("Copied: " .. fullPath)
                 else
-                        setStatus("Clipboard copy failed - folder: " .. lastFolderPath)
+                        setStatus("Clipboard copy failed: " .. fullPath)
                 end
         end
-})
-
-ExtractSection:Paragraph({
-        Text = "Writes overview.json (game + map census), tree.txt (every instance), remotes.txt (Remote/Bindable events), assets.txt (sound/mesh/animation ids) and scripts/ (decompiled game scripts + manifest - Roblox defaults like PlayerModule, other players' copies and non-game containers are skipped)."
 })
 
 local function cleanup()
