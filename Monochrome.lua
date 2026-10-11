@@ -180,6 +180,99 @@ local function evictCache(trackId)
         writeCacheOrder(names)
 end
 
+local ART_CACHE_LIMIT = 40
+
+local function artOrderPath()
+        return CACHE_FOLDER .. "/.artorder"
+end
+
+local function readArtOrder()
+        if FS.read then
+                local ok, body = pcall(FS.read, artOrderPath())
+                if ok and type(body) == "string" and #body > 2 then
+                        local okD, data = pcall(function()
+                                return HttpService:JSONDecode(body)
+                        end)
+                        if okD and type(data) == "table" then
+                                local names = {}
+                                for _, n in ipairs(data) do
+                                        if type(n) == "string" then
+                                                table.insert(names, n)
+                                        end
+                                end
+                                return names
+                        end
+                end
+        end
+        return {}
+end
+
+local function writeArtOrder(names)
+        if FS.write then
+                pcall(FS.write, artOrderPath(), HttpService:JSONEncode(names))
+        end
+end
+
+local function trimArtCache(names)
+        if FS.delFile then
+                while #names > ART_CACHE_LIMIT do
+                        local victim = table.remove(names, 1)
+                        pcall(FS.delFile, CACHE_FOLDER .. "/" .. victim)
+                end
+        end
+        return names
+end
+
+-- Artwork is displayed through a locally cached file served by getcustomasset,
+-- because Roblox's own texture fetcher often fails on third-party URLs.
+local function cacheArtwork(tr)
+        if not FS.write or not customAsset then return nil end
+        local url = tostring(tr and tr.artwork or "")
+        if url == "" then return nil end
+        ensureCacheFolder()
+        local name = "art_" .. tostring(tr.id) .. ".jpg"
+        local path = CACHE_FOLDER .. "/" .. name
+        if FS.isFile and FS.isFile(path) then
+                local okC, cached = pcall(customAsset, path)
+                if okC and type(cached) == "string" and #cached > 0 then
+                        return cached
+                end
+        end
+        local body, code = httpGet(url)
+        if code ~= 200 or type(body) ~= "string" or #body < 100 then
+                return nil
+        end
+        local isPng = body:byte(1) == 137 and body:byte(2) == 80
+        local isJpg = body:byte(1) == 255 and body:byte(2) == 216
+        if not isJpg and not isPng then
+                return nil
+        end
+        if isPng then
+                name = "art_" .. tostring(tr.id) .. ".png"
+                path = CACHE_FOLDER .. "/" .. name
+        end
+        if not pcall(FS.write, path, body) then
+                return nil
+        end
+        local names = readArtOrder()
+        local present = false
+        for _, n in ipairs(names) do
+                if n == name then
+                        present = true
+                        break
+                end
+        end
+        if not present then
+                table.insert(names, name)
+        end
+        writeArtOrder(trimArtCache(names))
+        local okA, asset = pcall(customAsset, path)
+        if okA and type(asset) == "string" and #asset > 0 then
+                return asset
+        end
+        return nil
+end
+
 local refreshCacheStatus = function() end
 
 local function downloadToCache(tr, url)
@@ -378,6 +471,9 @@ end
 
 local function clearCache()
         local names = readCacheOrder()
+        for _, n in ipairs(readArtOrder()) do
+                table.insert(names, n)
+        end
         if FS.listFiles then
                 local ok, files = pcall(FS.listFiles, CACHE_FOLDER)
                 if ok and type(files) == "table" then
@@ -396,6 +492,7 @@ local function clearCache()
                 end
         end
         writeCacheOrder({})
+        writeArtOrder({})
         refreshCacheStatus()
         notify("Cache cleared", removed .. " files removed.")
 end
@@ -416,6 +513,7 @@ local state = {
         consecutiveFails = 0,
         lastSeekInput = 0,
         searchGen = 0,
+        artGen = 0,
 }
 
 local sound = Instance.new("Sound")
@@ -447,8 +545,23 @@ local function updateNowPlaying(tr, sourceLabel)
         if ui.artistPara then ui.artistPara:Set(tr and tr.artist or "-") end
         if ui.sourcePara then ui.sourcePara:Set("Source: " .. tostring(sourceLabel or "-")) end
         if ui.art then
-                ui.art:SetVisible(tr ~= nil)
-                ui.art:SetImage(tr and tr.artwork or "")
+                local hasArt = (tr ~= nil and tr.artwork ~= nil and tr.artwork ~= "")
+                ui.art:SetVisible(hasArt)
+                if hasArt then
+                        -- instant attempt: let Roblox fetch the URL directly
+                        ui.art:SetImage(tr.artwork)
+                        -- reliable attempt: local file via getcustomasset
+                        state.artGen = state.artGen + 1
+                        local gen = state.artGen
+                        task.spawn(function()
+                                local asset = cacheArtwork(tr)
+                                if running and asset and state.artGen == gen and ui.art then
+                                        ui.art:SetImage(asset)
+                                end
+                        end)
+                else
+                        ui.art:SetImage("")
+                end
         end
 end
 
