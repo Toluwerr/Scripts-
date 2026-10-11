@@ -375,14 +375,30 @@ local function runExtract()
                 local zipPath = nil
 
                 local function writeZipNow()
-                        local zipData = buildZip(zipEntries)
-                        local zipOk, zipErr = pcall(writefile, zipPath, zipData)
+                        local zipOk, zipErr = pcall(writefile, zipPath, buildZip(zipEntries))
 
                         if not zipOk then
-                                error("zip write failed: " .. tostring(zipErr))
+                                return false, tostring(zipErr)
                         end
 
                         lastOutputPath = zipPath
+                        return true
+                end
+
+                local function zipRefusal(err)
+                        local text = tostring(err):lower()
+                        return text:find("forbidden", 1, true)
+                                or text:find("extension", 1, true)
+                                or text:find("not allowed", 1, true)
+                                or text:find("blocked", 1, true) ~= nil
+                end
+
+                local function zipFailMessage(err)
+                        if zipRefusal(err) then
+                                return "Your executor refuses to write .zip files - turn off Output as ZIP and extract as a folder"
+                        end
+
+                        return "Zip write failed: " .. tostring(err):sub(1, 120)
                 end
 
                 local ok, err = pcall(function()
@@ -410,6 +426,13 @@ local function runExtract()
                                         .. "_"
                                         .. sanitizeName(placeName, 40)
                                         .. ".zip"
+
+                                local probeOk, probeErr = writeZipNow()
+
+                                if not probeOk then
+                                        setStatus(zipFailMessage(probeErr))
+                                        return
+                                end
                         else
                                 if not isfolder("GameIntel") then
                                         makefolder("GameIntel")
@@ -894,7 +917,12 @@ local function runExtract()
                                         return
                                 end
 
-                                writeZipNow()
+                                local packOk, packErr = writeZipNow()
+
+                                if not packOk then
+                                        setStatus(zipFailMessage(packErr))
+                                        return
+                                end
                         end
 
                         setStatus("Done: "
@@ -923,12 +951,12 @@ local function runExtract()
                 elseif wasCancelled then
                         if asZip then
                                 if #zipEntries > 0 and zipPath then
-                                        local packOk, packErr = pcall(writeZipNow)
+                                        local packOk, packErr = writeZipNow()
 
                                         if packOk then
                                                 setStatus("Cancelled - zip written: " .. toFullPath(zipPath))
                                         else
-                                                setStatus("Cancelled - " .. tostring(packErr):sub(1, 100))
+                                                setStatus("Cancelled - " .. zipFailMessage(packErr))
                                         end
                                 else
                                         setStatus("Cancelled - nothing was written")
