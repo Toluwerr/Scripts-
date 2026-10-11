@@ -12,7 +12,10 @@ local LocalPlayer = Players.LocalPlayer
 
 local toggleKey = Enum.KeyCode.RightShift
 local supportedUrl = "https://loadstring.net/raw/TCiFuJc4kK"
-local title = "PRODUCT FAKER V3 : @vaehz on yt"
+local title = "PRODUCT FAKER V4 : @vaehz on yt"
+
+local internalInfo = false
+local grantWindowUntil = 0
 
 local settings = {
         autoFake = true,
@@ -21,6 +24,10 @@ local settings = {
         subSpoof = true,
         premiumSpoof = false,
         assetSpoof = false,
+        priceSpoof = false,
+        pollFakes = false,
+        autoBrute = false,
+        monitor = true,
 }
 
 local asciiCfg = {
@@ -442,7 +449,8 @@ local FakerButton = navButton("FakerButton", img.faker, 2)
 local LoggerButton = navButton("LoggerButton", img.logger, 3)
 local PassListButton = navButton("PassListButton", img.passes, 4)
 local SpoofButton = navButton("SpoofButton", img.copy, 5)
-local SupportedButton = navButton("SupportedButton", img.supported, 6)
+local BackdoorsButton = navButton("BackdoorsButton", img.join, 6)
+local SupportedButton = navButton("SupportedButton", img.supported, 7)
 
 local SectionsContainer = create("Frame", {
         Name = "SectionsContainer",
@@ -518,6 +526,7 @@ local ProductLogger = makeScreen("ProductLogger", true)
 local SupportedContainer = makeScreen("SupportedContainer", true)
 local GamepassList = makeScreen("GamepassList", true)
 local SpoofScreen = makeScreen("SpoofScreen", true)
+local BackdoorsScreen = makeScreen("BackdoorsScreen", true)
 
 -- v3 components
 
@@ -656,11 +665,11 @@ local function toggleRow(text, get, set)
         return row
 end
 
-local function pillButton(text, order, onClick)
+local function pillButton(text, order, onClick, wScale)
         local btn = create("TextButton", {
                 Name = text,
                 LayoutOrder = order,
-                Size = UDim2.new(0.5, -4, 1, -8),
+                Size = UDim2.new(wScale or 0.5, -4, 1, -8),
                 BackgroundColor3 = col.button,
                 BorderSizePixel = 0,
                 Text = text,
@@ -1033,6 +1042,7 @@ local tabs = {
         {name = "Logger", button = LoggerButton, screen = ProductLogger},
         {name = "Passes", button = PassListButton, screen = GamepassList},
         {name = "Spoof", button = SpoofButton, screen = SpoofScreen},
+        {name = "Backdoors", button = BackdoorsButton, screen = BackdoorsScreen},
         {name = "Supported", button = SupportedButton, screen = SupportedContainer},
 }
 
@@ -1454,9 +1464,11 @@ local function getInfo(kind, id)
         end
         local info = false
         if infoTypes[kind] and tonumber(id) then
+                internalInfo = true
                 local ok, res = pcall(function()
                         return MarketplaceService:GetProductInfo(tonumber(id), infoTypes[kind])
                 end)
+                internalInfo = false
                 if ok and type(res) == "table" then
                         info = res
                 end
@@ -1502,6 +1514,7 @@ local function safeFire(kind, id)
         if not f or not tonumber(id) then
                 return false
         end
+        grantWindowUntil = os.clock() + 2.5
         local ok, err = pcall(f, tonumber(id))
         if not ok then
                 warn("[Product Faker] " .. tostring(kind) .. " " .. tostring(id) .. ": " .. tostring(err))
@@ -1963,9 +1976,13 @@ local function logPrompt(kind, id)
                 end
                 local autoFired = false
                 if settings.autoFake and fire[kind] then
-                        autoFired = safeFire(kind, id)
-                        if autoFired then
-                                rememberFake(id, kind)
+                        if settings.autoBrute then
+                                autoFired = bruteFire(id) > 0
+                        else
+                                autoFired = safeFire(kind, id)
+                                if autoFired then
+                                        rememberFake(id, kind)
+                                end
                         end
                 end
                 pendingRows[key] = addLog({
@@ -2110,6 +2127,15 @@ if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "functi
                                 return true
                         elseif method == "IsPremium" and settings.premiumSpoof then
                                 return true
+                        elseif method == "GetProductInfo" and settings.priceSpoof and not internalInfo then
+                                local results = table.pack(spoofOld(self, ...))
+                                local info = results[1]
+                                if type(info) == "table" then
+                                        info.PriceInRobux = 0
+                                        info.Price = 0
+                                        info.IsForSaleOrIsPublicDomain = true
+                                end
+                                return table.unpack(results, 1, results.n)
                         end
                 end
                 return spoofOld(self, ...)
@@ -2118,6 +2144,443 @@ if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "functi
                 spoofOld = hookmetamethod(game, "__namecall", typeof(newcclosure) == "function" and newcclosure(spoofHandler) or spoofHandler)
         end)
         spoofHooked = ok
+end
+
+-- remote monitor + backdoor capture (v4)
+-- the strongest layer: instead of hoping the game's client relays our fake
+-- signals, we record every FireServer/InvokeServer the client makes, tag the
+-- ones fired right after a fake (the game's own grant remote), and can replay
+-- them any time - even on respawn, even from disk.
+
+local BD = {}
+BD.trafficLog = {}
+BD.trafficOrder = 0
+BD.dedupe = {}
+BD.macroList = {}
+BD.browserRows = {}
+BD.browserOrder = 0
+BD.spyHooked = false
+
+function BD.getPath(inst)
+        if typeof(inst) ~= "Instance" then
+                return tostring(inst)
+        end
+        local ok, path = pcall(function()
+                return inst:GetFullName()
+        end)
+        return ok and path or tostring(inst)
+end
+
+function BD.resolvePath(path)
+        if type(path) ~= "string" or path == "" then
+                return nil
+        end
+        local obj = game
+        for name in path:gmatch("[^.]+") do
+                local ok = pcall(function()
+                        obj = obj:FindFirstChild(name)
+                end)
+                if not ok or not obj then
+                        return nil
+                end
+        end
+        return obj
+end
+
+function BD.serializeArg(v, depth)
+        local t = typeof(v)
+        if v == nil then
+                return {__t = "nil"}
+        elseif t == "number" or t == "string" or t == "boolean" then
+                return v
+        elseif t == "Instance" then
+                return {__t = "inst", p = BD.getPath(v)}
+        elseif t == "Vector3" then
+                return {__t = "v3", x = v.X, y = v.Y, z = v.Z}
+        elseif t == "CFrame" then
+                return {__t = "cf", c = {v:GetComponents()}}
+        elseif t == "Color3" then
+                return {__t = "c3", r = v.R, g = v.G, b = v.B}
+        elseif t == "table" and (depth or 0) < 3 then
+                local out = {__t = "tbl", i = {}, k = {}}
+                for i, iv in ipairs(v) do
+                        out.i[i] = BD.serializeArg(iv, (depth or 0) + 1)
+                end
+                for k, kv in pairs(v) do
+                        if type(k) == "string" or type(k) == "number" then
+                                table.insert(out.k, {tostring(k), BD.serializeArg(kv, (depth or 0) + 1)})
+                        end
+                end
+                return out
+        end
+        return {__t = "str", s = tostring(v)}
+end
+
+function BD.deserializeArg(v)
+        if type(v) ~= "table" then
+                return v
+        end
+        local t = v.__t
+        if t == "nil" then
+                return nil
+        elseif t == "inst" then
+                return BD.resolvePath(v.p)
+        elseif t == "v3" then
+                return Vector3.new(v.x, v.y, v.z)
+        elseif t == "cf" then
+                return CFrame.new(table.unpack(v.c, 1, math.min(#v.c, 12)))
+        elseif t == "c3" then
+                return Color3.new(v.r, v.g, v.b)
+        elseif t == "tbl" then
+                local out = {}
+                for i, iv in ipairs(v.i or {}) do
+                        out[i] = BD.deserializeArg(iv)
+                end
+                for _, pair in ipairs(v.k or {}) do
+                        out[pair[1]] = BD.deserializeArg(pair[2])
+                end
+                return out
+        elseif t == "str" then
+                return v.s
+        end
+        return v
+end
+
+function BD.argPreview(v)
+        local t = typeof(v)
+        if v == nil then
+                return "nil"
+        elseif t == "string" then
+                local s = v:sub(1, 28)
+                return '"' .. s .. '"' .. (#v > 28 and "..." or "")
+        elseif t == "Instance" then
+                return v.Name
+        elseif t == "number" or t == "boolean" then
+                return tostring(v)
+        elseif t == "Vector3" then
+                return string.format("(%.1f,%.1f,%.1f)", v.X, v.Y, v.Z)
+        elseif t == "table" then
+                return "{}"
+        end
+        return t
+end
+
+function BD.replayCapture(entry)
+        task.spawn(function()
+                local ok = pcall(function()
+                        entry.rm[entry.method](entry.rm, table.unpack(entry.args, 1, entry.args.n))
+                end)
+                if ok then
+                        toast("Replayed " .. entry.path, col.green)
+                else
+                        toast("Replay failed", col.red)
+                end
+        end)
+end
+
+function BD.recordRemote(rm, method, ...)
+        if not settings.monitor or destroyed or typeof(rm) ~= "Instance" then
+                return
+        end
+        local path = BD.getPath(rm)
+        local now = os.clock()
+        local key = method .. "|" .. path
+        if BD.dedupe[key] and now - BD.dedupe[key] < 1.5 then
+                return
+        end
+        BD.dedupe[key] = now
+        local args = table.pack(...)
+        local isGrant = now < grantWindowUntil
+        BD.trafficOrder -= 1
+        local preview = {}
+        for i = 1, math.min(args.n, 4) do
+                table.insert(preview, BD.argPreview(args[i]))
+        end
+        local sub = method .. "  -  " .. os.date("%H:%M:%S")
+        if isGrant then
+                sub = sub .. "  -  GRANT CANDIDATE"
+        end
+        if #preview > 0 then
+                sub = sub .. "  -  " .. table.concat(preview, ", ")
+        end
+        local row = makeRow(BackdoorsScreen, {
+                title = path,
+                sub = sub,
+                order = BD.trafficOrder,
+                onClick = function()
+                        BD.replayCapture({rm = rm, method = method, args = args, path = path})
+                end,
+        }, img.copy, function()
+                if copy(path) then
+                        toast("Copied path")
+                end
+        end)
+        if isGrant then
+                local subLbl = row:FindFirstChild("Sub")
+                if subLbl then
+                        subLbl.TextColor3 = col.green
+                end
+        end
+        table.insert(BD.trafficLog, {row = row, rm = rm, method = method, args = args, path = path, grant = isGrant})
+        if #BD.trafficLog > 150 then
+                local old = table.remove(BD.trafficLog, 1)
+                if old.row and old.row.Parent then
+                        old.row:Destroy()
+                end
+        end
+end
+
+if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "function" then
+        local spyOld
+        local function spyHandler(self, ...)
+                local method = getnamecallmethod()
+                if method == "FireServer" or method == "InvokeServer" then
+                        pcall(BD.recordRemote, self, method, ...)
+                end
+                return spyOld(self, ...)
+        end
+        local okHook = pcall(function()
+                spyOld = hookmetamethod(game, "__namecall", typeof(newcclosure) == "function" and newcclosure(spyHandler) or spyHandler)
+        end)
+        BD.spyHooked = okHook
+end
+
+function BD.clearTraffic()
+        for _, entry in ipairs(BD.trafficLog) do
+                if entry.row and entry.row.Parent then
+                        entry.row:Destroy()
+                end
+        end
+        table.clear(BD.trafficLog)
+        table.clear(BD.dedupe)
+        toast("Cleared")
+end
+
+function BD.saveMacros()
+        local entries = {}
+        for _, entry in ipairs(BD.trafficLog) do
+                if entry.grant and entry.rm and entry.rm.Parent then
+                        local args = {}
+                        for i = 1, entry.args.n do
+                                args[i] = BD.serializeArg(entry.args[i], 0)
+                        end
+                        table.insert(entries, {path = entry.path, method = entry.method, args = args})
+                end
+        end
+        if #entries == 0 then
+                toast("No grant captures to save", col.yellow)
+                return
+        end
+        local payload = HttpService:JSONEncode({place = game.PlaceId, entries = entries})
+        local ok = false
+        if typeof(writefile) == "function" then
+                if typeof(makefolder) == "function" then
+                        pcall(makefolder, "productfaker")
+                end
+                ok = pcall(writefile, "productfaker/macro-" .. tostring(game.PlaceId) .. ".json", payload)
+        end
+        if ok then
+                toast("Saved " .. #entries .. " macro(s)", col.green)
+        else
+                toast("Save unavailable on this executor", col.red)
+        end
+end
+
+function BD.loadMacros(silent)
+        if typeof(readfile) ~= "function" then
+                if not silent then
+                        toast("Load unavailable on this executor", col.red)
+                end
+                return
+        end
+        local okBody, body = pcall(readfile, "productfaker/macro-" .. tostring(game.PlaceId) .. ".json")
+        if not okBody or type(body) ~= "string" or body == "" then
+                if not silent then
+                        toast("No saved macros for this game", col.yellow)
+                end
+                return
+        end
+        local okData, data = pcall(HttpService.JSONDecode, HttpService, body)
+        if not okData or type(data) ~= "table" or type(data.entries) ~= "table" then
+                if not silent then
+                        toast("Macro file corrupt", col.red)
+                end
+                return
+        end
+        local loaded = 0
+        for _, e in ipairs(data.entries) do
+                local rm = BD.resolvePath(e.path)
+                if rm and (rm:IsA("RemoteEvent") or rm:IsA("RemoteFunction")) then
+                        local args = {}
+                        for i, sv in ipairs(e.args or {}) do
+                                args[i] = BD.deserializeArg(sv)
+                        end
+                        table.insert(BD.macroList, {
+                                rm = rm,
+                                method = e.method or "FireServer",
+                                args = table.pack(table.unpack(args, 1, #args)),
+                                path = e.path,
+                        })
+                        loaded += 1
+                end
+        end
+        if loaded > 0 then
+                if not silent then
+                        toast("Loaded " .. loaded .. " macro(s)", col.green)
+                end
+        elseif not silent then
+                toast("Saved macros reference dead remotes", col.yellow)
+        end
+end
+
+function BD.replayAllMacros()
+        local n = 0
+        for _, m in ipairs(BD.macroList) do
+                if m.rm and m.rm.Parent then
+                        task.spawn(function()
+                                pcall(function()
+                                        m.rm[m.method](m.rm, table.unpack(m.args, 1, m.args.n))
+                                end)
+                        end)
+                        n += 1
+                end
+        end
+        for _, entry in ipairs(BD.trafficLog) do
+                if entry.grant and entry.rm and entry.rm.Parent then
+                        task.spawn(function()
+                                pcall(function()
+                                        entry.rm[entry.method](entry.rm, table.unpack(entry.args, 1, entry.args.n))
+                                end)
+                        end)
+                        n += 1
+                end
+        end
+        if n > 0 then
+                toast("Replaying " .. n .. " capture(s)", col.green)
+        else
+                toast("No captures to replay", col.yellow)
+        end
+end
+
+function BD.buildBrowser(filter)
+        for _, e in ipairs(BD.browserRows) do
+                if e.row and e.row.Parent then
+                        e.row:Destroy()
+                end
+        end
+        table.clear(BD.browserRows)
+        BD.browserOrder = 0
+        local filterLower = type(filter) == "string" and filter ~= "" and filter:lower() or nil
+        local found = 0
+        local function visit(container)
+                if found >= 400 or destroyed then
+                        return
+                end
+                local ok, kids = pcall(function()
+                        return container:GetChildren()
+                end)
+                if not ok then
+                        return
+                end
+                for _, child in ipairs(kids) do
+                        if found >= 400 then
+                                return
+                        end
+                        if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
+                                local path = BD.getPath(child)
+                                if not filterLower or path:lower():find(filterLower, 1, true) then
+                                        BD.browserOrder += 1
+                                        found += 1
+                                        local remote = child
+                                        local row = makeRow(BackdoorsScreen, {
+                                                title = remote.Name,
+                                                sub = remote.ClassName .. "  -  " .. path,
+                                                order = BD.browserOrder,
+                                                onClick = function()
+                                                        if copy(path) then
+                                                                toast("Copied path")
+                                                        end
+                                                end,
+                                        }, img.faker, function()
+                                                task.spawn(function()
+                                                        local id = extractId(InpBox.Text)
+                                                        local m = remote:IsA("RemoteFunction") and "InvokeServer" or "FireServer"
+                                                        local okFire = pcall(function()
+                                                                if id then
+                                                                        remote[m](remote, id)
+                                                                else
+                                                                        remote[m](remote)
+                                                                end
+                                                        end)
+                                                        if okFire then
+                                                                toast("Fired " .. remote.Name, col.green)
+                                                        else
+                                                                toast("Fire failed", col.red)
+                                                        end
+                                                end)
+                                        end)
+                                        table.insert(BD.browserRows, {row = row, remote = remote, path = path})
+                                end
+                        else
+                                visit(child)
+                        end
+                end
+        end
+        local skip = {CoreGui = true, CorePackages = true, Players = true, RobloxReplicatedStorage = true}
+        for _, svc in ipairs(game:GetChildren()) do
+                if not skip[svc.Name] then
+                        visit(svc)
+                end
+        end
+        return found
+end
+
+function BD.applyFilter(query)
+        local q = type(query) == "string" and query:lower() or ""
+        for _, e in ipairs(BD.browserRows) do
+                if e.row and e.row.Parent then
+                        e.row.Visible = q == "" or (e.path:lower():find(q, 1, true) ~= nil)
+                end
+        end
+        for _, entry in ipairs(BD.trafficLog) do
+                if entry.row and entry.row.Parent then
+                        entry.row.Visible = q == "" or (entry.path:lower():find(q, 1, true) ~= nil)
+                end
+        end
+end
+
+function BD.fireFiltered()
+        local targets = {}
+        for _, e in ipairs(BD.browserRows) do
+                if e.row and e.row.Parent and e.row.Visible then
+                        table.insert(targets, e.remote)
+                end
+        end
+        if #targets == 0 then
+                toast("No remotes match the filter", col.yellow)
+                return
+        end
+        local id = extractId(InpBox.Text)
+        local count = math.min(#targets, 60)
+        toast("Blasting " .. count .. " remote(s)...", col.yellow)
+        task.spawn(function()
+                for i, rm in ipairs(targets) do
+                        if i > 60 or destroyed then
+                                break
+                        end
+                        task.spawn(function()
+                                local m = rm:IsA("RemoteFunction") and "InvokeServer" or "FireServer"
+                                pcall(function()
+                                        if id then
+                                                rm[m](rm, id)
+                                        else
+                                                rm[m](rm)
+                                        end
+                                end)
+                        end)
+                        task.wait(0.05)
+                end
+        end)
 end
 
 bind(LocalPlayer.CharacterAdded, function()
@@ -2134,6 +2597,16 @@ bind(LocalPlayer.CharacterAdded, function()
                                 n += 1
                         end
                         task.wait(0.08)
+                end
+                for _, m in ipairs(BD.macroList) do
+                        if m.rm and m.rm.Parent then
+                                task.spawn(function()
+                                        pcall(function()
+                                                m.rm[m.method](m.rm, table.unpack(m.args, 1, m.args.n))
+                                        end)
+                                end)
+                                n += 1
+                        end
                 end
                 if n > 0 then
                         toast("Refired " .. n .. " fake(s) on respawn", col.green)
@@ -2198,6 +2671,27 @@ end, function(v)
 end)
 asciiRow.Parent = SpoofScreen
 
+local priceRow = toggleRow("Price spoof (GetProductInfo = 0)", function()
+        return settings.priceSpoof
+end, function(v)
+        settings.priceSpoof = v
+end)
+priceRow.Parent = SpoofScreen
+
+local autoBruteRow = toggleRow("Auto-Fake uses brute (all 5)", function()
+        return settings.autoBrute
+end, function(v)
+        settings.autoBrute = v
+end)
+autoBruteRow.Parent = SpoofScreen
+
+local pollRow = toggleRow("Poll-loop fakes every 3s", function()
+        return settings.pollFakes
+end, function(v)
+        settings.pollFakes = v
+end)
+pollRow.Parent = SpoofScreen
+
 label({
         Name = "SpoofInfo",
         Text = "These hooks lie to client-side ownership checks. Games that verify purchases on the server are unaffected. 'Faked' only spoofs IDs you've already faked, 'All' claims every gamepass.",
@@ -2208,6 +2702,78 @@ label({
         Size = UDim2.new(1, -8, 0, 44),
         TextWrapped = true,
         Parent = SpoofScreen,
+})
+
+-- backdoors tab
+
+local bdEmpty = emptyLabels[BackdoorsScreen]
+bdEmpty.Text = BD.spyHooked and "Monitor armed - live traffic + every game remote below. Green = fired right after a fake (grant candidate)."
+        or "Monitor hook UNAVAILABLE - browser + manual firing still work"
+bdEmpty.TextColor3 = BD.spyHooked and col.dim or col.red
+
+local bdHeader = listHeader(BackdoorsScreen)
+local monPill = pillButton("MON", 1, function()
+        settings.monitor = not settings.monitor
+        monPill.Text = settings.monitor and "MON ON" or "MON OFF"
+        monPill.TextColor3 = settings.monitor and col.green or col.dim
+end, 0.155)
+monPill.Text = settings.monitor and "MON ON" or "MON OFF"
+monPill.TextColor3 = settings.monitor and col.green or col.dim
+monPill.Parent = bdHeader
+local clrPill = pillButton("CLR", 2, BD.clearTraffic, 0.155)
+clrPill.Parent = bdHeader
+local savePill = pillButton("SAVE", 3, BD.saveMacros, 0.155)
+savePill.Parent = bdHeader
+local loadPill = pillButton("LOAD", 4, function()
+        BD.loadMacros(false)
+end, 0.155)
+loadPill.Parent = bdHeader
+local rplayPill = pillButton("RPLAY", 5, BD.replayAllMacros, 0.155)
+rplayPill.Parent = bdHeader
+local blastPill = pillButton("BLAST", 6, BD.fireFiltered, 0.155)
+blastPill.TextColor3 = col.red
+blastPill.Parent = bdHeader
+
+local filterFrame = create("Frame", {
+        Name = "Filter",
+        LayoutOrder = -1e7,
+        Size = UDim2.new(1, -8, 0, 30),
+        BackgroundColor3 = col.panel,
+        BorderSizePixel = 0,
+        Parent = BackdoorsScreen,
+}, {corner(7), stroke()})
+
+local filterBox = create("TextBox", {
+        Name = "Query",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromScale(0.94, 0.7),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        FontFace = fontInput,
+        PlaceholderText = "filter: buy / give / pass / item ...",
+        PlaceholderColor3 = col.dim,
+        Text = "",
+        TextColor3 = col.white,
+        TextScaled = true,
+        ClearTextOnFocus = false,
+        Parent = filterFrame,
+})
+filterBox.FocusLost:Connect(function()
+        BD.applyFilter(filterBox.Text)
+end)
+
+label({
+        Name = "BrowserLbl",
+        Text = "ALL GAME REMOTES  -  click row = copy path, bolt = fire with ID from Faker input",
+        LayoutOrder = 0,
+        TextScaled = false,
+        TextSize = 12,
+        FontFace = fontBold,
+        TextColor3 = col.dim,
+        Size = UDim2.new(1, -8, 0, 16),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = BackdoorsScreen,
 })
 
 -- supported games
@@ -2370,3 +2936,22 @@ env.__ProductFaker = UI
 open()
 scanProducts()
 loadSupported()
+
+task.delay(5, function()
+        if destroyed then
+                return
+        end
+        BD.loadMacros(true)
+        task.spawn(BD.buildBrowser, filterBox.Text)
+end)
+
+task.spawn(function()
+        while not destroyed do
+                task.wait(3)
+                if settings.pollFakes and not destroyed then
+                        for idStr, kind in pairs(fakedIds) do
+                                safeFire(kind, tonumber(idStr))
+                        end
+                end
+        end
+end)
