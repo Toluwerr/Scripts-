@@ -141,7 +141,7 @@ local function readCacheOrder()
                         local names = {}
                         for _, f in ipairs(files) do
                                 local name = tostring(f):gsub("^" .. CACHE_FOLDER .. "/", "")
-                                if name:sub(-4) == ".mp3" then
+                                if name:sub(-5) == ".flac" or name:sub(-4) == ".mp3" or name:sub(-4) == ".ogg" then
                                         table.insert(names, name)
                                 end
                         end
@@ -167,17 +167,27 @@ local function trimCache(names)
         return names
 end
 
+local CACHE_EXTS = { "flac", "mp3", "ogg" }
+
 local function evictCache(trackId)
         if not FS.delFile then return end
-        local name = tostring(trackId) .. ".mp3"
-        pcall(FS.delFile, CACHE_FOLDER .. "/" .. name)
-        local names = {}
+        for _, ext in ipairs(CACHE_EXTS) do
+                pcall(FS.delFile, CACHE_FOLDER .. "/" .. tostring(trackId) .. "." .. ext)
+        end
+        local victim = {}
         for _, n in ipairs(readCacheOrder()) do
-                if n ~= name then
-                        table.insert(names, n)
+                local keep = true
+                for _, ext in ipairs(CACHE_EXTS) do
+                        if n == tostring(trackId) .. "." .. ext then
+                                keep = false
+                                break
+                        end
+                end
+                if keep then
+                        table.insert(victim, n)
                 end
         end
-        writeCacheOrder(names)
+        writeCacheOrder(victim)
 end
 
 local ART_CACHE_LIMIT = 40
@@ -275,29 +285,48 @@ end
 
 local refreshCacheStatus = function() end
 
+local function audioFormatOf(body)
+        if type(body) ~= "string" or #body < 8 then return nil end
+        if body:sub(1, 4) == "fLaC" then return "flac" end
+        if body:sub(1, 4) == "OggS" then return "ogg" end
+        if body:sub(1, 3) == "ID3" or body:byte(1) == 255 then return "mp3" end
+        return nil
+end
+
 local function downloadToCache(tr, url)
         if not FS.write or not customAsset then
                 return nil, "no file system"
         end
         ensureCacheFolder()
-        local name = tostring(tr.id) .. ".mp3"
-        local path = CACHE_FOLDER .. "/" .. name
-        if FS.isFile and FS.isFile(path) then
-                local okC, cached = pcall(customAsset, path)
-                if okC and type(cached) == "string" and #cached > 0 then
-                        return cached
+        for _, ext in ipairs(CACHE_EXTS) do
+                local cpath = CACHE_FOLDER .. "/" .. tostring(tr.id) .. "." .. ext
+                if FS.isFile and FS.isFile(cpath) then
+                        local okC, cached = pcall(customAsset, cpath)
+                        if okC and type(cached) == "string" and #cached > 0 then
+                                return cached
+                        end
                 end
         end
         local body, code = httpGet(url)
         if code ~= 200 or type(body) ~= "string" or #body == 0 then
                 return nil, "download HTTP " .. tostring(code)
         end
-        if #body < 65536 then
+        local ext = audioFormatOf(body)
+        if not ext then
+                return nil, "response is not an audio stream"
+        end
+        if #body > 83886080 then
+                return nil, "file too large to cache"
+        end
+        if ext == "flac" then
+                if #body < 4096 then
+                        return nil, "download too small"
+                end
+        elseif #body < 65536 then
                 return nil, "download too small"
         end
-        if body:sub(1, 3) ~= "ID3" and body:byte(1) ~= 255 then
-                return nil, "response is not an MP3"
-        end
+        local name = tostring(tr.id) .. "." .. ext
+        local path = CACHE_FOLDER .. "/" .. name
         local okW, errW = pcall(FS.write, path, body)
         if not okW then
                 return nil, "writefile: " .. tostring(errW)
@@ -506,6 +535,7 @@ local state = {
         loopMode = "Off",
         shuffle = false,
         scEnabled = true,
+        monoEnabled = true,
         dzrEnabled = true,
         dzrBase = DEFAULT_DZR_BASE,
         dzrFormat = "MP3_320",
@@ -629,6 +659,13 @@ end
 
 local function buildSources(tr)
         local list = {}
+        if state.monoEnabled then
+                table.insert(list, {
+                        label = "Monochrome",
+                        kind = "mono",
+                        url = TRACKS_BASE .. "/track/" .. tostring(tr.id),
+                })
+        end
         if state.scEnabled then
                 table.insert(list, { label = "SoundCloud", kind = "sc" })
         end
@@ -646,7 +683,7 @@ local function runResolver(src, tr)
         if src.kind == "sc" then
                 return scPickTrack(tr)
         end
-        return src.url, "Deezer"
+        return src.url, src.label
 end
 
 local function waitForSound(gen, budget)
@@ -679,7 +716,7 @@ local function loadTrack(tr, gen)
                                         sound:Stop()
                                         sound.SoundId = asset
                                         sound:Play()
-                                        if waitForSound(gen, 15) then
+                                        if waitForSound(gen, 25) then
                                                 onLoaded(info or src.label)
                                                 return
                                         end
@@ -919,6 +956,7 @@ local function applyConfig()
         state.loopMode = loopVal
         state.shuffle = (ui.shuffle and ui.shuffle.Value) and true or false
         state.scEnabled = not (ui.scEnabled and ui.scEnabled.Value == false)
+        state.monoEnabled = not (ui.monoEnabled and ui.monoEnabled.Value == false)
         state.dzrEnabled = not (ui.dzrEnabled and ui.dzrEnabled.Value == false)
         local fmt = ui.dzrFormat and ui.dzrFormat.Value
         if fmt ~= "MP3_320" and fmt ~= "MP3_128" then
@@ -1122,6 +1160,16 @@ ui.dzrFormat = sourcesSection:Dropdown({
         Flag = "DzrFormat",
         Callback = function(v)
                 state.dzrFormat = tostring(v)
+                scheduleSave()
+        end,
+})
+
+ui.monoEnabled = sourcesSection:Toggle({
+        Text = "Use Monochrome (lossless)",
+        Value = true,
+        Flag = "MonoEnabled",
+        Callback = function(v)
+                state.monoEnabled = v and true or false
                 scheduleSave()
         end,
 })
