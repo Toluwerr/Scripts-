@@ -41,7 +41,6 @@ if not httpRequest then
 end
 
 local TRACKS_BASE = "https://tracks.monochrome.st"
-local DEFAULT_DZR_BASE = "https://dzr.tabs-vs-spaces.wtf"
 local SC_HOME = "https://soundcloud.com/"
 local SC_API = "https://api-v2.soundcloud.com"
 local SC_FALLBACK_ID = "vI5BsvpTIlavDLl7RDbbcFAPg8kls8Bg"
@@ -104,7 +103,16 @@ local function httpGet(url)
                 return nil, 0
         end
         local code = tonumber(res.StatusCode or res.Status or 0) or 0
-        return tostring(res.Body or ""), code
+        local clen = nil
+        if type(res.Headers) == "table" then
+                for k, v in pairs(res.Headers) do
+                        if tostring(k):lower() == "content-length" then
+                                clen = tonumber(v) or nil
+                                break
+                        end
+                end
+        end
+        return tostring(res.Body or ""), code, clen
 end
 
 local function ensureCacheFolder()
@@ -307,9 +315,12 @@ local function downloadToCache(tr, url)
                         end
                 end
         end
-        local body, code = httpGet(url)
+        local body, code, clen = httpGet(url)
         if code ~= 200 or type(body) ~= "string" or #body == 0 then
                 return nil, "download HTTP " .. tostring(code)
+        end
+        if clen and clen > 0 and #body < clen * 0.98 then
+                return nil, "truncated download"
         end
         local ext = audioFormatOf(body)
         if not ext then
@@ -384,34 +395,261 @@ local function refreshScId()
         return nil
 end
 
-local function scSearchUrl(query)
-        return SC_API .. "/search/tracks?q=" .. urlEncode(query) .. "&limit=50&client_id=" .. scClientId
+local function scSearchUrl(query, offset)
+        return SC_API .. "/search/tracks?q=" .. urlEncode(query)
+                .. "&limit=50&offset=" .. tostring(offset or 0)
+                .. "&client_id=" .. scClientId
 end
 
-local function scBestProgressive(data, targetMs)
-        local best, bestDiff = nil, math.huge
+local SC_NOISE_WORDS = {
+        official = true, video = true, audio = true, lyric = true, lyrics = true,
+        visualizer = true, hq = true, hd = true, feat = true, ft = true,
+        prod = true, free = true, download = true, topic = true, w = true,
+        full = true, by = true,
+}
+
+local SC_VARIANT_TAGS = {
+        "remix", "sped", "slowed", "nightcore", "karaoke", "cover",
+        "instrumental", "acapella", "extended", "bootleg", "mashup",
+        "flip", "edit", "reverb", "8d", "16d", "acoustic", "tribute",
+        "version", "mix", "live", "remodel", "rework", "refix", "retouch",
+        "rethink", "remake", "rmx", "dub", "vip", "radio",
+}
+
+local SC_PAREN_ALLOW = { "feat", "ft.", "with", "from", "prod", "original" }
+
+local function scParenPenalty(title, targetRaw)
+        local raw = tostring(title or ""):lower()
+        local target = tostring(targetRaw or ""):lower()
+        local penalty = 0
+        local function scan(content)
+                if content == "" then return end
+                for _, mk in ipairs(SC_PAREN_ALLOW) do
+                        if content:find(mk, 1, true) then return end
+                end
+                for w in content:gmatch("%w+") do
+                        if not tonumber(w) and not SC_NOISE_WORDS[w] and not target:find(w, 1, true) then
+                                penalty = penalty + 5
+                        end
+                end
+        end
+        for content in raw:gmatch("%(([^()]*)%)") do
+                scan(content)
+        end
+        for content in raw:gmatch("%[([^%[%]]*)%]") do
+                scan(content)
+        end
+        return math.min(15, penalty)
+end
+
+local function scNormWords(s)
+        s = tostring(s or ""):lower()
+        s = s:gsub("[^%w%s]", " ")
+        s = s:gsub("%s+", " ")
+        s = s:gsub("^%s+", ""):gsub("%s+$", "")
+        if s == "" then return " " end
+        return " " .. s .. " "
+end
+
+local function scNormTitle(s)
+        s = tostring(s or ""):lower()
+        s = s:gsub("%b()", " "):gsub("%b[]", " ")
+        s = s:gsub("[^%w%s]", " ")
+        s = s:gsub("%s+", " ")
+        s = s:gsub("^%s+", ""):gsub("%s+$", "")
+        if s == "" then return " " end
+        return " " .. s .. " "
+end
+
+local function scTokenSet(padded)
+        local set, list = {}, {}
+        for w in padded:gmatch("%S+") do
+                if not SC_NOISE_WORDS[w] and not set[w] then
+                        set[w] = true
+                        table.insert(list, w)
+                end
+        end
+        return set, list
+end
+
+local function scJaccard(aSet, aList, bSet, bList)
+        if #aList == 0 or #bList == 0 then return 0 end
+        local inter = 0
+        for _, w in ipairs(aList) do
+                if bSet[w] then inter = inter + 1 end
+        end
+        return inter / (#aList + #bList - inter)
+end
+
+local function scArtistScore(candText, targetArtists)
+        if #targetArtists == 0 then return 60 end
+        local hit = 0
+        for _, toks in ipairs(targetArtists) do
+                local found = false
+                for _, w in ipairs(toks) do
+                        if candText:find(" " .. w .. " ", 1, true) or (#w >= 5 and candText:find(w, 1, true)) then
+                                found = true
+                                break
+                        end
+                end
+                if found then hit = hit + 1 end
+        end
+        return (hit / #targetArtists) * 100
+end
+
+local function scBestProgressive(data, tr)
         local collection = type(data.collection) == "table" and data.collection or {}
+        local targetTitle = scNormTitle(tr.title)
+        local targetTags = scNormWords(tr.title)
+        local targetRaw = tostring(tr.title or ""):lower()
+        local tSet, tList = scTokenSet(targetTitle)
+        local targetArtists = {}
+        for name in tostring(tr.artist or ""):gmatch("[^,]+") do
+                local toks = {}
+                for w in scNormWords(name):gmatch("%S+") do
+                        if #w >= 3 then table.insert(toks, w) end
+                end
+                if #toks > 0 then table.insert(targetArtists, toks) end
+        end
+        local artistWords = {}
+        for _, toks in ipairs(targetArtists) do
+                for _, w in ipairs(toks) do
+                        artistWords[w] = true
+                end
+        end
+        local targetMs = (tonumber(tr.duration) or 0) * 1000
+        local ranked = {}
         for _, item in ipairs(collection) do
-                if type(item) == "table" and item.kind == "track" and tostring(item.policy or "") ~= "BLOCK" then
-                        local dur = tonumber(item.duration) or 0
-                        local diff = math.abs(dur - targetMs)
-                        if diff <= 15000 and diff < bestDiff then
+                if type(item) == "table" and item.kind == "track" then
+                        local policy = tostring(item.policy or "")
+                        if policy ~= "BLOCK" and policy ~= "SNIP" then
+                                local hasMpeg = false
                                 local media = type(item.media) == "table" and item.media or {}
                                 local transcodings = type(media.transcodings) == "table" and media.transcodings or {}
                                 for _, tc in ipairs(transcodings) do
-                                        if type(tc) == "table" and type(tc.url) == "string" then
+                                        if type(tc) == "table" then
                                                 local fmt = type(tc.format) == "table" and tc.format or {}
-                                                if fmt.mime_type == "audio/mpeg" and tc.url:find("/stream/progressive", 1, true) then
-                                                        best = tc.url
-                                                        bestDiff = diff
+                                                if fmt.mime_type == "audio/mpeg" then
+                                                        hasMpeg = true
                                                         break
+                                                end
+                                        end
+                                end
+                                if hasMpeg then
+                                        local candTags = scNormWords(item.title)
+                                        local candTitle = scNormTitle(item.title)
+                                        local cSet, cList = scTokenSet(candTitle)
+                                        local cListF, cSetF = {}, {}
+                                        for _, w in ipairs(cList) do
+                                                if not artistWords[w] then
+                                                        table.insert(cListF, w)
+                                                        cSetF[w] = true
+                                                end
+                                        end
+                                        local titleSim = scJaccard(tSet, tList, cSetF, cListF) * 100
+                                        local userObj = type(item.user) == "table" and item.user or {}
+                                        local candArtistText = candTags .. " "
+                                                .. scNormWords(userObj.username) .. " "
+                                                .. scNormWords(userObj.full_name)
+                                        local artistScore = scArtistScore(candArtistText, targetArtists)
+                                        local dur = tonumber(item.duration) or 0
+                                        local diff = math.abs(dur - targetMs)
+                                        if diff <= 25000 then
+                                                local durScore = math.max(0, 100 - (diff / 1000) * 8)
+                                                local penalty = 0
+                                                local variantTags = 0
+                                                for _, tag in ipairs(SC_VARIANT_TAGS) do
+                                                        local inT = targetTags:find(" " .. tag .. " ", 1, true) ~= nil
+                                                        local inC = candTags:find(" " .. tag .. " ", 1, true) ~= nil
+                                                        if inC and not inT then
+                                                                variantTags = variantTags + 1
+                                                        elseif inT and not inC then
+                                                                penalty = penalty + 12
+                                                        end
+                                                end
+                                                penalty = penalty + 30 * variantTags
+                                                local extra = 0
+                                                for _, w in ipairs(cListF) do
+                                                        if not tSet[w] then
+                                                                extra = extra + 1
+                                                        end
+                                                end
+                                                penalty = penalty + math.min(24, 8 * extra)
+                                                penalty = penalty + scParenPenalty(item.title, targetRaw)
+                                                local score = titleSim * 0.45 + artistScore * 0.25 + durScore * 0.30 - penalty
+                                                if score >= 35 then
+                                                        table.insert(ranked, { item = item, diff = diff, score = score })
                                                 end
                                         end
                                 end
                         end
                 end
         end
-        return best, bestDiff
+        table.sort(ranked, function(a, b)
+                return a.score > b.score
+        end)
+        while #ranked > 5 do
+                table.remove(ranked)
+        end
+        return ranked
+end
+
+local function scDirectMp3(item)
+        local media = type(item.media) == "table" and item.media or {}
+        local transcodings = type(media.transcodings) == "table" and media.transcodings or {}
+        local tried = {}
+        for _, tc in ipairs(transcodings) do
+                if type(tc) == "table" and type(tc.url) == "string" and not tried[tc.url] then
+                        tried[tc.url] = true
+                        local fmt = type(tc.format) == "table" and tc.format or {}
+                        if fmt.mime_type == "audio/mpeg" then
+                                local signed, code = httpGet(tc.url .. "?client_id=" .. scClientId)
+                                if code == 200 and type(signed) == "string" then
+                                        local okS, sdata = pcall(function()
+                                                return HttpService:JSONDecode(signed)
+                                        end)
+                                        if okS and type(sdata) == "table" and type(sdata.url) == "string"
+                                                and sdata.url ~= "" and not sdata.url:find(".m3u8", 1, true) then
+                                                return sdata.url
+                                        end
+                                end
+                        end
+                end
+        end
+        return nil
+end
+
+local function scFetchRanked(query, offset, tr, ranked, seenIds)
+        local body, code = httpGet(scSearchUrl(query, offset))
+        if code == 401 or code == 403 then
+                if scRefreshed then
+                        return false, "SoundCloud rejected the client id"
+                end
+                if not refreshScId() then
+                        return false, "SoundCloud rejected the client id"
+                end
+                body, code = httpGet(scSearchUrl(query, offset))
+        end
+        if code ~= 200 or type(body) ~= "string" then
+                return false, "SoundCloud HTTP " .. tostring(code)
+        end
+        local okD, data = pcall(function()
+                return HttpService:JSONDecode(body)
+        end)
+        if not okD or type(data) ~= "table" then
+                return false, "SoundCloud sent an unreadable response"
+        end
+        for _, entry in ipairs(scBestProgressive(data, tr)) do
+                local id = tostring((type(entry.item) == "table" and entry.item.id) or "")
+                if id == "" or not seenIds[id] then
+                        seenIds[id] = true
+                        table.insert(ranked, entry)
+                end
+        end
+        table.sort(ranked, function(a, b)
+                return a.score > b.score
+        end)
+        return true
 end
 
 local function scPickTrack(tr)
@@ -421,42 +659,23 @@ local function scPickTrack(tr)
                 query = query .. " " .. tr.artist
         end
         for attempt = 1, 2 do
-                local body, code = httpGet(scSearchUrl(query))
-                if code == 401 or code == 403 then
-                        if scRefreshed then
-                                return nil, "SoundCloud rejected the client id"
-                        end
-                        if not refreshScId() then
-                                return nil, "SoundCloud rejected the client id"
-                        end
-                        body, code = httpGet(scSearchUrl(query))
+                local ranked, seenIds = {}, {}
+                local ok, err = scFetchRanked(query, 0, tr, ranked, seenIds)
+                if not ok then
+                        return nil, err
                 end
-                if code ~= 200 or type(body) ~= "string" then
-                        return nil, "SoundCloud HTTP " .. tostring(code)
+                if #ranked > 0 and ranked[1].score < 70 then
+                        scFetchRanked(query, 50, tr, ranked, seenIds)
                 end
-                local okD, data = pcall(function()
-                        return HttpService:JSONDecode(body)
-                end)
-                if not okD or type(data) ~= "table" then
-                        return nil, "SoundCloud sent an unreadable response"
-                end
-                local turl, diff = scBestProgressive(data, (tonumber(tr.duration) or 0) * 1000)
-                if turl then
-                        local signed, code2 = httpGet(turl .. "?client_id=" .. scClientId)
-                        if code2 ~= 200 or type(signed) ~= "string" then
-                                return nil, "stream URL HTTP " .. tostring(code2)
+                for _, entry in ipairs(ranked) do
+                        local mp3 = scDirectMp3(entry.item)
+                        if mp3 then
+                                local off = math.floor(entry.diff / 1000 + 0.5)
+                                if off <= 0 then
+                                        return mp3, "SoundCloud (exact length)"
+                                end
+                                return mp3, "SoundCloud (off by " .. off .. "s)"
                         end
-                        local okS, sdata = pcall(function()
-                                return HttpService:JSONDecode(signed)
-                        end)
-                        if not okS or type(sdata) ~= "table" or type(sdata.url) ~= "string" then
-                                return nil, "stream URL unreadable"
-                        end
-                        local off = math.floor(diff / 1000 + 0.5)
-                        if off <= 0 then
-                                return sdata.url, "SoundCloud (exact length)"
-                        end
-                        return sdata.url, "SoundCloud (off by " .. off .. "s)"
                 end
                 if attempt == 1 and hasArtist then
                         query = tostring(tr.title or "")
@@ -536,9 +755,7 @@ local state = {
         shuffle = false,
         scEnabled = true,
         monoEnabled = true,
-        dzrEnabled = true,
-        dzrBase = DEFAULT_DZR_BASE,
-        dzrFormat = "MP3_320",
+        monoBroken = true,
         gen = 0,
         consecutiveFails = 0,
         lastSeekInput = 0,
@@ -546,6 +763,39 @@ local state = {
         artGen = 0,
         sourceLabel = "-",
 }
+
+local SETTINGS_FILE = CACHE_FOLDER .. "/settings.json"
+
+local function loadSettings()
+        if FS.read then
+                local ok, body = pcall(FS.read, SETTINGS_FILE)
+                if ok and type(body) == "string" and #body > 2 then
+                        local okD, data = pcall(function()
+                                return HttpService:JSONDecode(body)
+                        end)
+                        if okD and type(data) == "table" and data.monoBroken ~= nil then
+                                state.monoBroken = data.monoBroken and true or false
+                        end
+                end
+        end
+end
+
+local function saveSettings()
+        if FS.write then
+                ensureCacheFolder()
+                pcall(FS.write, SETTINGS_FILE, HttpService:JSONEncode({ monoBroken = state.monoBroken }))
+        end
+end
+
+local function updateLosslessStatus()
+        if ui.losslessStatus then
+                ui.losslessStatus:Set(state.monoBroken
+                        and "Lossless: disabled (Roblox cannot decode FLAC)"
+                        or "Lossless: enabled - trying FLAC first")
+        end
+end
+
+loadSettings()
 
 local sound = Instance.new("Sound")
 sound.Name = "MonochromePlayer"
@@ -659,7 +909,7 @@ end
 
 local function buildSources(tr)
         local list = {}
-        if state.monoEnabled then
+        if state.monoEnabled and not state.monoBroken then
                 table.insert(list, {
                         label = "Monochrome",
                         kind = "mono",
@@ -668,13 +918,6 @@ local function buildSources(tr)
         end
         if state.scEnabled then
                 table.insert(list, { label = "SoundCloud", kind = "sc" })
-        end
-        if state.dzrEnabled and tr.isrc and state.dzrBase ~= "" then
-                table.insert(list, {
-                        label = "Deezer",
-                        kind = "dzr",
-                        url = state.dzrBase .. "/stream/?isrc=" .. urlEncode(tr.isrc) .. "&format=" .. urlEncode(state.dzrFormat),
-                })
         end
         return list
 end
@@ -716,7 +959,7 @@ local function loadTrack(tr, gen)
                                         sound:Stop()
                                         sound.SoundId = asset
                                         sound:Play()
-                                        if waitForSound(gen, 25) then
+                                        if waitForSound(gen, src.kind == "mono" and 8 or 15) then
                                                 onLoaded(info or src.label)
                                                 return
                                         end
@@ -724,6 +967,12 @@ local function loadTrack(tr, gen)
                                         sound:Stop()
                                         evictCache(tr.id)
                                         reason = src.label .. " audio never loaded"
+                                        if src.kind == "mono" and not state.monoBroken then
+                                                state.monoBroken = true
+                                                saveSettings()
+                                                updateLosslessStatus()
+                                                notify("Lossless disabled", "Roblox cannot decode FLAC - using MP3 sources.")
+                                        end
                                 else
                                         reason = src.label .. ": " .. tostring(err)
                                 end
@@ -923,12 +1172,13 @@ local function runSearch(query)
                         return
                 end
                 state.results = {}
+                local seenKeys = {}
                 for _, raw in ipairs(data.tracks) do
                         if type(raw) == "table" and raw.trackId ~= nil then
                                 local dur = tonumber(raw.duration) or 0
                                 if dur > 1000 then dur = math.floor(dur / 1000) end
                                 local names = type(raw.artistNames) == "table" and raw.artistNames or {}
-                                table.insert(state.results, {
+                                local t = {
                                         id = tostring(raw.trackId),
                                         title = tostring(raw.title or "Unknown Title"),
                                         artist = (#names > 0 and table.concat(names, ", ")) or "Unknown Artist",
@@ -937,7 +1187,18 @@ local function runSearch(query)
                                         artwork = (raw.artwork ~= nil and raw.artwork ~= "") and tostring(raw.artwork) or "",
                                         explicit = raw.explicit and true or false,
                                         playable = (raw.playable == false) and false or true,
-                                })
+                                }
+                                local key = string.lower(t.title) .. "\t" .. string.lower(t.artist)
+                                local prev = seenKeys[key]
+                                if prev == nil then
+                                        seenKeys[key] = t
+                                        table.insert(state.results, t)
+                                elseif (t.playable and not prev.playable)
+                                        or (t.playable == prev.playable and t.isrc and not prev.isrc) then
+                                        for k, v in pairs(t) do
+                                                prev[k] = v
+                                        end
+                                end
                         end
                 end
                 renderResults()
@@ -957,23 +1218,6 @@ local function applyConfig()
         state.shuffle = (ui.shuffle and ui.shuffle.Value) and true or false
         state.scEnabled = not (ui.scEnabled and ui.scEnabled.Value == false)
         state.monoEnabled = not (ui.monoEnabled and ui.monoEnabled.Value == false)
-        state.dzrEnabled = not (ui.dzrEnabled and ui.dzrEnabled.Value == false)
-        local fmt = ui.dzrFormat and ui.dzrFormat.Value
-        if fmt ~= "MP3_320" and fmt ~= "MP3_128" then
-                fmt = "MP3_320"
-        end
-        state.dzrFormat = fmt
-        if ui.dzrBase then
-                local base = tostring(ui.dzrBase.Text or "")
-                base = base:gsub("^%s+", ""):gsub("%s+$", ""):gsub("/+$", "")
-                if base:find("://", 1, true) then
-                        state.dzrBase = base
-                elseif base == "" then
-                        state.dzrBase = ""
-                else
-                        state.dzrBase = DEFAULT_DZR_BASE
-                end
-        end
         local vol = 50
         if ui.volume and type(ui.volume.Value) == "number" then
                 vol = ui.volume.Value
@@ -1153,17 +1397,6 @@ ui.queueStatus = queueSection:Paragraph({
 local settingsTab = Window:Tab("Settings", "settings")
 local sourcesSection = settingsTab:Section("Playback Sources")
 
-ui.dzrFormat = sourcesSection:Dropdown({
-        Text = "Deezer format",
-        Options = { "MP3_320", "MP3_128" },
-        Value = "MP3_320",
-        Flag = "DzrFormat",
-        Callback = function(v)
-                state.dzrFormat = tostring(v)
-                scheduleSave()
-        end,
-})
-
 ui.monoEnabled = sourcesSection:Toggle({
         Text = "Use Monochrome (lossless)",
         Value = true,
@@ -1184,38 +1417,25 @@ ui.scEnabled = sourcesSection:Toggle({
         end,
 })
 
-ui.dzrEnabled = sourcesSection:Toggle({
-        Text = "Use Deezer ISRC",
-        Value = true,
-        Flag = "DzrEnabled",
-        Callback = function(v)
-                state.dzrEnabled = v and true or false
-                scheduleSave()
-        end,
+ui.losslessStatus = sourcesSection:Paragraph({
+        Text = "Lossless: -",
 })
 
-ui.dzrBase = sourcesSection:Input({
-        Text = "Deezer base",
-        Value = DEFAULT_DZR_BASE,
-        Placeholder = "https://...",
-        Flag = "DzrBase",
-        Callback = function(text)
-                local base = tostring(text or "")
-                base = base:gsub("^%s+", ""):gsub("%s+$", ""):gsub("/+$", "")
-                if base == "" then
-                        state.dzrBase = ""
-                elseif base:find("://", 1, true) then
-                        state.dzrBase = base
-                else
-                        state.dzrBase = DEFAULT_DZR_BASE
-                end
-                scheduleSave()
+sourcesSection:Button({
+        Text = "Retry lossless (FLAC)",
+        Callback = function()
+                state.monoBroken = false
+                saveSettings()
+                updateLosslessStatus()
+                notify("Lossless retry", "The next track will try the FLAC source again.")
         end,
 })
 
 sourcesSection:Paragraph({
-        Text = "SoundCloud matches a full-length upload by duration. Deezer streams the exact ISRC. Sources are tried in order until one loads.",
+        Text = "Roblox only decodes MP3/OGG, so lossless FLAC is skipped until it works. SoundCloud matches by title, artist, version tags and duration.",
 })
+
+updateLosslessStatus()
 
 local cacheSection = settingsTab:Section("Cache")
 
