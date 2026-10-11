@@ -514,6 +514,7 @@ local state = {
         lastSeekInput = 0,
         searchGen = 0,
         artGen = 0,
+        sourceLabel = "-",
 }
 
 local sound = Instance.new("Sound")
@@ -540,17 +541,28 @@ local function setSearchStatus(text)
         end
 end
 
-local function updateNowPlaying(tr, sourceLabel)
-        if ui.titlePara then ui.titlePara:Set(tr and tr.title or "Nothing playing") end
-        if ui.artistPara then ui.artistPara:Set(tr and tr.artist or "-") end
-        if ui.sourcePara then ui.sourcePara:Set("Source: " .. tostring(sourceLabel or "-")) end
+local function updateMetaLine()
         if ui.art then
-                local hasArt = (tr ~= nil and tr.artwork ~= nil and tr.artwork ~= "")
-                ui.art:SetVisible(hasArt)
+                ui.art:SetMeta("Source: " .. tostring(state.sourceLabel or "-")
+                        .. " - " .. fmtTime(sound.TimePosition) .. " / " .. fmtTime(sound.TimeLength))
+        end
+end
+
+local function updateNowPlaying(tr, sourceLabel)
+        state.sourceLabel = tostring(sourceLabel or "-")
+        if ui.art then
+                ui.art:SetVisible(tr ~= nil)
+        end
+        if tr == nil then
+                updateMetaLine()
+                return
+        end
+        if ui.art then
+                ui.art:SetTitle(tr.title or "Unknown Title")
+                ui.art:SetSubtitle(tr.artist or "-")
+                local hasArt = (tr.artwork ~= nil and tr.artwork ~= "")
                 if hasArt then
-                        -- instant attempt: let Roblox fetch the URL directly
                         ui.art:SetImage(tr.artwork)
-                        -- reliable attempt: local file via getcustomasset
                         state.artGen = state.artGen + 1
                         local gen = state.artGen
                         task.spawn(function()
@@ -563,6 +575,7 @@ local function updateNowPlaying(tr, sourceLabel)
                         ui.art:SetImage("")
                 end
         end
+        updateMetaLine()
 end
 
 local function renderQueue()
@@ -602,9 +615,8 @@ local playFromQueue, advance
 
 local function onLoaded(sourceLabel)
         state.consecutiveFails = 0
-        if ui.sourcePara then
-                ui.sourcePara:Set("Source: " .. tostring(sourceLabel or "-"))
-        end
+        state.sourceLabel = tostring(sourceLabel or "-")
+        updateMetaLine()
         if sound.TimeLength > 0 and ui.seek then
                 ui.seek:SetRange(0, math.max(1, math.floor(sound.TimeLength)))
                 ui.seek:Set(0, false)
@@ -656,9 +668,8 @@ local function loadTrack(tr, gen)
                 local reason = "no playback sources enabled"
                 for _, src in ipairs(sources) do
                         if not running or state.gen ~= gen then return end
-                        if ui.sourcePara then
-                                ui.sourcePara:Set("Loading via " .. src.label .. "...")
-                        end
+                        state.sourceLabel = "Loading via " .. src.label
+                        updateMetaLine()
                         local url, info = runResolver(src, tr)
                         if not running or state.gen ~= gen then return end
                         if url then
@@ -976,27 +987,13 @@ local playerTab = Window:Tab("Player", "music")
 local playerSection = playerTab:Section("Now Playing")
 
 ui.art = playerSection:Image({
-        Height = 150,
-        Width = 150,
+        Height = 104,
         ScaleType = "Fit",
+        Title = "Nothing playing",
+        Subtitle = "-",
+        Meta = "Source: -",
 })
 ui.art:SetVisible(false)
-
-ui.titlePara = playerSection:Paragraph({
-        Text = "Nothing playing",
-})
-
-ui.artistPara = playerSection:Paragraph({
-        Text = "-",
-})
-
-ui.sourcePara = playerSection:Paragraph({
-        Text = "Source: -",
-})
-
-ui.timePara = playerSection:Paragraph({
-        Text = "0:00 / 0:00",
-})
 
 ui.seek = playerSection:Slider({
         Text = "Seek",
@@ -1269,9 +1266,7 @@ task.spawn(function()
                         if ui.seek and os.clock() - state.lastSeekInput > 0.5 then
                                 ui.seek:Set(sound.TimePosition, false)
                         end
-                        if ui.timePara then
-                                ui.timePara:Set(fmtTime(sound.TimePosition) .. " / " .. fmtTime(sound.TimeLength))
-                        end
+                        updateMetaLine()
                 end
         end
 end)
