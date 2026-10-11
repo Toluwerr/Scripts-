@@ -42,7 +42,12 @@ end
 
 local TRACKS_BASE = "https://tracks.monochrome.st"
 local DEFAULT_DZR_BASE = "https://dzr.tabs-vs-spaces.wtf"
-local USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MonochromePlayer/1.0"
+local SC_HOME = "https://soundcloud.com/"
+local SC_API = "https://api-v2.soundcloud.com"
+local SC_FALLBACK_ID = "vI5BsvpTIlavDLl7RDbbcFAPg8kls8Bg"
+local CACHE_FOLDER = "monochrome"
+local CACHE_LIMIT = 12
+local USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 local function urlEncode(s)
         s = tostring(s or "")
@@ -67,6 +72,277 @@ local function fmtTime(sec)
                 return string.format("%d:%02d:%02d", h, m, s)
         end
         return string.format("%d:%02d", m, s)
+end
+
+local FS = {
+        write = (type(writefile) == "function") and writefile or nil,
+        read = (type(readfile) == "function") and readfile or nil,
+        isFile = (type(isfile) == "function") and isfile or nil,
+        isFolder = (type(isfolder) == "function") and isfolder or nil,
+        makeFolder = (type(makefolder) == "function") and makefolder or nil,
+        delFile = (type(delfile) == "function") and delfile or nil,
+        listFiles = (type(listfiles) == "function") and listfiles or nil,
+}
+
+local customAsset = nil
+if type(getcustomasset) == "function" then
+        customAsset = getcustomasset
+elseif type(getsynasset) == "function" then
+        customAsset = getsynasset
+end
+
+local function httpGet(url)
+        local ok, res = pcall(httpRequest, {
+                Url = url,
+                Method = "GET",
+                Headers = {
+                        ["Accept"] = "*/*",
+                        ["User-Agent"] = USER_AGENT,
+                },
+        })
+        if not ok or type(res) ~= "table" then
+                return nil, 0
+        end
+        local code = tonumber(res.StatusCode or res.Status or 0) or 0
+        return tostring(res.Body or ""), code
+end
+
+local function ensureCacheFolder()
+        if FS.isFolder and FS.makeFolder and not FS.isFolder(CACHE_FOLDER) then
+                pcall(FS.makeFolder, CACHE_FOLDER)
+        end
+end
+
+local function cacheOrderPath()
+        return CACHE_FOLDER .. "/.order"
+end
+
+local function readCacheOrder()
+        if FS.read then
+                local ok, body = pcall(FS.read, cacheOrderPath())
+                if ok and type(body) == "string" and #body > 2 then
+                        local okD, data = pcall(function()
+                                return HttpService:JSONDecode(body)
+                        end)
+                        if okD and type(data) == "table" then
+                                local names = {}
+                                for _, n in ipairs(data) do
+                                        if type(n) == "string" then
+                                                table.insert(names, n)
+                                        end
+                                end
+                                return names
+                        end
+                end
+        end
+        if FS.listFiles then
+                local ok, files = pcall(FS.listFiles, CACHE_FOLDER)
+                if ok and type(files) == "table" then
+                        local names = {}
+                        for _, f in ipairs(files) do
+                                local name = tostring(f):gsub("^" .. CACHE_FOLDER .. "/", "")
+                                if name:sub(-4) == ".mp3" then
+                                        table.insert(names, name)
+                                end
+                        end
+                        return names
+                end
+        end
+        return {}
+end
+
+local function writeCacheOrder(names)
+        if FS.write then
+                pcall(FS.write, cacheOrderPath(), HttpService:JSONEncode(names))
+        end
+end
+
+local function trimCache(names)
+        if FS.delFile then
+                while #names > CACHE_LIMIT do
+                        local victim = table.remove(names, 1)
+                        pcall(FS.delFile, CACHE_FOLDER .. "/" .. victim)
+                end
+        end
+        return names
+end
+
+local function evictCache(trackId)
+        if not FS.delFile then return end
+        local name = tostring(trackId) .. ".mp3"
+        pcall(FS.delFile, CACHE_FOLDER .. "/" .. name)
+        local names = {}
+        for _, n in ipairs(readCacheOrder()) do
+                if n ~= name then
+                        table.insert(names, n)
+                end
+        end
+        writeCacheOrder(names)
+end
+
+local refreshCacheStatus = function() end
+
+local function downloadToCache(tr, url)
+        if not FS.write or not customAsset then
+                return nil, "no file system"
+        end
+        ensureCacheFolder()
+        local name = tostring(tr.id) .. ".mp3"
+        local path = CACHE_FOLDER .. "/" .. name
+        if FS.isFile and FS.isFile(path) then
+                local okC, cached = pcall(customAsset, path)
+                if okC and type(cached) == "string" and #cached > 0 then
+                        return cached
+                end
+        end
+        local body, code = httpGet(url)
+        if code ~= 200 or type(body) ~= "string" or #body == 0 then
+                return nil, "download HTTP " .. tostring(code)
+        end
+        if #body < 65536 then
+                return nil, "download too small"
+        end
+        if body:sub(1, 3) ~= "ID3" and body:byte(1) ~= 255 then
+                return nil, "response is not an MP3"
+        end
+        local okW, errW = pcall(FS.write, path, body)
+        if not okW then
+                return nil, "writefile: " .. tostring(errW)
+        end
+        local names = readCacheOrder()
+        local present = false
+        for _, n in ipairs(names) do
+                if n == name then
+                        present = true
+                        break
+                end
+        end
+        if not present then
+                table.insert(names, name)
+        end
+        names = trimCache(names)
+        writeCacheOrder(names)
+        refreshCacheStatus()
+        local okA, asset = pcall(customAsset, path)
+        if okA and type(asset) == "string" and #asset > 0 then
+                return asset
+        end
+        evictCache(tr.id)
+        return nil, "getcustomasset failed"
+end
+
+local scClientId = SC_FALLBACK_ID
+local scRefreshed = false
+
+local function refreshScId()
+        scRefreshed = true
+        local body, code = httpGet(SC_HOME)
+        if code ~= 200 or type(body) ~= "string" then
+                return nil
+        end
+        local seen = {}
+        local tried = 0
+        for assetUrl in body:gmatch("https://a%-v2%.sndcdn%.com/assets/[%w%.%-]+%.js") do
+                if not seen[assetUrl] then
+                        seen[assetUrl] = true
+                        tried = tried + 1
+                        if tried > 10 then
+                                break
+                        end
+                        local js, jsCode = httpGet(assetUrl)
+                        if jsCode == 200 and type(js) == "string" then
+                                local cid = js:match('client_id:"([%w%-_]+)"')
+                                if cid and #cid >= 20 then
+                                        scClientId = cid
+                                        return cid
+                                end
+                        end
+                end
+        end
+        return nil
+end
+
+local function scSearchUrl(query)
+        return SC_API .. "/search/tracks?q=" .. urlEncode(query) .. "&limit=50&client_id=" .. scClientId
+end
+
+local function scBestProgressive(data, targetMs)
+        local best, bestDiff = nil, math.huge
+        local collection = type(data.collection) == "table" and data.collection or {}
+        for _, item in ipairs(collection) do
+                if type(item) == "table" and item.kind == "track" and tostring(item.policy or "") ~= "BLOCK" then
+                        local dur = tonumber(item.duration) or 0
+                        local diff = math.abs(dur - targetMs)
+                        if diff <= 15000 and diff < bestDiff then
+                                local media = type(item.media) == "table" and item.media or {}
+                                local transcodings = type(media.transcodings) == "table" and media.transcodings or {}
+                                for _, tc in ipairs(transcodings) do
+                                        if type(tc) == "table" and type(tc.url) == "string" then
+                                                local fmt = type(tc.format) == "table" and tc.format or {}
+                                                if fmt.mime_type == "audio/mpeg" and tc.url:find("/stream/progressive", 1, true) then
+                                                        best = tc.url
+                                                        bestDiff = diff
+                                                        break
+                                                end
+                                        end
+                                end
+                        end
+                end
+        end
+        return best, bestDiff
+end
+
+local function scPickTrack(tr)
+        local query = tostring(tr.title or "")
+        local hasArtist = tr.artist ~= nil and tr.artist ~= "" and tr.artist ~= "Unknown Artist"
+        if hasArtist then
+                query = query .. " " .. tr.artist
+        end
+        for attempt = 1, 2 do
+                local body, code = httpGet(scSearchUrl(query))
+                if code == 401 or code == 403 then
+                        if scRefreshed then
+                                return nil, "SoundCloud rejected the client id"
+                        end
+                        if not refreshScId() then
+                                return nil, "SoundCloud rejected the client id"
+                        end
+                        body, code = httpGet(scSearchUrl(query))
+                end
+                if code ~= 200 or type(body) ~= "string" then
+                        return nil, "SoundCloud HTTP " .. tostring(code)
+                end
+                local okD, data = pcall(function()
+                        return HttpService:JSONDecode(body)
+                end)
+                if not okD or type(data) ~= "table" then
+                        return nil, "SoundCloud sent an unreadable response"
+                end
+                local turl, diff = scBestProgressive(data, (tonumber(tr.duration) or 0) * 1000)
+                if turl then
+                        local signed, code2 = httpGet(turl .. "?client_id=" .. scClientId)
+                        if code2 ~= 200 or type(signed) ~= "string" then
+                                return nil, "stream URL HTTP " .. tostring(code2)
+                        end
+                        local okS, sdata = pcall(function()
+                                return HttpService:JSONDecode(signed)
+                        end)
+                        if not okS or type(sdata) ~= "table" or type(sdata.url) ~= "string" then
+                                return nil, "stream URL unreadable"
+                        end
+                        local off = math.floor(diff / 1000 + 0.5)
+                        if off <= 0 then
+                                return sdata.url, "SoundCloud (exact length)"
+                        end
+                        return sdata.url, "SoundCloud (off by " .. off .. "s)"
+                end
+                if attempt == 1 and hasArtist then
+                        query = tostring(tr.title or "")
+                else
+                        break
+                end
+        end
+        return nil, "no SoundCloud match"
 end
 
 local Reborn
@@ -100,17 +376,40 @@ local function notify(title, description)
         end)
 end
 
+local function clearCache()
+        local names = readCacheOrder()
+        if FS.listFiles then
+                local ok, files = pcall(FS.listFiles, CACHE_FOLDER)
+                if ok and type(files) == "table" then
+                        for _, f in ipairs(files) do
+                                local name = tostring(f):gsub("^" .. CACHE_FOLDER .. "/", "")
+                                table.insert(names, name)
+                        end
+                end
+        end
+        local removed = 0
+        if FS.delFile then
+                for _, n in ipairs(names) do
+                        if pcall(FS.delFile, CACHE_FOLDER .. "/" .. n) then
+                                removed = removed + 1
+                        end
+                end
+        end
+        writeCacheOrder({})
+        refreshCacheStatus()
+        notify("Cache cleared", removed .. " files removed.")
+end
+
 local ui = {}
 local state = {
         queue = {},
         index = 0,
         results = {},
         current = nil,
-        candidates = nil,
-        candidateIdx = 0,
         loopMode = "Off",
         shuffle = false,
-        preferFlac = false,
+        scEnabled = true,
+        dzrEnabled = true,
         dzrBase = DEFAULT_DZR_BASE,
         dzrFormat = "MP3_320",
         gen = 0,
@@ -186,108 +485,124 @@ local function stopPlayback()
         renderQueue()
 end
 
-local function buildCandidates(tr)
-        local list = {}
-        local direct = {
-                url = TRACKS_BASE .. "/track/" .. tostring(tr.id),
-                label = "Monochrome direct",
-                timeout = 30,
-        }
-        if state.preferFlac then
-                table.insert(list, direct)
-        end
-        if tr.isrc and state.dzrBase ~= "" then
-                table.insert(list, {
-                        url = state.dzrBase .. "/stream/?isrc=" .. urlEncode(tr.isrc) .. "&format=" .. urlEncode(state.dzrFormat),
-                        label = "Deezer " .. string.gsub(state.dzrFormat, "_", " "),
-                        timeout = 12,
-                })
-        end
-        if not state.preferFlac then
-                table.insert(list, direct)
-        end
-        return list
-end
+local playFromQueue, advance
 
-local playFromQueue, startWatchdog, tryNextCandidate, advance
-
-local function onLoaded()
-        local cand = state.candidates and state.candidates[state.candidateIdx]
+local function onLoaded(sourceLabel)
         state.consecutiveFails = 0
         if ui.sourcePara then
-                ui.sourcePara:Set("Source: " .. (cand and cand.label or "-"))
+                ui.sourcePara:Set("Source: " .. tostring(sourceLabel or "-"))
         end
         if sound.TimeLength > 0 and ui.seek then
                 ui.seek:SetRange(0, math.max(1, math.floor(sound.TimeLength)))
                 ui.seek:Set(0, false)
         end
         if ui.playBtn then ui.playBtn:Set("Pause") end
-        if state.current and cand then
-                notify(state.current.title, state.current.artist .. " - " .. cand.label)
+        if state.current then
+                notify(state.current.title, state.current.artist .. " - " .. tostring(sourceLabel or ""))
         end
 end
 
-function startWatchdog(gen)
+local function buildSources(tr)
+        local list = {}
+        if state.scEnabled then
+                table.insert(list, { label = "SoundCloud", kind = "sc" })
+        end
+        if state.dzrEnabled and tr.isrc and state.dzrBase ~= "" then
+                table.insert(list, {
+                        label = "Deezer",
+                        kind = "dzr",
+                        url = state.dzrBase .. "/stream/?isrc=" .. urlEncode(tr.isrc) .. "&format=" .. urlEncode(state.dzrFormat),
+                })
+        end
+        return list
+end
+
+local function runResolver(src, tr)
+        if src.kind == "sc" then
+                return scPickTrack(tr)
+        end
+        return src.url, "Deezer"
+end
+
+local function waitForSound(gen, budget)
+        local waited = 0
+        while waited < budget do
+                task.wait(0.2)
+                if not running or state.gen ~= gen then return false end
+                if sound.IsLoaded or sound.TimeLength > 0 or sound.TimePosition > 0 then
+                        return true
+                end
+                waited = waited + 0.2
+        end
+        return false
+end
+
+local function loadTrack(tr, gen)
         task.spawn(function()
-                local waited = 0
-                local cand = state.candidates and state.candidates[state.candidateIdx]
-                local limit = (cand and cand.timeout) or 12
-                while waited < limit do
-                        task.wait(0.25)
+                local sources = buildSources(tr)
+                local reason = "no playback sources enabled"
+                for _, src in ipairs(sources) do
                         if not running or state.gen ~= gen then return end
-                        if sound.IsLoaded or sound.TimeLength > 0 or sound.TimePosition > 0 then
-                                onLoaded()
-                                return
+                        if ui.sourcePara then
+                                ui.sourcePara:Set("Loading via " .. src.label .. "...")
                         end
-                        waited = waited + 0.25
+                        local url, info = runResolver(src, tr)
+                        if not running or state.gen ~= gen then return end
+                        if url then
+                                local asset, err = downloadToCache(tr, url)
+                                if not running or state.gen ~= gen then return end
+                                if asset then
+                                        sound:Stop()
+                                        sound.SoundId = asset
+                                        sound:Play()
+                                        if waitForSound(gen, 15) then
+                                                onLoaded(info or src.label)
+                                                return
+                                        end
+                                        if not running or state.gen ~= gen then return end
+                                        sound:Stop()
+                                        evictCache(tr.id)
+                                        reason = src.label .. " audio never loaded"
+                                else
+                                        reason = src.label .. ": " .. tostring(err)
+                                end
+                        else
+                                reason = tostring(info)
+                        end
                 end
                 if not running or state.gen ~= gen then return end
-                tryNextCandidate(gen)
+                state.consecutiveFails = state.consecutiveFails + 1
+                if state.current then
+                        notify("Could not load", state.current.title .. " - " .. tostring(reason))
+                end
+                if state.consecutiveFails >= 5 then
+                        state.consecutiveFails = 0
+                        stopPlayback()
+                        notify("Stopped", "Too many tracks failed in a row.")
+                        return
+                end
+                advance(1, true)
         end)
 end
 
-function tryNextCandidate(gen)
-        if not running or state.gen ~= gen then return end
-        state.candidateIdx = state.candidateIdx + 1
-        local cand = state.candidates and state.candidates[state.candidateIdx]
-        if cand then
-                sound:Stop()
-                sound.SoundId = cand.url
-                sound:Play()
-                if ui.sourcePara then
-                        ui.sourcePara:Set("Retrying via " .. cand.label .. "...")
-                end
-                startWatchdog(gen)
-                return
-        end
-        state.consecutiveFails = state.consecutiveFails + 1
-        if state.current then
-                notify("Could not load", state.current.title)
-        end
-        if state.consecutiveFails >= 5 then
-                state.consecutiveFails = 0
-                stopPlayback()
-                notify("Stopped", "Too many tracks failed to load in a row.")
-                return
-        end
-        advance(1, true)
-end
-
-function playFromQueue()
+function playFromQueue(userInitiated)
         local tr = state.queue[state.index]
         if not tr then return end
         state.gen = state.gen + 1
         local gen = state.gen
         state.current = tr
-        state.candidates = buildCandidates(tr)
-        state.candidateIdx = 1
+        if userInitiated then
+                state.consecutiveFails = 0
+        end
         sound:Stop()
-        sound.SoundId = state.candidates[1].url
-        sound:Play()
         updateNowPlaying(tr, "Loading...")
         if ui.playBtn then ui.playBtn:Set("Pause") end
-        startWatchdog(gen)
         renderQueue()
+        if not customAsset or not FS.write then
+                notify("Cannot play", "This executor has no getcustomasset/writefile, audio cannot be loaded.")
+                return
+        end
+        loadTrack(tr, gen)
 end
 
 function advance(delta, auto)
@@ -315,7 +630,7 @@ function advance(delta, auto)
                 end
                 state.index = nextIdx
         end
-        playFromQueue()
+        playFromQueue(not auto)
 end
 
 local function prevTrack()
@@ -330,7 +645,7 @@ local function togglePlayPause()
         if not state.current then
                 if #state.queue > 0 then
                         if state.index < 1 then state.index = 1 end
-                        playFromQueue()
+                        playFromQueue(true)
                 else
                         notify("Nothing to play", "Search for a song and click a result.")
                 end
@@ -356,10 +671,6 @@ end
 
 local function playNow(tr)
         if not tr then return end
-        if tr.playable == false then
-                notify("Not playable", tr.title)
-                return
-        end
         local existing = 0
         for i, q in ipairs(state.queue) do
                 if q.id == tr.id then
@@ -373,13 +684,13 @@ local function playNow(tr)
                 table.insert(state.queue, tr)
                 state.index = #state.queue
         end
-        playFromQueue()
+        playFromQueue(true)
 end
 
 local function jumpTo(i)
         if state.queue[i] then
                 state.index = i
-                playFromQueue()
+                playFromQueue(true)
         end
 end
 
@@ -483,7 +794,8 @@ local function applyConfig()
         end
         state.loopMode = loopVal
         state.shuffle = (ui.shuffle and ui.shuffle.Value) and true or false
-        state.preferFlac = (ui.preferFlac and ui.preferFlac.Value) and true or false
+        state.scEnabled = not (ui.scEnabled and ui.scEnabled.Value == false)
+        state.dzrEnabled = not (ui.dzrEnabled and ui.dzrEnabled.Value == false)
         local fmt = ui.dzrFormat and ui.dzrFormat.Value
         if fmt ~= "MP3_320" and fmt ~= "MP3_128" then
                 fmt = "MP3_320"
@@ -702,12 +1014,22 @@ ui.dzrFormat = sourcesSection:Dropdown({
         end,
 })
 
-ui.preferFlac = sourcesSection:Toggle({
-        Text = "Prefer Monochrome direct",
-        Value = false,
-        Flag = "PreferFlac",
+ui.scEnabled = sourcesSection:Toggle({
+        Text = "Use SoundCloud",
+        Value = true,
+        Flag = "ScEnabled",
         Callback = function(v)
-                state.preferFlac = v and true or false
+                state.scEnabled = v and true or false
+                scheduleSave()
+        end,
+})
+
+ui.dzrEnabled = sourcesSection:Toggle({
+        Text = "Use Deezer ISRC",
+        Value = true,
+        Flag = "DzrEnabled",
+        Callback = function(v)
+                state.dzrEnabled = v and true or false
                 scheduleSave()
         end,
 })
@@ -732,7 +1054,28 @@ ui.dzrBase = sourcesSection:Input({
 })
 
 sourcesSection:Paragraph({
-        Text = "Tracks try the Deezer ISRC stream first, then fall back to the Monochrome direct stream.",
+        Text = "SoundCloud matches a full-length upload by duration. Deezer streams the exact ISRC. Sources are tried in order until one loads.",
+})
+
+local cacheSection = settingsTab:Section("Cache")
+
+ui.cacheStatus = cacheSection:Paragraph({
+        Text = "0 cached tracks",
+})
+
+refreshCacheStatus = function()
+        if ui.cacheStatus then
+                ui.cacheStatus:Set(#readCacheOrder() .. " cached tracks (max " .. CACHE_LIMIT .. ")")
+        end
+end
+
+refreshCacheStatus()
+
+cacheSection:Button({
+        Text = "Clear cache",
+        Callback = function()
+                clearCache()
+        end,
 })
 
 local keybindsSection = settingsTab:Section("Keybinds")
