@@ -977,6 +977,8 @@ local playerSection = playerTab:Section("Now Playing")
 
 ui.art = playerSection:Image({
         Height = 150,
+        Width = 150,
+        ScaleType = "Fit",
 })
 ui.art:SetVisible(false)
 
