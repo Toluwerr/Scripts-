@@ -500,10 +500,44 @@ end
 -- Detection helpers
 -- =============================================================
 
--- No container exclusions by design: any instance that resolves to an item
--- with a value is tracked - world loot, shop/case displays, reward stations
--- and weapons carried or holstered on players alike. Visibility is controlled
--- only by the user-facing filters (Min Value / Max Distance / Hide Junk).
+-- Two scope exclusions (user-specified), everything else with a value is tracked:
+-- 1. Equipment-shop stock: items racked for sale inside the shop building
+--    ("TrashAmerica"). In RUNAWAYS that is Workspace.Art.Weapons - the shop
+--    stand with the Melee/Ranged rack sections, price sign and the weapons/
+--    ammo hung on it.
+-- 2. Held/holstered/carried items: anything with an ancestor character Model
+--    (a Model with a Humanoid) - covers players AND NPCs, including holsters
+--    folders and tools equipped in hand. World drops stay visible once released.
+
+local function getEquipmentShop()
+        local art = Workspace:FindFirstChild("Art")
+        if not art then
+                return nil
+        end
+        local shop = art:FindFirstChild("Weapons")
+        if shop and (shop:IsA("Folder") or shop:IsA("Model")) then
+                return shop
+        end
+        return nil
+end
+
+local function isEquipmentShopStock(inst, shop)
+        return shop ~= nil and inst:IsDescendantOf(shop)
+end
+
+local function isHeldByCharacter(inst)
+        local model = inst:FindFirstAncestorOfClass("Model")
+        while model do
+                if model:FindFirstChildOfClass("Humanoid") then
+                        return model
+                end
+                if Players:GetPlayerFromCharacter(model) then
+                        return model
+                end
+                model = model:FindFirstAncestorOfClass("Model")
+        end
+        return nil
+end
 
 local function resolveItem(inst)
         local info = byItem[inst.Name]
@@ -736,6 +770,13 @@ local function onInstanceAdded(inst)
                 return
         end
 
+        if isHeldByCharacter(inst) then
+                return
+        end
+        if isEquipmentShopStock(inst, getEquipmentShop()) then
+                return
+        end
+
         local adornee = getAdornee(inst)
         if not adornee then
                 return
@@ -789,6 +830,16 @@ local function updateLootRecord(inst, localRoot)
         end
 
         if not inst.Parent or not rec.adornee or not rec.adornee.Parent then
+                untrackLoot(inst)
+                return
+        end
+
+        -- Picked up and now held by a character (player or NPC): stop tracking.
+        if isHeldByCharacter(inst) then
+                untrackLoot(inst)
+                return
+        end
+        if isEquipmentShopStock(inst, getEquipmentShop()) then
                 untrackLoot(inst)
                 return
         end
