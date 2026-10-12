@@ -76,6 +76,8 @@ local settings = {walkSpeed = 16, jumpPower = 50, hipHeight = 0}
 local godMode = false
 local infJump = false
 local blockKickback = true
+local noScares = false
+local noDeathScreen = false
 local antiCheatDead = false
 local lastSpotOwned = false
 local resetOk = false
@@ -170,6 +172,38 @@ end
 
 local PlayerScripts = LocalPlayer:WaitForChild("PlayerScripts", 10)
 
+local function killStoryScripts()
+        if not (noScares or noDeathScreen) then
+                return
+        end
+        local function drop(parent, name)
+                local target = parent and parent:FindFirstChild(name)
+                if target then
+                        pcall(function()
+                                target:Destroy()
+                        end)
+                end
+        end
+        local gui = LocalPlayer:FindFirstChild("PlayerGui")
+        if noScares then
+                drop(PlayerScripts, "RainBlur")
+                drop(PlayerScripts, "PopUp")
+                drop(PlayerScripts, "Cam")
+                drop(PlayerScripts, "LockSlide")
+                local popGui = gui and gui:FindFirstChild("PopUp")
+                local popFrame = popGui and popGui:FindFirstChild("Frame")
+                drop(popFrame, "LocalScript")
+                local fadeGui = gui and gui:FindFirstChild("Fade")
+                local fadeFrame = fadeGui and fadeGui:FindFirstChild("Frame")
+                drop(fadeFrame, "LocalScript")
+        end
+        if noDeathScreen then
+                local dsGui = gui and gui:FindFirstChild("DeathScreen")
+                local dsFrame = dsGui and dsGui:FindFirstChild("Frame")
+                drop(dsFrame, "End")
+        end
+end
+
 task.spawn(function()
         if not PlayerScripts then
                 antiCheatDead = true
@@ -209,6 +243,7 @@ task.spawn(function()
                                 l:Destroy()
                         end)
                 end
+                killStoryScripts()
         end
 end)
 
@@ -415,6 +450,85 @@ local function startTentLock(lock)
         end)
 end
 
+local shields = {on = false, tents = 0, spike = false, bear = false}
+local shieldsStatusParagraph = nil
+local lastShieldsText = ""
+
+local function shieldsStatusText()
+        if not shields.on then
+                return "Story Shields: Off"
+        end
+        return table.concat({
+                "Story Shields: On",
+                "Tent Flags: " .. tostring(shields.tents) .. "/2",
+                "Spike Flag: " .. (shields.spike and "Set" or "Missing"),
+                "Bear Flag: " .. (shields.bear and "Set" or "Missing"),
+        }, "\n")
+end
+
+local function pushShieldsStatus()
+        local text = shieldsStatusText()
+        if text == lastShieldsText then
+                return
+        end
+        lastShieldsText = text
+        if shieldsStatusParagraph then
+                shieldsStatusParagraph:Set(text)
+        end
+end
+
+table.insert(conns, RunService.Heartbeat:Connect(function()
+        if not shields.on then
+                return
+        end
+        local character = LocalPlayer.Character
+        if not character then
+                shields.tents = 0
+                shields.spike = false
+                shields.bear = false
+                pushShieldsStatus()
+                return
+        end
+        local tents = 0
+        local location = character:FindFirstChild("Location")
+        if location then
+                local blue = location:FindFirstChild("BlueTent")
+                if blue and blue:IsA("BoolValue") then
+                        if blue.Value ~= true then
+                                blue.Value = true
+                        end
+                        tents = tents + 1
+                end
+                local red = location:FindFirstChild("RedTent")
+                if red and red:IsA("BoolValue") then
+                        if red.Value ~= true then
+                                red.Value = true
+                        end
+                        tents = tents + 1
+                end
+        end
+        shields.tents = tents
+        local spike = character:FindFirstChild("hitspikes")
+        if spike and spike:IsA("BoolValue") then
+                if spike.Value ~= false then
+                        spike.Value = false
+                end
+                shields.spike = true
+        else
+                shields.spike = false
+        end
+        local bear = character:FindFirstChild("beardb")
+        if bear and bear:IsA("BoolValue") then
+                if bear.Value ~= false then
+                        bear.Value = false
+                end
+                shields.bear = true
+        else
+                shields.bear = false
+        end
+        pushShieldsStatus()
+end))
+
 local mainTab = Window:Tab("Main", "zap")
 local moveSection = mainTab:Section("Movement")
 local guardSection = mainTab:Section("Client Guards")
@@ -564,6 +678,58 @@ blueLockToggle = lockSection:Toggle({
         end,
 })
 
+local storySection = mainTab:Section("Story Control")
+
+shieldsStatusParagraph = storySection:Paragraph({Text = shieldsStatusText()})
+
+storySection:Toggle({
+        Text = "No Scares",
+        Value = false,
+        Callback = function(v)
+                noScares = v
+                if v then
+                        killStoryScripts()
+                        Window:Notify({
+                                Title = "Story Control",
+                                Description = "Scare and blur scripts removed.",
+                                Duration = 4,
+                        })
+                end
+        end,
+})
+
+storySection:Toggle({
+        Text = "No Death Screen",
+        Value = false,
+        Callback = function(v)
+                noDeathScreen = v
+                if v then
+                        killStoryScripts()
+                        Window:Notify({
+                                Title = "Story Control",
+                                Description = "Death screen removed. Respawns stay server-timed.",
+                                Duration = 4,
+                        })
+                end
+        end,
+})
+
+storySection:Toggle({
+        Text = "Story Shields (Test)",
+        Value = false,
+        Callback = function(v)
+                shields.on = v
+                pushShieldsStatus()
+                if v then
+                        Window:Notify({
+                                Title = "Story Control",
+                                Description = "Locking tent, spike and bear flags on your character. Report results.",
+                                Duration = 6,
+                        })
+                end
+        end,
+})
+
 local testsTab = Window:Tab("Tests", "skull")
 local tentSection = testsTab:Section("Tent Doors")
 local spotSection = testsTab:Section("Death Spot")
@@ -676,6 +842,7 @@ Global.__SpeckyWoodsCleanup = function()
         for _, lock in ipairs(tentLocks) do
                 lock.enabled = false
         end
+        shields.on = false
         for _, c in ipairs(conns) do
                 pcall(function()
                         c:Disconnect()
