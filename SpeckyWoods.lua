@@ -8,11 +8,15 @@ local PLACE_ID = 2539588846
 local GOD_HEALTH = 1000000000
 local HEAL_GAP = 0.15
 local WATCH_GAP = 2
-local DOOR_EPS = 0.5
-local CLICK_GAP = 0.45
-local SETTLE_GAP = 0.3
-local RESOLVE_GAP = 1.5
-local RESOLVE_TRIES = 3
+local PROBE_MOVE_EPS = 0.1
+local PROBE_WINDOW = 1.0
+local PROBE_RETRY = 1.0
+local BOOT_EPS = 3.0
+local CLOSED_EPS = 0.4
+local REFIRE_GAP = 0.25
+local CALM_FRAMES = 3
+local STILL_LIMIT = 45
+local TP_LIFT = 3
 
 local LocalPlayer = Players.LocalPlayer
 local Global = (getgenv and getgenv()) or _G
@@ -76,14 +80,14 @@ local settings = {walkSpeed = 16, jumpPower = 50, hipHeight = 0}
 local godMode = false
 local infJump = false
 local blockKickback = true
-local noScares = false
-local noDeathScreen = false
 local antiCheatDead = false
 local lastSpotOwned = false
 local resetOk = false
 local fakeSpotOn = false
 local savedSpot = nil
 local healToken = 0
+local Mouse = LocalPlayer:GetMouse()
+local itemSpotIndex = 0
 
 local statusParagraph = nil
 local walkSlider, jumpSlider, hipSlider
@@ -172,38 +176,6 @@ end
 
 local PlayerScripts = LocalPlayer:WaitForChild("PlayerScripts", 10)
 
-local function killStoryScripts()
-        if not (noScares or noDeathScreen) then
-                return
-        end
-        local function drop(parent, name)
-                local target = parent and parent:FindFirstChild(name)
-                if target then
-                        pcall(function()
-                                target:Destroy()
-                        end)
-                end
-        end
-        local gui = LocalPlayer:FindFirstChild("PlayerGui")
-        if noScares then
-                drop(PlayerScripts, "RainBlur")
-                drop(PlayerScripts, "PopUp")
-                drop(PlayerScripts, "Cam")
-                drop(PlayerScripts, "LockSlide")
-                local popGui = gui and gui:FindFirstChild("PopUp")
-                local popFrame = popGui and popGui:FindFirstChild("Frame")
-                drop(popFrame, "LocalScript")
-                local fadeGui = gui and gui:FindFirstChild("Fade")
-                local fadeFrame = fadeGui and fadeGui:FindFirstChild("Frame")
-                drop(fadeFrame, "LocalScript")
-        end
-        if noDeathScreen then
-                local dsGui = gui and gui:FindFirstChild("DeathScreen")
-                local dsFrame = dsGui and dsGui:FindFirstChild("Frame")
-                drop(dsFrame, "End")
-        end
-end
-
 task.spawn(function()
         if not PlayerScripts then
                 antiCheatDead = true
@@ -243,7 +215,6 @@ task.spawn(function()
                                 l:Destroy()
                         end)
                 end
-                killStoryScripts()
         end
 end)
 
@@ -307,13 +278,18 @@ local tentLocks = {
                 enabled = false,
                 running = false,
                 door = nil,
+                closedPos = nil,
                 lastPos = nil,
+                lastDist = nil,
                 lastClick = 0,
-                lastMove = 0,
                 pending = false,
                 closes = 0,
-                tries = 0,
-                giveUp = false,
+                calm = 0,
+                still = 0,
+                probeTries = 0,
+                probeSnap = nil,
+                probeDeadline = 0,
+                nextProbe = 0,
                 missing = false,
         },
         {
@@ -322,13 +298,18 @@ local tentLocks = {
                 enabled = false,
                 running = false,
                 door = nil,
+                closedPos = nil,
                 lastPos = nil,
+                lastDist = nil,
                 lastClick = 0,
-                lastMove = 0,
                 pending = false,
                 closes = 0,
-                tries = 0,
-                giveUp = false,
+                calm = 0,
+                still = 0,
+                probeTries = 0,
+                probeSnap = nil,
+                probeDeadline = 0,
+                nextProbe = 0,
                 missing = false,
         },
 }
@@ -341,10 +322,12 @@ local function tentStatusText()
         for _, lock in ipairs(tentLocks) do
                 local state = "Off"
                 if lock.enabled then
-                        if lock.giveUp or lock.missing then
-                                state = "No door"
-                        else
+                        if lock.missing then
+                                state = "No tent"
+                        elseif lock.door then
                                 state = "On (" .. tostring(lock.closes) .. " closes)"
+                        else
+                                state = "Finding door (" .. tostring(lock.probeTries) .. ")"
                         end
                 end
                 table.insert(lines, lock.label .. ": " .. state)
@@ -375,68 +358,104 @@ local function startTentLock(lock)
                                         lock.missing = false
                                         pushTentStatus()
                                 end
+                                local now = os.clock()
                                 local door = lock.door
                                 if door and door.Parent ~= model then
                                         door = nil
                                         lock.door = nil
+                                        lock.closedPos = nil
                                         lock.lastPos = nil
+                                        lock.lastDist = nil
+                                        lock.pending = false
+                                        lock.calm = 0
+                                        lock.still = 0
                                 end
                                 if not door then
-                                        local found = nil
-                                        local bestDist = math.huge
-                                        for _, child in ipairs(model:GetChildren()) do
-                                                if child:IsA("BasePart") and child ~= marker then
-                                                        local dist = (child.Position - marker.Position).Magnitude
-                                                        if dist < bestDist then
-                                                                bestDist = dist
-                                                                found = child
+                                        if lock.probeSnap then
+                                                local found = nil
+                                                local bestMove = 0
+                                                for part, was in pairs(lock.probeSnap) do
+                                                        if part.Parent == model then
+                                                                local move = (part.Position - was).Magnitude
+                                                                if move > PROBE_MOVE_EPS and move > bestMove then
+                                                                        bestMove = move
+                                                                        found = part
+                                                                end
                                                         end
                                                 end
-                                        end
-                                        if found and bestDist <= DOOR_EPS then
-                                                lock.door = found
-                                                lock.lastPos = found.Position
-                                                lock.lastMove = os.clock()
-                                                lock.closes = 0
-                                                lock.pending = false
-                                                lock.tries = 0
-                                                lock.giveUp = false
-                                        elseif not lock.giveUp and os.clock() - lock.lastClick >= RESOLVE_GAP then
-                                                lock.lastClick = os.clock()
-                                                lock.tries = lock.tries + 1
-                                                if lock.tries >= RESOLVE_TRIES then
-                                                        lock.giveUp = true
+                                                if found then
+                                                        lock.door = found
+                                                        lock.probeSnap = nil
+                                                        lock.closes = 0
+                                                        lock.calm = 0
+                                                        lock.still = 0
+                                                        lock.pending = false
                                                         pushTentStatus()
+                                                elseif now >= lock.probeDeadline then
+                                                        lock.probeSnap = nil
+                                                        lock.nextProbe = now + PROBE_RETRY
                                                 end
+                                        elseif now >= lock.nextProbe then
+                                                local snap = {}
+                                                for _, child in ipairs(model:GetChildren()) do
+                                                        if child:IsA("BasePart") then
+                                                                snap[child] = child.Position
+                                                        end
+                                                end
+                                                lock.probeSnap = snap
+                                                lock.probeDeadline = now + PROBE_WINDOW
+                                                lock.probeTries = lock.probeTries + 1
+                                                pushTentStatus()
                                                 pcall(function()
                                                         fireclickdetector(cd)
                                                 end)
                                         end
                                 else
-                                        local now = os.clock()
-                                        if lock.lastPos and (door.Position - lock.lastPos).Magnitude > 0.01 then
-                                                lock.lastMove = now
-                                        end
-                                        lock.lastPos = door.Position
-                                        local dist = (door.Position - marker.Position).Magnitude
-                                        if dist <= DOOR_EPS then
+                                        local anchor = lock.closedPos or marker.Position
+                                        local eps = lock.closedPos and CLOSED_EPS or BOOT_EPS
+                                        local dist = (door.Position - anchor).Magnitude
+                                        if dist <= eps then
                                                 if lock.pending then
                                                         lock.pending = false
                                                         lock.closes = lock.closes + 1
                                                         pushTentStatus()
                                                 end
-                                        elseif not lock.pending then
-                                                lock.lastClick = now
-                                                lock.pending = true
-                                                pcall(function()
-                                                        fireclickdetector(cd)
-                                                end)
-                                        elseif now - lock.lastClick >= CLICK_GAP and now - lock.lastMove >= SETTLE_GAP then
-                                                lock.lastClick = now
-                                                pcall(function()
-                                                        fireclickdetector(cd)
-                                                end)
+                                                if lock.lastPos and (door.Position - lock.lastPos).Magnitude <= 0.01 then
+                                                        lock.calm = lock.calm + 1
+                                                else
+                                                        lock.calm = 0
+                                                end
+                                                if not lock.closedPos and lock.calm >= CALM_FRAMES then
+                                                        lock.closedPos = door.Position
+                                                end
+                                        else
+                                                lock.calm = 0
+                                                if lock.lastPos and (door.Position - lock.lastPos).Magnitude <= 0.01 then
+                                                        lock.still = lock.still + 1
+                                                else
+                                                        lock.still = 0
+                                                end
+                                                if lock.pending and lock.still >= STILL_LIMIT then
+                                                        lock.closedPos = door.Position
+                                                        lock.pending = false
+                                                        lock.closes = lock.closes + 1
+                                                        pushTentStatus()
+                                                elseif not lock.pending then
+                                                        lock.pending = true
+                                                        lock.lastClick = now
+                                                        pcall(function()
+                                                                fireclickdetector(cd)
+                                                        end)
+                                                elseif now - lock.lastClick >= REFIRE_GAP
+                                                        and (not lock.lastDist or dist >= lock.lastDist - 0.02) then
+                                                        lock.lastClick = now
+                                                        pcall(function()
+                                                                fireclickdetector(cd)
+                                                        end)
+                                                end
                                         end
+                                        lock.lastPos = door.Position
+                                        lock.lastDist = dist
                                 end
                         else
                                 if not lock.missing then
@@ -449,85 +468,6 @@ local function startTentLock(lock)
                 lock.running = false
         end)
 end
-
-local shields = {on = false, tents = 0, spike = false, bear = false}
-local shieldsStatusParagraph = nil
-local lastShieldsText = ""
-
-local function shieldsStatusText()
-        if not shields.on then
-                return "Story Shields: Off"
-        end
-        return table.concat({
-                "Story Shields: On",
-                "Tent Flags: " .. tostring(shields.tents) .. "/2",
-                "Spike Flag: " .. (shields.spike and "Set" or "Missing"),
-                "Bear Flag: " .. (shields.bear and "Set" or "Missing"),
-        }, "\n")
-end
-
-local function pushShieldsStatus()
-        local text = shieldsStatusText()
-        if text == lastShieldsText then
-                return
-        end
-        lastShieldsText = text
-        if shieldsStatusParagraph then
-                shieldsStatusParagraph:Set(text)
-        end
-end
-
-table.insert(conns, RunService.Heartbeat:Connect(function()
-        if not shields.on then
-                return
-        end
-        local character = LocalPlayer.Character
-        if not character then
-                shields.tents = 0
-                shields.spike = false
-                shields.bear = false
-                pushShieldsStatus()
-                return
-        end
-        local tents = 0
-        local location = character:FindFirstChild("Location")
-        if location then
-                local blue = location:FindFirstChild("BlueTent")
-                if blue and blue:IsA("BoolValue") then
-                        if blue.Value ~= true then
-                                blue.Value = true
-                        end
-                        tents = tents + 1
-                end
-                local red = location:FindFirstChild("RedTent")
-                if red and red:IsA("BoolValue") then
-                        if red.Value ~= true then
-                                red.Value = true
-                        end
-                        tents = tents + 1
-                end
-        end
-        shields.tents = tents
-        local spike = character:FindFirstChild("hitspikes")
-        if spike and spike:IsA("BoolValue") then
-                if spike.Value ~= false then
-                        spike.Value = false
-                end
-                shields.spike = true
-        else
-                shields.spike = false
-        end
-        local bear = character:FindFirstChild("beardb")
-        if bear and bear:IsA("BoolValue") then
-                if bear.Value ~= false then
-                        bear.Value = false
-                end
-                shields.bear = true
-        else
-                shields.bear = false
-        end
-        pushShieldsStatus()
-end))
 
 local mainTab = Window:Tab("Main", "zap")
 local moveSection = mainTab:Section("Movement")
@@ -678,55 +618,105 @@ blueLockToggle = lockSection:Toggle({
         end,
 })
 
-local storySection = mainTab:Section("Story Control")
+local tpSection = mainTab:Section("Teleport")
 
-shieldsStatusParagraph = storySection:Paragraph({Text = shieldsStatusText()})
+local function teleportTo(pos, label)
+        local _, _, root = getChar()
+        if not root then
+                Window:Notify({
+                        Title = "Teleport",
+                        Description = "No character.",
+                        Duration = 4,
+                })
+                return
+        end
+        if typeof(pos) ~= "Vector3" then
+                Window:Notify({
+                        Title = "Teleport",
+                        Description = label .. " not found.",
+                        Duration = 4,
+                })
+                return
+        end
+        local target = pos + Vector3.new(0, TP_LIFT, 0)
+        pcall(function()
+                root.CFrame = CFrame.new(target) * root.CFrame.Rotation
+        end)
+        Window:Notify({
+                Title = "Teleport",
+                Description = string.format(
+                        "%s (%.0f, %.0f, %.0f).",
+                        label,
+                        target.X,
+                        target.Y,
+                        target.Z
+                ),
+                Duration = 4,
+        })
+end
 
-storySection:Toggle({
-        Text = "No Scares",
-        Value = false,
-        Callback = function(v)
-                noScares = v
-                if v then
-                        killStoryScripts()
-                        Window:Notify({
-                                Title = "Story Control",
-                                Description = "Scare and blur scripts removed.",
-                                Duration = 4,
-                        })
-                end
+local function tentDoorPos(rootName)
+        local tent = workspace:FindFirstChild(rootName)
+        local entrance = tent and tent:FindFirstChild("Entrance")
+        local closed = entrance and entrance:FindFirstChild("Closed")
+        if closed and closed:IsA("BasePart") then
+                return closed.Position
+        end
+        return nil
+end
+
+tpSection:Button({
+        Text = "To Mouse",
+        Callback = function()
+                teleportTo(Mouse.Hit.Position, "Mouse")
         end,
 })
 
-storySection:Toggle({
-        Text = "No Death Screen",
-        Value = false,
-        Callback = function(v)
-                noDeathScreen = v
-                if v then
-                        killStoryScripts()
-                        Window:Notify({
-                                Title = "Story Control",
-                                Description = "Death screen removed. Respawns stay server-timed.",
-                                Duration = 4,
-                        })
-                end
+tpSection:Button({
+        Text = "Spawn",
+        Callback = function()
+                local sl = workspace:FindFirstChild("SpawnLocation")
+                teleportTo(sl and sl.Position or nil, "Spawn")
         end,
 })
 
-storySection:Toggle({
-        Text = "Story Shields (Test)",
-        Value = false,
-        Callback = function(v)
-                shields.on = v
-                pushShieldsStatus()
-                if v then
-                        Window:Notify({
-                                Title = "Story Control",
-                                Description = "Locking tent, spike and bear flags on your character. Report results.",
-                                Duration = 6,
-                        })
-                end
+tpSection:Button({
+        Text = "Red Tent Door",
+        Callback = function()
+                teleportTo(tentDoorPos("RedTent"), "Red Tent Door")
+        end,
+})
+
+tpSection:Button({
+        Text = "Blue Tent Door",
+        Callback = function()
+                teleportTo(tentDoorPos("BlueTent"), "Blue Tent Door")
+        end,
+})
+
+tpSection:Button({
+        Text = "Shed",
+        Callback = function()
+                local shed = workspace:FindFirstChild("shed")
+                teleportTo(shed and shed:GetPivot().Position or nil, "Shed")
+        end,
+})
+
+tpSection:Button({
+        Text = "Firepit",
+        Callback = function()
+                local firepit = workspace:FindFirstChild("Firepit")
+                teleportTo(firepit and firepit:GetPivot().Position or nil, "Firepit")
+        end,
+})
+
+tpSection:Button({
+        Text = "Next Item Spot",
+        Callback = function()
+                itemSpotIndex = itemSpotIndex % 10 + 1
+                local holder = workspace:FindFirstChild("SpawnPointsItems")
+                local point = holder and holder:FindFirstChild("Point" .. itemSpotIndex)
+                teleportTo(point and point.Position or nil, "Item Spot " .. itemSpotIndex)
         end,
 })
 
@@ -842,7 +832,6 @@ Global.__SpeckyWoodsCleanup = function()
         for _, lock in ipairs(tentLocks) do
                 lock.enabled = false
         end
-        shields.on = false
         for _, c in ipairs(conns) do
                 pcall(function()
                         c:Disconnect()
