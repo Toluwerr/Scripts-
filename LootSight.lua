@@ -53,6 +53,7 @@ end
 local Window
 local statusLabel
 local topLabel
+local perfLabel
 
 local function notify(title, description)
         pcall(function()
@@ -107,6 +108,27 @@ local PlayerSettings = {
 local HudSettings = {
         Enabled = true,
 }
+
+-- FPS Saver: batched scanning + staggered, dirty-checked updates so the ESP
+-- loop never freezes a frame. The update rate also adapts to measured FPS.
+local PerfSettings = {
+        Saver = true,
+}
+
+-- Live performance state, maintained by the Heartbeat connection.
+local perf = {
+        fps = 60,
+        frames = 0,
+        frameTime = 0,
+        interval = SLOW_INTERVAL,
+        lowStreak = 0,
+        scanDone = 0,
+        scanTotal = 0,
+}
+
+-- Batch queues drained a slice at a time while FPS Saver is on.
+local scanQueue = nil -- { list, index } initial/rescan backlog
+local addQueue = nil  -- { list, index } DescendantAdded backlog
 
 local AutoSettings = {
         Pickup = false,
@@ -822,6 +844,7 @@ local function onInstanceAdded(inst)
                 key = key,
                 adornee = adornee,
                 distance = 0,
+                stagger = trackedCount % 4,
         }
         local ok = pcall(ensureLootAdornments, rec)
         if not ok then
@@ -838,12 +861,67 @@ local function scanWorkspace()
         local ok, descendants = pcall(function()
                 return Workspace:GetDescendants()
         end)
-        if ok and type(descendants) == "table" then
+        if not ok or type(descendants) ~= "table" then
+                scanning = false
+                return
+        end
+        if PerfSettings.Saver then
+                -- Batched: the Heartbeat drain tags a slice of the tree every
+                -- frame, so enabling/rescanning never freezes a frame.
+                scanQueue = { list = descendants, index = 1 }
+                perf.scanTotal = #descendants
+                perf.scanDone = 0
+        else
                 for _, inst in ipairs(descendants) do
                         pcall(onInstanceAdded, inst)
                 end
+                scanning = false
         end
-        scanning = false
+end
+
+-- Drain the batch queues, called every frame. Each pass processes up to
+-- `limit` instances so a full workspace sweep or a streaming instance storm
+-- spreads across frames instead of spiking one.
+local function drainBatches(flushAll)
+        local limit = (PerfSettings.Saver and not flushAll) and 400 or math.huge
+
+        if scanQueue then
+                local processed = 0
+                while scanQueue.index <= #scanQueue.list and processed < limit do
+                        local inst = scanQueue.list[scanQueue.index]
+                        scanQueue.index = scanQueue.index + 1
+                        processed = processed + 1
+                        if inst.Parent then
+                                pcall(onInstanceAdded, inst)
+                        end
+                end
+                perf.scanDone = scanQueue.index - 1
+                if scanQueue.index > #scanQueue.list then
+                        scanQueue = nil
+                        scanning = false
+                        notify("LootSight", string.format(
+                                "Scan complete: %d items tagged (DB: %s, %d entries)",
+                                trackedCount,
+                                dbSource,
+                                dbCount
+                        ))
+                end
+        end
+
+        if addQueue then
+                local processed = 0
+                while addQueue.index <= #addQueue.list and processed < limit do
+                        local inst = addQueue.list[addQueue.index]
+                        addQueue.index = addQueue.index + 1
+                        processed = processed + 1
+                        if inst.Parent then
+                                pcall(onInstanceAdded, inst)
+                        end
+                end
+                if addQueue.index > #addQueue.list then
+                        addQueue = nil
+                end
+        end
 end
 
 local function clearTrackedLoot()
@@ -852,7 +930,7 @@ local function clearTrackedLoot()
         end
 end
 
-local function updateLootRecord(inst, localRoot)
+local function updateLootRecord(inst, localRoot, tickCount)
         local rec = trackedLoot[inst]
         if not rec then
                 return
@@ -863,14 +941,19 @@ local function updateLootRecord(inst, localRoot)
                 return
         end
 
-        -- Picked up and now held by a character (player or NPC): stop tracking.
-        if isHeldByCharacter(inst) then
-                untrackLoot(inst)
-                return
-        end
-        if isEquipmentShopStock(inst, getEquipmentShop()) then
-                untrackLoot(inst)
-                return
+        -- Picked up / shop-stock checks are full ancestry walks, so with FPS
+        -- Saver they run on a per-record stagger (each record every 4th tick)
+        -- instead of every tick. Re-parenting still fires DescendantAdded and
+        -- removal untracks instantly either way, so nothing is missed.
+        if not PerfSettings.Saver or (tickCount + rec.stagger) % 4 == 0 then
+                if isHeldByCharacter(inst) then
+                        untrackLoot(inst)
+                        return
+                end
+                if isEquipmentShopStock(inst, getEquipmentShop()) then
+                        untrackLoot(inst)
+                        return
+                end
         end
 
         local position = rec.adornee.Position
@@ -894,9 +977,19 @@ local function updateLootRecord(inst, localRoot)
 
         if rec.billboard then
                 rec.billboard.Enabled = true
-                rec.billboard.MaxDistance = LootSettings.MaxDistance
-                rec.billboard.AlwaysOnTop = LootSettings.ThroughWalls
-                rec.label.Text = buildLootText(rec)
+                if rec.billboard.MaxDistance ~= LootSettings.MaxDistance then
+                        rec.billboard.MaxDistance = LootSettings.MaxDistance
+                end
+                if rec.billboard.AlwaysOnTop ~= LootSettings.ThroughWalls then
+                        rec.billboard.AlwaysOnTop = LootSettings.ThroughWalls
+                end
+                -- Only rewrite the rich text when it actually changed: this
+                -- is the single biggest FPS cost in the whole loop.
+                local text = buildLootText(rec)
+                if text ~= rec.lastText then
+                        rec.label.Text = text
+                        rec.lastText = text
+                end
         end
 end
 
@@ -1108,7 +1201,9 @@ local function updatePlayerEsp(player, localRoot, tickCount)
                 rec.carriedAt = tickCount
         end
 
-        if rec.highlight then
+        -- Highlight props are constant between setting changes: refresh them
+        -- on a stagger under FPS Saver instead of every tick.
+        if rec.highlight and (not PerfSettings.Saver or tickCount % 4 == (rec.stagger or 0)) then
                 rec.highlight.Enabled = PlayerSettings.Highlight
                 rec.highlight.FillColor = PlayerSettings.Color
                 rec.highlight.OutlineColor = PlayerSettings.Color
@@ -1121,9 +1216,17 @@ local function updatePlayerEsp(player, localRoot, tickCount)
 
         if rec.billboard then
                 rec.billboard.Enabled = true
-                rec.billboard.MaxDistance = PlayerSettings.MaxDistance
-                rec.billboard.AlwaysOnTop = PlayerSettings.ThroughWalls
-                rec.label.Text = buildPlayerText(rec, player, humanoid)
+                if rec.billboard.MaxDistance ~= PlayerSettings.MaxDistance then
+                        rec.billboard.MaxDistance = PlayerSettings.MaxDistance
+                end
+                if rec.billboard.AlwaysOnTop ~= PlayerSettings.ThroughWalls then
+                        rec.billboard.AlwaysOnTop = PlayerSettings.ThroughWalls
+                end
+                local text = buildPlayerText(rec, player, humanoid)
+                if text ~= rec.lastText then
+                        rec.label.Text = text
+                        rec.lastText = text
+                end
         end
 end
 
@@ -1234,6 +1337,12 @@ local function updateHud(tickCount)
                 return
         end
 
+        -- Under FPS Saver the HUD recomputes every 2nd tick; the labels are
+        -- dirty-checked below so identical strings are never rewritten.
+        if PerfSettings.Saver and tickCount % 2 == 1 then
+                return
+        end
+
         local gui = ensureHud()
         if not gui then
                 return
@@ -1257,25 +1366,38 @@ local function updateHud(tickCount)
         end
 
         if hudStatsLabel then
-                hudStatsLabel.Text = string.format(
+                local statsLine = string.format(
                         "%s in range  -  %d items",
                         formatMoney(total),
                         count
                 )
+                if hudStatsLabel.Text ~= statsLine then
+                        hudStatsLabel.Text = statsLine
+                end
         end
 
         if hudBestLabel then
                 if bestName then
-                        hudBestLabel.Text = string.format(
+                        local bestLine = string.format(
                                 "Best: %s  %s  (%d studs)",
                                 bestName,
                                 formatMoney(bestValue),
                                 floor(bestDistance)
                         )
-                        hudBestLabel.TextColor3 = tierFor(bestValue).color
+                        local bestColor = tierFor(bestValue).color
+                        if hudBestLabel.Text ~= bestLine then
+                                hudBestLabel.Text = bestLine
+                        end
+                        if hudBestLabel.TextColor3 ~= bestColor then
+                                hudBestLabel.TextColor3 = bestColor
+                        end
                 else
-                        hudBestLabel.Text = "No loot in range"
-                        hudBestLabel.TextColor3 = GRAY
+                        if hudBestLabel.Text ~= "No loot in range" then
+                                hudBestLabel.Text = "No loot in range"
+                        end
+                        if hudBestLabel.TextColor3 ~= GRAY then
+                                hudBestLabel.TextColor3 = GRAY
+                        end
                 end
         end
 
@@ -1287,11 +1409,14 @@ local function updateHud(tickCount)
         end
 
         if hudYouLabel then
-                hudYouLabel.Text = string.format(
+                local youLine = string.format(
                         "You carry: %s (%d items)",
                         formatMoney(youCarried.total),
                         youCarried.count
                 )
+                if hudYouLabel.Text ~= youLine then
+                        hudYouLabel.Text = youLine
+                end
         end
 end
 
@@ -1299,10 +1424,17 @@ end
 -- World update (throttled)
 -- =============================================================
 
-local function updateChamBudget()
+local function updateChamBudget(tickCount)
         -- Roblox only renders ~31 Highlight instances at once, so chams are
         -- granted to the most valuable visible loot after player highlights
         -- take their share.
+        -- Under FPS Saver this pass runs every 2nd tick: the visible set barely
+        -- changes tick to tick and re-sorting hundreds of records at 4 Hz is
+        -- wasted work. Property writes are dirty-checked below.
+        if PerfSettings.Saver and tickCount % 2 == 1 then
+                return
+        end
+
         local budget = CHAM_LIMIT
 
         if PlayerSettings.Enabled and PlayerSettings.Highlight then
@@ -1334,13 +1466,27 @@ local function updateChamBudget()
                 if rec.highlight then
                         local tier = tierFor(rec.worth or 0)
                         local color = LootSettings.TierColors and tier.color or WHITE
-                        rec.highlight.Enabled = index <= budget
-                        rec.highlight.FillColor = color
-                        rec.highlight.OutlineColor = color
-                        rec.highlight.FillTransparency = 1 - (LootSettings.ChamOpacity / 100)
-                        rec.highlight.DepthMode = LootSettings.ThroughWalls
+                        local enabled = index <= budget
+                        local fillT = 1 - (LootSettings.ChamOpacity / 100)
+                        local depth = LootSettings.ThroughWalls
                                 and Enum.HighlightDepthMode.AlwaysOnTop
                                 or Enum.HighlightDepthMode.Occluded
+                        if rec.highlight.Enabled ~= enabled then
+                                rec.highlight.Enabled = enabled
+                        end
+                        if rec.chamColor ~= color then
+                                rec.chamColor = color
+                                rec.highlight.FillColor = color
+                                rec.highlight.OutlineColor = color
+                        end
+                        if rec.chamFillT ~= fillT then
+                                rec.chamFillT = fillT
+                                rec.highlight.FillTransparency = fillT
+                        end
+                        if rec.chamDepth ~= depth then
+                                rec.chamDepth = depth
+                                rec.highlight.DepthMode = depth
+                        end
                 end
         end
 end
@@ -1710,9 +1856,20 @@ end
 -- point behind the car (or behind the player on foot). Only assemblies we
 -- actually simulate are moved (ReceiveAge == 0) - the rest are counted
 -- honestly as server-held.
+local dragFrame = false
+
 local function dragStep()
         if not running or not AutoSettings.Drag or not LootSettings.Enabled then
                 return
+        end
+
+        -- FPS Saver: command the drag at ~30 Hz (written velocity persists
+        -- between commands) and cap velocity writes per pass.
+        if PerfSettings.Saver then
+                dragFrame = not dragFrame
+                if not dragFrame then
+                        return
+                end
         end
 
         local base
@@ -1730,6 +1887,7 @@ local function dragStep()
         local hitch = (base.CFrame * CFrame.new(0, 2, 9)).Position
         autoState.draggingCount = 0
         autoState.dragSkippedCount = 0
+        local writeBudget = PerfSettings.Saver and 10 or math.huge
 
         for _, rec in pairs(trackedLoot) do
                 local worth = rec.worth or 0
@@ -1742,10 +1900,13 @@ local function dragStep()
                                 local dist = toHitch.Magnitude
                                 if dist <= AutoSettings.DragRange then
                                         if assemblyRoot.ReceiveAge == 0 then
-                                                local speed = math.min(dist * 5, AutoSettings.DragSpeed)
-                                                assemblyRoot.AssemblyLinearVelocity = toHitch.Unit
-                                                        * speed
-                                                        + Vector3.new(0, 2, 0)
+                                                if writeBudget > 0 then
+                                                        local speed = math.min(dist * 5, AutoSettings.DragSpeed)
+                                                        assemblyRoot.AssemblyLinearVelocity = toHitch.Unit
+                                                                * speed
+                                                                + Vector3.new(0, 2, 0)
+                                                        writeBudget = writeBudget - 1
+                                                end
                                                 autoState.draggingCount = autoState.draggingCount + 1
                                         else
                                                 autoState.dragSkippedCount = autoState.dragSkippedCount + 1
@@ -1766,7 +1927,7 @@ local function updateWorld(tickCount)
                         table.insert(snapshot, inst)
                 end
                 for _, inst in ipairs(snapshot) do
-                        local ok = pcall(updateLootRecord, inst, localRoot)
+                        local ok = pcall(updateLootRecord, inst, localRoot, tickCount)
                         if not ok then
                                 untrackLoot(inst)
                         end
@@ -1777,7 +1938,7 @@ local function updateWorld(tickCount)
                 pcall(updatePlayerEsp, player, localRoot, tickCount)
         end
 
-        pcall(updateChamBudget)
+        pcall(updateChamBudget, tickCount)
         pcall(updateHud, tickCount)
         pcall(updateAutoLoot, tickCount, localRoot)
 
@@ -1788,6 +1949,28 @@ local function updateWorld(tickCount)
                                 trackedCount,
                                 dbSource,
                                 dbCount
+                        ))
+                end)
+        end
+
+        if perfLabel and tickCount % 4 == 0 then
+                pcall(function()
+                        local scanPart
+                        if scanning then
+                                scanPart = string.format(
+                                        "scanning %d/%d",
+                                        perf.scanDone,
+                                        perf.scanTotal
+                                )
+                        else
+                                scanPart = "scan idle"
+                        end
+                        perfLabel:Set(string.format(
+                                "FPS %d  |  update %.2fs  |  %s  |  %d tracked",
+                                floor(perf.fps + 0.5),
+                                perf.interval,
+                                scanPart,
+                                trackedCount
                         ))
                 end)
         end
@@ -1813,12 +1996,14 @@ local function setLootEspEnabled(value)
                         end)
                 end
                 scanWorkspace()
-                notify("LootSight", string.format(
-                        "%d items tagged (DB: %s, %d entries)",
-                        trackedCount,
-                        dbSource,
-                        dbCount
-                ))
+                if not scanning then
+                        notify("LootSight", string.format(
+                                "%d items tagged (DB: %s, %d entries)",
+                                trackedCount,
+                                dbSource,
+                                dbCount
+                        ))
+                end
         else
                 clearTrackedLoot()
                 if hudGui then
@@ -2203,6 +2388,26 @@ do
                 end,
         })
 
+        local PerfSection = StatsTab:Section("Performance")
+
+        PerfSection:Toggle({
+                Text = "FPS Saver (batched + adaptive updates)",
+                Value = PerfSettings.Saver,
+                Callback = function(value)
+                        PerfSettings.Saver = value and true or false
+                        if PerfSettings.Saver then
+                                notify("Performance", "FPS Saver on - scans batched, update rate adapts to your FPS.")
+                        else
+                                perf.interval = SLOW_INTERVAL
+                                drainBatches(true)
+                        end
+                end,
+        })
+
+        perfLabel = PerfSection:Paragraph({
+                Text = "FPS --  |  update 0.25s  |  scan idle  |  0 tracked",
+        })
+
         local DataSection = StatsTab:Section("Loot Database")
 
         statusLabel = DataSection:Paragraph({
@@ -2222,7 +2427,9 @@ do
                         end
                         clearTrackedLoot()
                         scanWorkspace()
-                        notify("LootSight", "Rescan complete: " .. trackedCount .. " items tagged.")
+                        if not scanning then
+                                notify("LootSight", "Rescan complete: " .. trackedCount .. " items tagged.")
+                        end
                 end,
         })
 
@@ -2263,6 +2470,15 @@ end
 -- =============================================================
 
 connections.DescendantAdded = Workspace.DescendantAdded:Connect(function(inst)
+        -- FPS Saver batches instance storms (streaming, teleports) into a
+        -- drained queue so a burst never spikes a frame.
+        if PerfSettings.Saver and LootSettings.Enabled then
+                if not addQueue then
+                        addQueue = { list = {}, index = 1 }
+                end
+                table.insert(addQueue.list, inst)
+                return
+        end
         local ok = pcall(onInstanceAdded, inst)
         if not ok then
                 return
@@ -2279,8 +2495,36 @@ connections.Heartbeat = RunService.Heartbeat:Connect(function(deltaTime)
         if not running then
                 return
         end
+
+        -- FPS meter + adaptive update rate, evaluated once per second.
+        perf.frames = perf.frames + 1
+        perf.frameTime = perf.frameTime + deltaTime
+        if perf.frameTime >= 1 then
+                perf.fps = perf.frames / perf.frameTime
+                perf.frames = 0
+                perf.frameTime = 0
+                if PerfSettings.Saver then
+                        if perf.fps < 30 then
+                                perf.lowStreak = perf.lowStreak + 1
+                        elseif perf.fps >= 50 then
+                                perf.lowStreak = 0
+                        end
+                        if perf.lowStreak >= 2 then
+                                perf.interval = math.min(0.6, perf.interval + 0.15)
+                                perf.lowStreak = 0
+                        elseif perf.fps >= 55 and perf.interval > SLOW_INTERVAL then
+                                perf.interval = math.max(SLOW_INTERVAL, perf.interval - 0.1)
+                        end
+                else
+                        perf.interval = SLOW_INTERVAL
+                end
+        end
+
+        -- Spread the batched scan / instance-storm backlog across frames.
+        drainBatches()
+
         slowState.accumulator = slowState.accumulator + deltaTime
-        if slowState.accumulator < SLOW_INTERVAL then
+        if slowState.accumulator < perf.interval then
                 return
         end
         slowState.tick = (slowState.tick or 0) + 1
@@ -2319,6 +2563,9 @@ local function cleanup()
                         connection:Disconnect()
                 end)
         end
+
+        scanQueue = nil
+        addQueue = nil
 
         clearTrackedLoot()
 
