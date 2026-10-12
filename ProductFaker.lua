@@ -1,4 +1,3 @@
-
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -11,24 +10,7 @@ local TeleportService = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 
 local toggleKey = Enum.KeyCode.RightShift
-local supportedUrl = "https://loadstring.net/raw/TCiFuJc4kK"
-local title = "PRODUCT FAKER V4 : @vaehz on yt"
-
-local internalInfo = false
-local grantWindowUntil = 0
-
-local settings = {
-        autoFake = true,
-        refireOnRespawn = true,
-        ownsMode = "faked",
-        subSpoof = true,
-        premiumSpoof = false,
-        assetSpoof = false,
-        priceSpoof = false,
-        pollFakes = false,
-        autoBrute = false,
-        monitor = true,
-}
+local title = "PRODUCT FAKER V2 : @vaehz on yt"
 
 local asciiCfg = {
         enabled = true,
@@ -447,10 +429,8 @@ end
 local HomeButton = navButton("HomeButton", img.home, 1)
 local FakerButton = navButton("FakerButton", img.faker, 2)
 local LoggerButton = navButton("LoggerButton", img.logger, 3)
-local PassListButton = navButton("PassListButton", img.passes, 4)
-local SpoofButton = navButton("SpoofButton", img.copy, 5)
-local BackdoorsButton = navButton("BackdoorsButton", img.join, 6)
-local SupportedButton = navButton("SupportedButton", img.supported, 7)
+local SupportedButton = navButton("SupportedButton", img.supported, 4)
+local PassListButton = navButton("PassListButton", img.passes, 5)
 
 local SectionsContainer = create("Frame", {
         Name = "SectionsContainer",
@@ -525,185 +505,6 @@ local FakerScreen = makeScreen("FakerScreen", false)
 local ProductLogger = makeScreen("ProductLogger", true)
 local SupportedContainer = makeScreen("SupportedContainer", true)
 local GamepassList = makeScreen("GamepassList", true)
-local SpoofScreen = makeScreen("SpoofScreen", true)
-local BackdoorsScreen = makeScreen("BackdoorsScreen", true)
-
--- v3 components
-
-local function segmented(options, default, onChange)
-        local holder = create("Frame", {
-                Name = "Segmented",
-                Size = UDim2.new(1, 0, 0, 30),
-                BackgroundColor3 = col.panel,
-                BorderSizePixel = 0,
-        }, {corner(7), stroke()})
-        create("UIListLayout", {
-                FillDirection = Enum.FillDirection.Horizontal,
-                Padding = UDim.new(0, 2),
-                SortOrder = Enum.SortOrder.LayoutOrder,
-                Parent = holder,
-        })
-        create("UIPadding", {
-                PaddingTop = UDim.new(0, 2),
-                PaddingBottom = UDim.new(0, 2),
-                PaddingLeft = UDim.new(0, 2),
-                PaddingRight = UDim.new(0, 2),
-                Parent = holder,
-        })
-        local segs = {}
-        local current = default
-        local function paint(instant)
-                for _, name in ipairs(options) do
-                        local seg = segs[name]
-                        if name == current then
-                                if instant then
-                                        seg.BackgroundColor3, seg.TextColor3 = col.active, col.white
-                                else
-                                        tween(seg, 0.15, {BackgroundColor3 = col.active, TextColor3 = col.white})
-                                end
-                        else
-                                if instant then
-                                        seg.BackgroundColor3, seg.TextColor3 = col.button, col.icon
-                                else
-                                        tween(seg, 0.15, {BackgroundColor3 = col.button, TextColor3 = col.icon})
-                                end
-                        end
-                end
-        end
-        for i, name in ipairs(options) do
-                local seg = create("TextButton", {
-                        Name = name,
-                        LayoutOrder = i,
-                        Size = UDim2.new(1 / #options, -2, 1, 0),
-                        BackgroundColor3 = col.button,
-                        BorderSizePixel = 0,
-                        Text = name,
-                        FontFace = fontBold,
-                        TextSize = 13,
-                        TextColor3 = col.icon,
-                        AutoButtonColor = false,
-                        Parent = holder,
-                }, {corner(5)})
-                segs[name] = seg
-                seg.MouseEnter:Connect(function()
-                        if name ~= current then
-                                tween(seg, 0.12, {BackgroundColor3 = col.buttonHi})
-                        end
-                end)
-                seg.MouseLeave:Connect(function()
-                        if name ~= current then
-                                tween(seg, 0.2, {BackgroundColor3 = col.button})
-                        end
-                end)
-                seg.MouseButton1Click:Connect(function()
-                        if name ~= current then
-                                current = name
-                                paint(false)
-                                if onChange then
-                                        onChange(name)
-                                end
-                        end
-                end)
-        end
-        paint(true)
-        return holder, function()
-                return current
-        end
-end
-
-local function toggleRow(text, get, set)
-        local row = create("Frame", {
-                Name = "ToggleRow",
-                Size = UDim2.new(1, 0, 0, 40),
-                BackgroundColor3 = col.panel,
-                BorderSizePixel = 0,
-        }, {corner(), stroke()})
-        label({
-                Name = "Label",
-                AnchorPoint = Vector2.new(0, 0.5),
-                Position = UDim2.new(0, 12, 0.5, 0),
-                Size = UDim2.new(1, -80, 0, 18),
-                Text = text,
-                TextScaled = false,
-                FontFace = fontBold,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = row,
-        })
-        local pill = create("Frame", {
-                Name = "Pill",
-                AnchorPoint = Vector2.new(1, 0.5),
-                Position = UDim2.new(1, -10, 0.5, 0),
-                Size = UDim2.fromOffset(42, 22),
-                BackgroundColor3 = col.button,
-                BorderSizePixel = 0,
-                Parent = row,
-        }, {corner(11)})
-        local knob = create("Frame", {
-                Name = "Knob",
-                AnchorPoint = Vector2.new(0, 0.5),
-                Position = UDim2.new(0, 3, 0.5, 0),
-                Size = UDim2.fromOffset(16, 16),
-                BackgroundColor3 = col.icon,
-                BorderSizePixel = 0,
-                Parent = pill,
-        }, {corner(8)})
-        local function paint()
-                local on = get()
-                tween(pill, 0.18, {BackgroundColor3 = on and col.green or col.button})
-                tween(knob, 0.18, {
-                        Position = UDim2.new(0, on and 23 or 3, 0.5, 0),
-                        BackgroundColor3 = on and col.white or col.icon,
-                })
-        end
-        row.InputBegan:Connect(function(input)
-                if isClick(input) then
-                        set(not get())
-                        paint()
-                end
-        end)
-        paint()
-        return row
-end
-
-local function pillButton(text, order, onClick, wScale)
-        local btn = create("TextButton", {
-                Name = text,
-                LayoutOrder = order,
-                Size = UDim2.new(wScale or 0.5, -4, 1, -8),
-                BackgroundColor3 = col.button,
-                BorderSizePixel = 0,
-                Text = text,
-                FontFace = fontBold,
-                TextSize = 13,
-                TextColor3 = col.icon,
-                AutoButtonColor = false,
-        }, {corner(7), stroke()})
-        btn.MouseEnter:Connect(function()
-                tween(btn, 0.12, {BackgroundColor3 = col.buttonHi})
-        end)
-        btn.MouseLeave:Connect(function()
-                tween(btn, 0.2, {BackgroundColor3 = col.button})
-        end)
-        btn.MouseButton1Click:Connect(onClick)
-        return btn
-end
-
-local function listHeader(list)
-        return create("Frame", {
-                Name = "Header",
-                LayoutOrder = -1e8,
-                Size = UDim2.new(1, -8, 0, 34),
-                BackgroundTransparency = 1,
-                Parent = list,
-        }, {
-                create("UIListLayout", {
-                        FillDirection = Enum.FillDirection.Horizontal,
-                        Padding = UDim.new(0, 4),
-                        SortOrder = Enum.SortOrder.LayoutOrder,
-                        VerticalAlignment = Enum.VerticalAlignment.Center,
-                }),
-        })
-end
 
 local ToastStroke = create("UIStroke", {Color = col.white, Transparency = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
 local Toast = create("TextLabel", {
@@ -796,30 +597,6 @@ label({
         Parent = HomeScreen,
 })
 
-local gameInfoLbl = label({
-        Name = "GameInfo",
-        Text = "Loading game info...",
-        TextScaled = false,
-        TextSize = 13,
-        FontFace = fontItalic,
-        TextColor3 = col.dim,
-        Size = UDim2.fromScale(0.824, 0.07),
-        Position = UDim2.fromScale(0.5, 0.638),
-        Parent = HomeScreen,
-})
-task.spawn(function()
-        local name = game.Name
-        if not name or name == "" then
-                local ok, info = pcall(function()
-                        return MarketplaceService:GetProductInfo(game.PlaceId)
-                end)
-                if ok and type(info) == "table" then
-                        name = info.Name
-                end
-        end
-        gameInfoLbl.Text = (name or "Unknown game") .. ("  -  Place " .. game.PlaceId)
-end)
-
 local idInputPos = UDim2.fromScale(0.0122, 0)
 
 local IdStroke = stroke()
@@ -878,49 +655,9 @@ label({
 
 buttonFx(FakeButton, {BackgroundColor3 = col.panel}, {BackgroundColor3 = col.buttonHi})
 
-local chosenKind = "Auto"
-
-local kindSeg = segmented({"Auto", "Product", "Pass", "Asset", "Bundle", "Sub"}, "Auto", function(name)
-        chosenKind = name
-end)
-kindSeg.Position = UDim2.fromScale(0.0122, 0.235)
-kindSeg.Size = UDim2.fromScale(0.9756, 0.125)
-kindSeg.Parent = FakerScreen
-
-local BruteButton = create("ImageButton", {
-        Name = "BruteBtn",
-        Position = UDim2.fromScale(0.0122, 0.4),
-        Size = UDim2.fromScale(0.9756, 0.125),
-        BackgroundColor3 = col.panel,
-        BorderSizePixel = 0,
-        AutoButtonColor = false,
-        ImageTransparency = 1,
-        Parent = FakerScreen,
-}, {corner(), stroke(), create("UIScale")})
-
-label({
-        Name = "Label",
-        Text = "Brute-fire every signal type",
-        FontFace = fontBold,
-        Size = UDim2.fromScale(0.8176, 0.4651),
-        Position = UDim2.fromScale(0.5, 0.5),
-        Parent = BruteButton,
-})
-
-buttonFx(BruteButton, {BackgroundColor3 = col.panel}, {BackgroundColor3 = col.buttonHi})
-
-local refireRow = toggleRow("Refire all fakes on respawn", function()
-        return settings.refireOnRespawn
-end, function(v)
-        settings.refireOnRespawn = v
-end)
-refireRow.Position = UDim2.fromScale(0.0122, 0.565)
-refireRow.Size = UDim2.fromScale(0.9756, 0.125)
-refireRow.Parent = FakerScreen
-
 label({
         Name = "Notice",
-        Text = "Tip: paste a full roblox.com link, the ID is pulled out automatically. Brute-fire hits all 5 signal types at once for stubborn games. Most games still won't fall for any of this - check the supported list.",
+        Text = "Please note that this will NOT work in majority of games. Please do your research before complaining that this script is broken. At the bottom you'll find a list of games this supports.",
         Size = UDim2.fromScale(0.8244, 0.2222),
         Position = UDim2.fromScale(0.4841, 0.8889),
         Parent = FakerScreen,
@@ -1040,10 +777,8 @@ local tabs = {
         {name = "Home", button = HomeButton, screen = HomeScreen},
         {name = "Faker", button = FakerButton, screen = FakerScreen},
         {name = "Logger", button = LoggerButton, screen = ProductLogger},
-        {name = "Passes", button = PassListButton, screen = GamepassList},
-        {name = "Spoof", button = SpoofButton, screen = SpoofScreen},
-        {name = "Backdoors", button = BackdoorsButton, screen = BackdoorsScreen},
         {name = "Supported", button = SupportedButton, screen = SupportedContainer},
+        {name = "Passes", button = PassListButton, screen = GamepassList},
 }
 
 local navActive = {BackgroundColor3 = col.active, ImageColor3 = col.white}
@@ -1464,11 +1199,9 @@ local function getInfo(kind, id)
         end
         local info = false
         if infoTypes[kind] and tonumber(id) then
-                internalInfo = true
                 local ok, res = pcall(function()
                         return MarketplaceService:GetProductInfo(tonumber(id), infoTypes[kind])
                 end)
-                internalInfo = false
                 if ok and type(res) == "table" then
                         info = res
                 end
@@ -1483,7 +1216,7 @@ local function sendToFaker(id)
         toast("ID loaded: " .. tostring(id))
 end
 
--- fake engine (v3)
+-- fake
 
 local fire = {
         Product = function(id)
@@ -1498,36 +1231,14 @@ local fire = {
         Bundle = function(id)
                 MarketplaceService:SignalPromptBundlePurchaseFinished(LocalPlayer, id, true)
         end,
-        Subscription = function(id)
-                MarketplaceService:SignalPromptSubscriptionFinished(LocalPlayer, id, true)
-        end,
 }
-
-local fakedIds = {}
-
-local function rememberFake(id, kind)
-        fakedIds[tostring(id)] = kind
-end
-
-local function safeFire(kind, id)
-        local f = fire[kind]
-        if not f or not tonumber(id) then
-                return false
-        end
-        grantWindowUntil = os.clock() + 2.5
-        local ok, err = pcall(f, tonumber(id))
-        if not ok then
-                warn("[Product Faker] " .. tostring(kind) .. " " .. tostring(id) .. ": " .. tostring(err))
-        end
-        return ok
-end
 
 local function detectKind(id)
         local known = knownKinds[tostring(id)]
         if known and fire[known] then
                 return known
         end
-        for _, kind in ipairs({"Product", "Gamepass", "Asset", "Subscription"}) do
+        for _, kind in ipairs({"Product", "Gamepass", "Asset"}) do
                 if getInfo(kind, id) then
                         knownKinds[tostring(id)] = kind
                         return kind
@@ -1536,102 +1247,32 @@ local function detectKind(id)
         return "Product"
 end
 
-local function resolveKind(id)
-        if chosenKind == "Auto" then
-                return detectKind(id)
-        end
-        if chosenKind == "Pass" then
-                return "Gamepass"
-        end
-        if chosenKind == "Sub" then
-                return "Subscription"
-        end
-        return chosenKind
-end
-
-local function bruteFire(id)
-        local hits = 0
-        for kind in pairs(fire) do
-                if safeFire(kind, id) then
-                        hits += 1
-                end
-        end
-        rememberFake(id, detectKind(id))
-        return hits
-end
-
 local function fakePurchase(id)
-        local kind = resolveKind(id)
-        if not safeFire(kind, id) then
-                return nil
-        end
-        rememberFake(id, kind)
+        local kind = detectKind(id)
+        fire[kind](id)
         return kind
 end
 
-local function extractId(text)
-        if type(text) ~= "string" then
-                return nil
-        end
-        local s = text:gsub("%s", "")
-        local patterns = {
-                "^(%d+)$",
-                "[Gg]ame%-[Pp]ass[/=?#]?(%d+)",
-                "[Gg]amepass[/=?#]?(%d+)",
-                "[Cc]atalog/(%d+)",
-                "[Ll]ibrary/(%d+)",
-                "[Bb]undles?/(%d+)",
-                "[Pp]roduct[/=?#](%d+)",
-                "[Ss]ubscription[/=?#](%d+)",
-                "[Ii][Dd][=/](%d+)",
-                "[/=](%d+)$",
-        }
-        for _, pat in ipairs(patterns) do
-                local id = tonumber(s:match(pat))
-                if id then
-                        return id
-                end
-        end
-        return tonumber(s:match("(%d%d%d+)"))
-end
-
 local function submitFake()
-        local id = extractId(InpBox.Text)
+        local id = tonumber((InpBox.Text:gsub("%s", "")):match("^%d+$"))
         if not id then
                 shake(IdInput, idInputPos)
                 IdStroke.Color = col.red
                 IdStroke.Transparency = 0.3
                 tween(IdStroke, 0.6, {Color = col.white, Transparency = 0.86})
-                toast("Enter a valid ID or link", col.red)
+                toast("Enter a valid ID", col.red)
                 return
         end
-        local kind = fakePurchase(id)
-        if kind then
-                toast("Fired " .. kind:lower() .. " " .. id, col.green)
+        local ok, res = pcall(fakePurchase, id)
+        if ok then
+                toast("Fired " .. res:lower() .. " " .. id, col.green)
         else
+                warn("[Product Faker] " .. tostring(res))
                 toast("Error, check console", col.red)
         end
 end
 
-local function submitBrute()
-        local id = extractId(InpBox.Text)
-        if not id then
-                shake(IdInput, idInputPos)
-                toast("Enter a valid ID or link", col.red)
-                return
-        end
-        task.spawn(function()
-                local hits = bruteFire(id)
-                if hits > 0 then
-                        toast(("Brute-fired %d signals for %s"):format(hits, id), col.green)
-                else
-                        toast("Brute-fire failed, check console", col.red)
-                end
-        end)
-end
-
 FakeButton.MouseButton1Click:Connect(submitFake)
-BruteButton.MouseButton1Click:Connect(submitBrute)
 InpBox.FocusLost:Connect(function(enterPressed)
         tween(IdStroke, 0.2, {Transparency = 0.86})
         tween(IdInput, 0.2, {BackgroundColor3 = col.panel})
@@ -1642,54 +1283,8 @@ end)
 
 -- pass finder
 
-local listedItems = {}
-local fakeAllRunning = false
-
-local function fakeAllItems()
-        if fakeAllRunning then
-                toast("Fake ALL already running", col.yellow)
-                return
-        end
-        if #listedItems == 0 then
-                toast("Nothing to fire - scan first", col.yellow)
-                return
-        end
-        fakeAllRunning = true
-        task.spawn(function()
-                local fired, failed = 0, 0
-                for i, item in ipairs(listedItems) do
-                        if destroyed then
-                                break
-                        end
-                        if safeFire(item.kind, item.id) then
-                                rememberFake(item.id, item.kind)
-                                fired += 1
-                        else
-                                failed += 1
-                        end
-                        if i % 10 == 0 then
-                                task.wait(0.1)
-                        end
-                end
-                toast(("FAKE ALL: %d fired, %d failed"):format(fired, failed), fired > 0 and col.green or col.red)
-                fakeAllRunning = false
-        end)
-end
-
-local passesHeader = listHeader(GamepassList)
-local fakeAllPill = pillButton("FAKE ALL", 1, fakeAllItems)
-fakeAllPill.TextColor3 = col.red
-fakeAllPill.Parent = passesHeader
-local rescanPill = pillButton("Rescan", 2, function()
-        if scanProducts then
-                scanProducts()
-        end
-end)
-rescanPill.Parent = passesHeader
-
 local function addPass(data)
         knownKinds[tostring(data.id)] = data.kind
-        table.insert(listedItems, {id = data.id, kind = data.kind, name = data.name})
         local icon = data.icon
         if not icon and data.kind == "Gamepass" then
                 icon = ("rbxthumb://type=GamePass&id=%d&w=150&h=150"):format(data.id)
@@ -1703,13 +1298,8 @@ local function addPass(data)
                 onClick = function()
                         sendToFaker(data.id)
                 end,
-        }, img.faker, function()
-                if safeFire(data.kind, data.id) then
-                        rememberFake(data.id, data.kind)
-                        toast("Fired " .. data.kind:lower() .. " " .. data.id, col.green)
-                else
-                        toast("Fire failed, check console", col.red)
-                end
+        }, img.copy, function()
+                copyId(data.id)
         end)
 end
 
@@ -1849,7 +1439,6 @@ scanProducts = function()
                 return
         end
         scanning = true
-        table.clear(listedItems)
         clearList(GamepassList)
         local empty = emptyLabels[GamepassList]
         empty.Text = "Scanning..."
@@ -1934,9 +1523,6 @@ local function addLog(data)
         if data.price then
                 table.insert(sub, "R$" .. commas(data.price))
         end
-        if data.auto then
-                table.insert(sub, "AUTO-FIRED")
-        end
         table.insert(sub, os.date("%H:%M:%S"))
 
         local row = makeRow(ProductLogger, {
@@ -1974,59 +1560,18 @@ local function logPrompt(kind, id)
                 if destroyed then
                         return
                 end
-                local autoFired = false
-                if settings.autoFake and fire[kind] then
-                        if settings.autoBrute then
-                                autoFired = bruteFire(id) > 0
-                        else
-                                autoFired = safeFire(kind, id)
-                                if autoFired then
-                                        rememberFake(id, kind)
-                                end
-                        end
-                end
                 pendingRows[key] = addLog({
                         id = id,
                         kind = kind,
                         name = info and (info.Name or info.DisplayName),
                         price = info and (info.PriceInRobux or info.Price),
                         icon = iconFor(kind, id, info),
-                        auto = autoFired,
                 })
                 if not ProductLogger.Visible then
-                        if autoFired then
-                                toast(("AUTO-FIRED %s %s"):format(kind:lower(), tostring(id)), col.green)
-                        else
-                                toast(("Logged %s %s"):format(kind:lower(), tostring(id)))
-                        end
+                        toast(("Logged %s %s"):format(kind:lower(), tostring(id)))
                 end
         end)
 end
-
-local function refireAll()
-        local n = 0
-        for idStr, kind in pairs(fakedIds) do
-                if safeFire(kind, tonumber(idStr)) then
-                        n += 1
-                end
-        end
-        if n > 0 then
-                toast("Refired " .. n .. " fake(s)", col.green)
-        else
-                toast("Nothing to refire yet", col.yellow)
-        end
-end
-
-local loggerHeader = listHeader(ProductLogger)
-local autoFakePill = pillButton("Auto-Fake: ON", 1, function()
-        settings.autoFake = not settings.autoFake
-        autoFakePill.Text = "Auto-Fake: " .. (settings.autoFake and "ON" or "OFF")
-        autoFakePill.TextColor3 = settings.autoFake and col.green or col.dim
-end)
-autoFakePill.TextColor3 = settings.autoFake and col.green or col.dim
-autoFakePill.Parent = loggerHeader
-local refirePill = pillButton("Refire All", 2, refireAll)
-refirePill.Parent = loggerHeader
 
 local function markFinished(kind, id, purchased)
         local key = kind .. ":" .. tostring(id)
@@ -2066,21 +1611,28 @@ local promptKinds = {
         SubscriptionPurchase = "Subscription",
 }
 
+-- own logger handlers, so the finder's getconnections probe can skip them
+local ownPromptFns = {}
+
 local hooked = 0
 for suffix, kind in pairs(promptKinds) do
         -- first arg is the player (or userId on product finished), skip it
+        local onRequest = function(_, ...)
+                logPrompt(kind, firstId(...))
+        end
+        local onFinish = function(_, ...)
+                markFinished(kind, firstId(...), lastBool(...))
+        end
+        ownPromptFns[onRequest] = true
+        ownPromptFns[onFinish] = true
         local ok = pcall(function()
-                bind(MarketplaceService["Prompt" .. suffix .. "Requested"], function(_, ...)
-                        logPrompt(kind, firstId(...))
-                end)
+                bind(MarketplaceService["Prompt" .. suffix .. "Requested"], onRequest)
         end)
         if ok then
                 hooked += 1
         end
         pcall(function()
-                bind(MarketplaceService["Prompt" .. suffix .. "Finished"], function(_, ...)
-                        markFinished(kind, firstId(...), lastBool(...))
-                end)
+                bind(MarketplaceService["Prompt" .. suffix .. "Finished"], onFinish)
         end)
 end
 
@@ -2101,682 +1653,8 @@ if hooked == 0 and typeof(hookmetamethod) == "function" and typeof(getnamecallme
         end)
 end
 
--- ownership spoof engine (v3)
-
-local spoofHooked = false
-local spoofOld
-
-if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "function" then
-        local function spoofHandler(self, ...)
-                local method = getnamecallmethod()
-                if self == MarketplaceService then
-                        if method == "UserOwnsGamePassAsync" and settings.ownsMode ~= "off" then
-                                local id = tonumber(select(2, ...))
-                                if settings.ownsMode == "all" or (id and fakedIds[tostring(id)]) then
-                                        return true
-                                end
-                        elseif method == "UserSubscriptionStatusAsync" and settings.subSpoof then
-                                local subId = select(2, ...)
-                                return {
-                                        IsSubscribed = true,
-                                        SubscriptionId = subId,
-                                        ExpirationTime = os.time() + 31536000,
-                                        WillAutoRenew = true,
-                                }
-                        elseif method == "PlayerOwnsAssetAsync" and settings.assetSpoof then
-                                return true
-                        elseif method == "IsPremium" and settings.premiumSpoof then
-                                return true
-                        elseif method == "GetProductInfo" and settings.priceSpoof and not internalInfo then
-                                local results = table.pack(spoofOld(self, ...))
-                                local info = results[1]
-                                if type(info) == "table" then
-                                        info.PriceInRobux = 0
-                                        info.Price = 0
-                                        info.IsForSaleOrIsPublicDomain = true
-                                end
-                                return table.unpack(results, 1, results.n)
-                        end
-                end
-                return spoofOld(self, ...)
-        end
-        local ok = pcall(function()
-                spoofOld = hookmetamethod(game, "__namecall", typeof(newcclosure) == "function" and newcclosure(spoofHandler) or spoofHandler)
-        end)
-        spoofHooked = ok
-end
-
--- remote monitor + backdoor capture (v4)
--- the strongest layer: instead of hoping the game's client relays our fake
--- signals, we record every FireServer/InvokeServer the client makes, tag the
--- ones fired right after a fake (the game's own grant remote), and can replay
--- them any time - even on respawn, even from disk.
-
-local BD = {}
-BD.trafficLog = {}
-BD.trafficOrder = 0
-BD.dedupe = {}
-BD.macroList = {}
-BD.browserRows = {}
-BD.browserOrder = 0
-BD.spyHooked = false
-
-function BD.getPath(inst)
-        if typeof(inst) ~= "Instance" then
-                return tostring(inst)
-        end
-        local ok, path = pcall(function()
-                return inst:GetFullName()
-        end)
-        return ok and path or tostring(inst)
-end
-
-function BD.resolvePath(path)
-        if type(path) ~= "string" or path == "" then
-                return nil
-        end
-        local obj = game
-        for name in path:gmatch("[^.]+") do
-                local ok = pcall(function()
-                        obj = obj:FindFirstChild(name)
-                end)
-                if not ok or not obj then
-                        return nil
-                end
-        end
-        return obj
-end
-
-function BD.serializeArg(v, depth)
-        local t = typeof(v)
-        if v == nil then
-                return {__t = "nil"}
-        elseif t == "number" or t == "string" or t == "boolean" then
-                return v
-        elseif t == "Instance" then
-                return {__t = "inst", p = BD.getPath(v)}
-        elseif t == "Vector3" then
-                return {__t = "v3", x = v.X, y = v.Y, z = v.Z}
-        elseif t == "CFrame" then
-                return {__t = "cf", c = {v:GetComponents()}}
-        elseif t == "Color3" then
-                return {__t = "c3", r = v.R, g = v.G, b = v.B}
-        elseif t == "table" and (depth or 0) < 3 then
-                local out = {__t = "tbl", i = {}, k = {}}
-                for i, iv in ipairs(v) do
-                        out.i[i] = BD.serializeArg(iv, (depth or 0) + 1)
-                end
-                for k, kv in pairs(v) do
-                        if type(k) == "string" or type(k) == "number" then
-                                table.insert(out.k, {tostring(k), BD.serializeArg(kv, (depth or 0) + 1)})
-                        end
-                end
-                return out
-        end
-        return {__t = "str", s = tostring(v)}
-end
-
-function BD.deserializeArg(v)
-        if type(v) ~= "table" then
-                return v
-        end
-        local t = v.__t
-        if t == "nil" then
-                return nil
-        elseif t == "inst" then
-                return BD.resolvePath(v.p)
-        elseif t == "v3" then
-                return Vector3.new(v.x, v.y, v.z)
-        elseif t == "cf" then
-                return CFrame.new(table.unpack(v.c, 1, math.min(#v.c, 12)))
-        elseif t == "c3" then
-                return Color3.new(v.r, v.g, v.b)
-        elseif t == "tbl" then
-                local out = {}
-                for i, iv in ipairs(v.i or {}) do
-                        out[i] = BD.deserializeArg(iv)
-                end
-                for _, pair in ipairs(v.k or {}) do
-                        out[pair[1]] = BD.deserializeArg(pair[2])
-                end
-                return out
-        elseif t == "str" then
-                return v.s
-        end
-        return v
-end
-
-function BD.argPreview(v)
-        local t = typeof(v)
-        if v == nil then
-                return "nil"
-        elseif t == "string" then
-                local s = v:sub(1, 28)
-                return '"' .. s .. '"' .. (#v > 28 and "..." or "")
-        elseif t == "Instance" then
-                return v.Name
-        elseif t == "number" or t == "boolean" then
-                return tostring(v)
-        elseif t == "Vector3" then
-                return string.format("(%.1f,%.1f,%.1f)", v.X, v.Y, v.Z)
-        elseif t == "table" then
-                return "{}"
-        end
-        return t
-end
-
-function BD.replayCapture(entry)
-        task.spawn(function()
-                local ok = pcall(function()
-                        entry.rm[entry.method](entry.rm, table.unpack(entry.args, 1, entry.args.n))
-                end)
-                if ok then
-                        toast("Replayed " .. entry.path, col.green)
-                else
-                        toast("Replay failed", col.red)
-                end
-        end)
-end
-
-function BD.recordRemote(rm, method, ...)
-        if not settings.monitor or destroyed or typeof(rm) ~= "Instance" then
-                return
-        end
-        local path = BD.getPath(rm)
-        local now = os.clock()
-        local key = method .. "|" .. path
-        if BD.dedupe[key] and now - BD.dedupe[key] < 1.5 then
-                return
-        end
-        BD.dedupe[key] = now
-        local args = table.pack(...)
-        local isGrant = now < grantWindowUntil
-        BD.trafficOrder -= 1
-        local preview = {}
-        for i = 1, math.min(args.n, 4) do
-                table.insert(preview, BD.argPreview(args[i]))
-        end
-        local sub = method .. "  -  " .. os.date("%H:%M:%S")
-        if isGrant then
-                sub = sub .. "  -  GRANT CANDIDATE"
-        end
-        if #preview > 0 then
-                sub = sub .. "  -  " .. table.concat(preview, ", ")
-        end
-        local row = makeRow(BackdoorsScreen, {
-                title = path,
-                sub = sub,
-                order = BD.trafficOrder,
-                onClick = function()
-                        BD.replayCapture({rm = rm, method = method, args = args, path = path})
-                end,
-        }, img.copy, function()
-                if copy(path) then
-                        toast("Copied path")
-                end
-        end)
-        if isGrant then
-                local subLbl = row:FindFirstChild("Sub")
-                if subLbl then
-                        subLbl.TextColor3 = col.green
-                end
-        end
-        table.insert(BD.trafficLog, {row = row, rm = rm, method = method, args = args, path = path, grant = isGrant})
-        if #BD.trafficLog > 150 then
-                local old = table.remove(BD.trafficLog, 1)
-                if old.row and old.row.Parent then
-                        old.row:Destroy()
-                end
-        end
-end
-
-if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "function" then
-        local spyOld
-        local function spyHandler(self, ...)
-                local method = getnamecallmethod()
-                if method == "FireServer" or method == "InvokeServer" then
-                        pcall(BD.recordRemote, self, method, ...)
-                end
-                return spyOld(self, ...)
-        end
-        local okHook = pcall(function()
-                spyOld = hookmetamethod(game, "__namecall", typeof(newcclosure) == "function" and newcclosure(spyHandler) or spyHandler)
-        end)
-        BD.spyHooked = okHook
-end
-
-function BD.clearTraffic()
-        for _, entry in ipairs(BD.trafficLog) do
-                if entry.row and entry.row.Parent then
-                        entry.row:Destroy()
-                end
-        end
-        table.clear(BD.trafficLog)
-        table.clear(BD.dedupe)
-        toast("Cleared")
-end
-
-function BD.saveMacros()
-        local entries = {}
-        for _, entry in ipairs(BD.trafficLog) do
-                if entry.grant and entry.rm and entry.rm.Parent then
-                        local args = {}
-                        for i = 1, entry.args.n do
-                                args[i] = BD.serializeArg(entry.args[i], 0)
-                        end
-                        table.insert(entries, {path = entry.path, method = entry.method, args = args})
-                end
-        end
-        if #entries == 0 then
-                toast("No grant captures to save", col.yellow)
-                return
-        end
-        local payload = HttpService:JSONEncode({place = game.PlaceId, entries = entries})
-        local ok = false
-        if typeof(writefile) == "function" then
-                if typeof(makefolder) == "function" then
-                        pcall(makefolder, "productfaker")
-                end
-                ok = pcall(writefile, "productfaker/macro-" .. tostring(game.PlaceId) .. ".json", payload)
-        end
-        if ok then
-                toast("Saved " .. #entries .. " macro(s)", col.green)
-        else
-                toast("Save unavailable on this executor", col.red)
-        end
-end
-
-function BD.loadMacros(silent)
-        if typeof(readfile) ~= "function" then
-                if not silent then
-                        toast("Load unavailable on this executor", col.red)
-                end
-                return
-        end
-        local okBody, body = pcall(readfile, "productfaker/macro-" .. tostring(game.PlaceId) .. ".json")
-        if not okBody or type(body) ~= "string" or body == "" then
-                if not silent then
-                        toast("No saved macros for this game", col.yellow)
-                end
-                return
-        end
-        local okData, data = pcall(HttpService.JSONDecode, HttpService, body)
-        if not okData or type(data) ~= "table" or type(data.entries) ~= "table" then
-                if not silent then
-                        toast("Macro file corrupt", col.red)
-                end
-                return
-        end
-        local loaded = 0
-        for _, e in ipairs(data.entries) do
-                local rm = BD.resolvePath(e.path)
-                if rm and (rm:IsA("RemoteEvent") or rm:IsA("RemoteFunction")) then
-                        local args = {}
-                        for i, sv in ipairs(e.args or {}) do
-                                args[i] = BD.deserializeArg(sv)
-                        end
-                        table.insert(BD.macroList, {
-                                rm = rm,
-                                method = e.method or "FireServer",
-                                args = table.pack(table.unpack(args, 1, #args)),
-                                path = e.path,
-                        })
-                        loaded += 1
-                end
-        end
-        if loaded > 0 then
-                if not silent then
-                        toast("Loaded " .. loaded .. " macro(s)", col.green)
-                end
-        elseif not silent then
-                toast("Saved macros reference dead remotes", col.yellow)
-        end
-end
-
-function BD.replayAllMacros()
-        local n = 0
-        for _, m in ipairs(BD.macroList) do
-                if m.rm and m.rm.Parent then
-                        task.spawn(function()
-                                pcall(function()
-                                        m.rm[m.method](m.rm, table.unpack(m.args, 1, m.args.n))
-                                end)
-                        end)
-                        n += 1
-                end
-        end
-        for _, entry in ipairs(BD.trafficLog) do
-                if entry.grant and entry.rm and entry.rm.Parent then
-                        task.spawn(function()
-                                pcall(function()
-                                        entry.rm[entry.method](entry.rm, table.unpack(entry.args, 1, entry.args.n))
-                                end)
-                        end)
-                        n += 1
-                end
-        end
-        if n > 0 then
-                toast("Replaying " .. n .. " capture(s)", col.green)
-        else
-                toast("No captures to replay", col.yellow)
-        end
-end
-
-function BD.buildBrowser(filter)
-        for _, e in ipairs(BD.browserRows) do
-                if e.row and e.row.Parent then
-                        e.row:Destroy()
-                end
-        end
-        table.clear(BD.browserRows)
-        BD.browserOrder = 0
-        local filterLower = type(filter) == "string" and filter ~= "" and filter:lower() or nil
-        local found = 0
-        local function visit(container)
-                if found >= 400 or destroyed then
-                        return
-                end
-                local ok, kids = pcall(function()
-                        return container:GetChildren()
-                end)
-                if not ok then
-                        return
-                end
-                for _, child in ipairs(kids) do
-                        if found >= 400 then
-                                return
-                        end
-                        if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
-                                local path = BD.getPath(child)
-                                if not filterLower or path:lower():find(filterLower, 1, true) then
-                                        BD.browserOrder += 1
-                                        found += 1
-                                        local remote = child
-                                        local row = makeRow(BackdoorsScreen, {
-                                                title = remote.Name,
-                                                sub = remote.ClassName .. "  -  " .. path,
-                                                order = BD.browserOrder,
-                                                onClick = function()
-                                                        if copy(path) then
-                                                                toast("Copied path")
-                                                        end
-                                                end,
-                                        }, img.faker, function()
-                                                task.spawn(function()
-                                                        local id = extractId(InpBox.Text)
-                                                        local m = remote:IsA("RemoteFunction") and "InvokeServer" or "FireServer"
-                                                        local okFire = pcall(function()
-                                                                if id then
-                                                                        remote[m](remote, id)
-                                                                else
-                                                                        remote[m](remote)
-                                                                end
-                                                        end)
-                                                        if okFire then
-                                                                toast("Fired " .. remote.Name, col.green)
-                                                        else
-                                                                toast("Fire failed", col.red)
-                                                        end
-                                                end)
-                                        end)
-                                        table.insert(BD.browserRows, {row = row, remote = remote, path = path})
-                                end
-                        else
-                                visit(child)
-                        end
-                end
-        end
-        local skip = {CoreGui = true, CorePackages = true, Players = true, RobloxReplicatedStorage = true}
-        for _, svc in ipairs(game:GetChildren()) do
-                if not skip[svc.Name] then
-                        visit(svc)
-                end
-        end
-        return found
-end
-
-function BD.applyFilter(query)
-        local q = type(query) == "string" and query:lower() or ""
-        for _, e in ipairs(BD.browserRows) do
-                if e.row and e.row.Parent then
-                        e.row.Visible = q == "" or (e.path:lower():find(q, 1, true) ~= nil)
-                end
-        end
-        for _, entry in ipairs(BD.trafficLog) do
-                if entry.row and entry.row.Parent then
-                        entry.row.Visible = q == "" or (entry.path:lower():find(q, 1, true) ~= nil)
-                end
-        end
-end
-
-function BD.fireFiltered()
-        local targets = {}
-        for _, e in ipairs(BD.browserRows) do
-                if e.row and e.row.Parent and e.row.Visible then
-                        table.insert(targets, e.remote)
-                end
-        end
-        if #targets == 0 then
-                toast("No remotes match the filter", col.yellow)
-                return
-        end
-        local id = extractId(InpBox.Text)
-        local count = math.min(#targets, 60)
-        toast("Blasting " .. count .. " remote(s)...", col.yellow)
-        task.spawn(function()
-                for i, rm in ipairs(targets) do
-                        if i > 60 or destroyed then
-                                break
-                        end
-                        task.spawn(function()
-                                local m = rm:IsA("RemoteFunction") and "InvokeServer" or "FireServer"
-                                pcall(function()
-                                        if id then
-                                                rm[m](rm, id)
-                                        else
-                                                rm[m](rm)
-                                        end
-                                end)
-                        end)
-                        task.wait(0.05)
-                end
-        end)
-end
-
-bind(LocalPlayer.CharacterAdded, function()
-        if not settings.refireOnRespawn then
-                return
-        end
-        task.delay(2, function()
-                if destroyed then
-                        return
-                end
-                local n = 0
-                for idStr, kind in pairs(fakedIds) do
-                        if safeFire(kind, tonumber(idStr)) then
-                                n += 1
-                        end
-                        task.wait(0.08)
-                end
-                for _, m in ipairs(BD.macroList) do
-                        if m.rm and m.rm.Parent then
-                                task.spawn(function()
-                                        pcall(function()
-                                                m.rm[m.method](m.rm, table.unpack(m.args, 1, m.args.n))
-                                        end)
-                                end)
-                                n += 1
-                        end
-                end
-                if n > 0 then
-                        toast("Refired " .. n .. " fake(s) on respawn", col.green)
-                end
-        end)
-end)
-
--- spoof tab
-
-local spoofEmpty = emptyLabels[SpoofScreen]
-spoofEmpty.TextSize = 13
-spoofEmpty.Text = spoofHooked and "Hook ACTIVE  -  spoofing client-side checks" or "Hook UNAVAILABLE on this executor"
-spoofEmpty.TextColor3 = spoofHooked and col.green or col.red
-
-label({
-        Name = "OwnsLbl",
-        Text = "UserOwnsGamePassAsync spoof:",
-        TextScaled = false,
-        TextSize = 13,
-        FontFace = fontBold,
-        Size = UDim2.new(1, -8, 0, 16),
-        TextXAlignment = Enum.TextXAlignment.Left,
-        Parent = SpoofScreen,
-})
-
-local ownsSeg = segmented({"Off", "Faked", "All"}, "Faked", function(name)
-        settings.ownsMode = name:lower()
-        toast("Owns spoof: " .. name, name == "Off" and col.yellow or col.green)
-end)
-ownsSeg.Parent = SpoofScreen
-
-local subRow = toggleRow("Subscription status spoof", function()
-        return settings.subSpoof
-end, function(v)
-        settings.subSpoof = v
-end)
-subRow.Parent = SpoofScreen
-
-local premRow = toggleRow("Premium (IsPremium) spoof", function()
-        return settings.premiumSpoof
-end, function(v)
-        settings.premiumSpoof = v
-end)
-premRow.Parent = SpoofScreen
-
-local assetRow = toggleRow("Asset ownership spoof (legacy)", function()
-        return settings.assetSpoof
-end, function(v)
-        settings.assetSpoof = v
-end)
-assetRow.Parent = SpoofScreen
-
-local asciiRow = toggleRow("ASCII backdrop", function()
-        return asciiCfg.enabled
-end, function(v)
-        asciiCfg.enabled = v
-        if not v then
-                AsciiHolder.Visible = false
-        elseif isOpen then
-                AsciiHolder.Visible = true
-        end
-end)
-asciiRow.Parent = SpoofScreen
-
-local priceRow = toggleRow("Price spoof (GetProductInfo = 0)", function()
-        return settings.priceSpoof
-end, function(v)
-        settings.priceSpoof = v
-end)
-priceRow.Parent = SpoofScreen
-
-local autoBruteRow = toggleRow("Auto-Fake uses brute (all 5)", function()
-        return settings.autoBrute
-end, function(v)
-        settings.autoBrute = v
-end)
-autoBruteRow.Parent = SpoofScreen
-
-local pollRow = toggleRow("Poll-loop fakes every 3s", function()
-        return settings.pollFakes
-end, function(v)
-        settings.pollFakes = v
-end)
-pollRow.Parent = SpoofScreen
-
-label({
-        Name = "SpoofInfo",
-        Text = "These hooks lie to client-side ownership checks. Games that verify purchases on the server are unaffected. 'Faked' only spoofs IDs you've already faked, 'All' claims every gamepass.",
-        TextScaled = false,
-        TextSize = 12,
-        FontFace = fontItalic,
-        TextColor3 = col.dim,
-        Size = UDim2.new(1, -8, 0, 44),
-        TextWrapped = true,
-        Parent = SpoofScreen,
-})
-
--- backdoors tab
-
-local bdEmpty = emptyLabels[BackdoorsScreen]
-bdEmpty.Text = BD.spyHooked and "Monitor armed - live traffic + every game remote below. Green = fired right after a fake (grant candidate)."
-        or "Monitor hook UNAVAILABLE - browser + manual firing still work"
-bdEmpty.TextColor3 = BD.spyHooked and col.dim or col.red
-
-local bdHeader = listHeader(BackdoorsScreen)
-local monPill = pillButton("MON", 1, function()
-        settings.monitor = not settings.monitor
-        monPill.Text = settings.monitor and "MON ON" or "MON OFF"
-        monPill.TextColor3 = settings.monitor and col.green or col.dim
-end, 0.155)
-monPill.Text = settings.monitor and "MON ON" or "MON OFF"
-monPill.TextColor3 = settings.monitor and col.green or col.dim
-monPill.Parent = bdHeader
-local clrPill = pillButton("CLR", 2, BD.clearTraffic, 0.155)
-clrPill.Parent = bdHeader
-local savePill = pillButton("SAVE", 3, BD.saveMacros, 0.155)
-savePill.Parent = bdHeader
-local loadPill = pillButton("LOAD", 4, function()
-        BD.loadMacros(false)
-end, 0.155)
-loadPill.Parent = bdHeader
-local rplayPill = pillButton("RPLAY", 5, BD.replayAllMacros, 0.155)
-rplayPill.Parent = bdHeader
-local blastPill = pillButton("BLAST", 6, BD.fireFiltered, 0.155)
-blastPill.TextColor3 = col.red
-blastPill.Parent = bdHeader
-
-local filterFrame = create("Frame", {
-        Name = "Filter",
-        LayoutOrder = -1e7,
-        Size = UDim2.new(1, -8, 0, 30),
-        BackgroundColor3 = col.panel,
-        BorderSizePixel = 0,
-        Parent = BackdoorsScreen,
-}, {corner(7), stroke()})
-
-local filterBox = create("TextBox", {
-        Name = "Query",
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromScale(0.94, 0.7),
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        FontFace = fontInput,
-        PlaceholderText = "filter: buy / give / pass / item ...",
-        PlaceholderColor3 = col.dim,
-        Text = "",
-        TextColor3 = col.white,
-        TextScaled = true,
-        ClearTextOnFocus = false,
-        Parent = filterFrame,
-})
-filterBox.FocusLost:Connect(function()
-        BD.applyFilter(filterBox.Text)
-end)
-
-label({
-        Name = "BrowserLbl",
-        Text = "ALL GAME REMOTES  -  click row = copy path, bolt = fire with ID from Faker input",
-        LayoutOrder = 0,
-        TextScaled = false,
-        TextSize = 12,
-        FontFace = fontBold,
-        TextColor3 = col.dim,
-        Size = UDim2.new(1, -8, 0, 16),
-        TextXAlignment = Enum.TextXAlignment.Left,
-        Parent = BackdoorsScreen,
-})
-
--- supported games
+-- game finder: auto-detects whether the current game is fakeable, remembers
+-- every checked game, and can hunt through small games to find supported ones
 
 local function getFromHosts(path, hosts)
         for _, host in ipairs(hosts) do
@@ -2816,6 +1694,698 @@ local function getGameStats(universeIds)
 end
 
 local loadingSupported = false
+
+local Finder = {
+        db = {},
+        ui = {},
+        built = false,
+        checking = false,
+        huntFetching = false,
+        current = {placeId = game.PlaceId, state = "pending", evidence = nil, name = nil},
+        hunt = {on = false, queue = {}, idx = 0, hops = 0, found = 0, maxHops = 15, fails = 0, lastHop = 0},
+        canFiles = typeof(writefile) == "function" and typeof(readfile) == "function",
+        dbPath = "productfaker/found-games.json",
+        huntPath = "productfaker/hunt-state.json",
+        verdictMeta = {
+                pending = {col.dim, "AUTO-CHECK SOON"},
+                checking = {col.blue, "CHECKING THIS GAME..."},
+                supported = {col.green, "SUPPORTED"},
+                possible = {col.yellow, "POSSIBLY SUPPORTED"},
+                ["not-supported"] = {col.red, "NOT SUPPORTED"},
+                ["no-monetization"] = {col.dim, "NO PASSES / PRODUCTS"},
+                unknown = {col.dim, "UNKNOWN"},
+        },
+        finishedSignals = {
+                "PromptProductPurchaseFinished",
+                "PromptGamePassPurchaseFinished",
+                "PromptPurchaseFinished",
+                "PromptBundlePurchaseFinished",
+                "PromptSubscriptionPurchaseFinished",
+        },
+}
+
+-- ---------- persistence ----------
+
+function Finder.readJson(path)
+        local ok, s = pcall(readfile, path)
+        if not ok or type(s) ~= "string" or s == "" then
+                return nil
+        end
+        local okD, data = pcall(HttpService.JSONDecode, HttpService, s)
+        if okD and type(data) == "table" then
+                return data
+        end
+        return nil
+end
+
+function Finder.saveJson(path, t)
+        if not Finder.canFiles then
+                return
+        end
+        if typeof(makefolder) == "function" and typeof(isfolder) == "function" then
+                if not pcall(isfolder, "productfaker") then
+                        pcall(makefolder, "productfaker")
+                end
+        end
+        local ok, s = pcall(HttpService.JSONEncode, HttpService, t)
+        if ok then
+                pcall(writefile, path, s)
+        end
+end
+
+function Finder.saveDb()
+        local keys = {}
+        for k in pairs(Finder.db) do
+                table.insert(keys, k)
+        end
+        while #keys > 300 do
+                -- evict lowest-value oldest entries first
+                local worst, worstScore = nil, nil
+                for _, k in ipairs(keys) do
+                        local e = Finder.db[k]
+                        local rank = (e.verdict == "supported" and 3) or (e.verdict == "possible" and 2) or 1
+                        local score = rank * 1e11 + (e.when or 0)
+                        if not worstScore or score < worstScore then
+                                worst, worstScore = k, score
+                        end
+                end
+                Finder.db[worst] = nil
+                for i, k in ipairs(keys) do
+                        if k == worst then
+                                table.remove(keys, i)
+                                break
+                        end
+                end
+        end
+        Finder.saveJson(Finder.dbPath, Finder.db)
+end
+
+function Finder.saveHunt()
+        Finder.saveJson(Finder.huntPath, Finder.hunt)
+end
+
+if Finder.canFiles then
+        local db = Finder.readJson(Finder.dbPath)
+        if type(db) == "table" then
+                Finder.db = db
+        end
+        local h = Finder.readJson(Finder.huntPath)
+        if type(h) == "table" and type(h.queue) == "table" then
+                for k, v in pairs(h) do
+                        Finder.hunt[k] = v
+                end
+        end
+end
+
+do
+        local h = Finder.hunt
+        if type(h.queue) ~= "table" then
+                h.queue = {}
+        end
+        if type(h.on) ~= "boolean" then
+                h.on = false
+        end
+        for _, k in ipairs({"idx", "hops", "found", "maxHops", "fails", "lastHop"}) do
+                if type(h[k]) ~= "number" then
+                        h[k] = 0
+                end
+        end
+        if h.maxHops < 1 then
+                h.maxHops = 15
+        end
+end
+
+-- ---------- shared helpers ----------
+
+function Finder.trim(s)
+        if type(s) ~= "string" or s == "" then
+                return nil
+        end
+        if #s <= 52 then
+                return s
+        end
+        return s:sub(1, 50) .. "..."
+end
+
+-- ---------- detection ----------
+
+-- probe A: are any non-roblox scripts listening to the purchase signals?
+-- a client-side listener is the exact thing this script exploits
+function Finder.countHandlers()
+        if typeof(getconnections) ~= "function" then
+                return nil
+        end
+        local total = 0
+        local labels, seen = {}, {}
+        for _, sigName in ipairs(Finder.finishedSignals) do
+                local okSig, sig = pcall(function()
+                        return MarketplaceService[sigName]
+                end)
+                if okSig and sig then
+                        local okC, conns = pcall(getconnections, sig)
+                        if okC and type(conns) == "table" then
+                                for _, cn in ipairs(conns) do
+                                        local fn
+                                        pcall(function()
+                                                fn = cn.Function
+                                        end)
+                                        if fn == nil then
+                                                pcall(function()
+                                                        fn = cn["function"]
+                                                end)
+                                        end
+                                        if fn ~= nil and not ownPromptFns[fn] then
+                                                local src = ""
+                                                pcall(function()
+                                                        src = tostring((debug.getinfo(fn, "S") or {}).short_src or "")
+                                                end)
+                                                if not src:find("CoreGui", 1, true) and not src:find("CorePackages", 1, true) and not src:find("CoreScripts", 1, true) then
+                                                        total += 1
+                                                        local label = src ~= "" and src or sigName
+                                                        if not seen[label] then
+                                                                seen[label] = true
+                                                                table.insert(labels, label)
+                                                        end
+                                                end
+                                        end
+                                end
+                        end
+                end
+        end
+        return {count = total, labels = labels}
+end
+
+-- probe B: fire every pass/product the game has and watch what changes
+function Finder.snapNow()
+        local s = {tools = {}, gear = {}, gui = {}, stats = {}}
+        local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+        if bp then
+                for _, c in ipairs(bp:GetChildren()) do
+                        s.tools[c.Name] = true
+                end
+        end
+        local char = LocalPlayer.Character
+        if char then
+                for _, c in ipairs(char:GetChildren()) do
+                        if c:IsA("Tool") then
+                                s.tools[c.Name] = true
+                        end
+                end
+        end
+        local sg = LocalPlayer:FindFirstChildOfClass("StarterGear")
+        if sg then
+                for _, c in ipairs(sg:GetChildren()) do
+                        s.gear[c.Name] = true
+                        s.tools[c.Name] = true
+                end
+        end
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if pg then
+                for _, c in ipairs(pg:GetChildren()) do
+                        if c.Name ~= ScreenGui.Name then
+                                s.gui[c.Name] = true
+                        end
+                end
+        end
+        local ls = LocalPlayer:FindFirstChild("leaderstats")
+        if ls then
+                for _, c in ipairs(ls:GetChildren()) do
+                        if c:IsA("ValueBase") then
+                                local v = c.Value
+                                if type(v) == "number" then
+                                        s.stats[c.Name] = v
+                                end
+                        end
+                end
+        end
+        return s
+end
+
+function Finder.collectEvidence(before, after, seen, guiFirstSeen, strong, possible, now)
+        for name in pairs(after.tools) do
+                if not before.tools[name] and not seen.tool[name] then
+                        seen.tool[name] = true
+                        table.insert(strong, "granted tool: " .. name)
+                end
+        end
+        for name in pairs(after.gear) do
+                if not before.gear[name] and not seen.gear[name] then
+                        seen.gear[name] = true
+                        table.insert(strong, "granted gear: " .. name)
+                end
+        end
+        for name in pairs(after.gui) do
+                if not before.gui[name] then
+                        if not guiFirstSeen[name] then
+                                guiFirstSeen[name] = now
+                        elseif now - guiFirstSeen[name] >= 1.1 and not seen.gui[name] then
+                                seen.gui[name] = true
+                                table.insert(strong, "new ui: " .. name)
+                        end
+                end
+        end
+        for k, v in pairs(after.stats) do
+                local b = before.stats[k]
+                if b ~= nil and v ~= b and not seen.stat[k] then
+                        seen.stat[k] = true
+                        table.insert(possible, k .. " " .. commas(b) .. " to " .. commas(v))
+                end
+        end
+end
+
+function Finder.finish(state, evidence)
+        Finder.checking = false
+        Finder.current.state = state
+        Finder.current.evidence = evidence
+        Finder.db[tostring(game.PlaceId)] = {
+                placeId = game.PlaceId,
+                universeId = game.GameId ~= 0 and game.GameId or nil,
+                name = Finder.current.name,
+                verdict = state,
+                evidence = evidence,
+                when = os.time(),
+                playing = #Players:GetPlayers(),
+        }
+        Finder.saveDb()
+        if Finder.hunt.on and (state == "supported" or state == "possible") then
+                Finder.hunt.found += 1
+        end
+        Finder.updateCurrentRow()
+        if Finder.built and not loadingSupported then
+                loadSupported()
+        end
+        if state == "supported" then
+                toast("THIS GAME IS SUPPORTED", col.green)
+        elseif state == "possible" then
+                toast("This game might be supported", col.yellow)
+        end
+        Finder.afterCheck()
+end
+
+function Finder.autoCheck()
+        if Finder.checking or destroyed then
+                if Finder.checking then
+                        toast("Already checking this game", col.yellow)
+                end
+                return
+        end
+        Finder.checking = true
+        Finder.current = {placeId = game.PlaceId, state = "checking", evidence = nil, name = Finder.current.name}
+        Finder.updateCurrentRow()
+
+        task.spawn(function()
+                -- resolve current game name in the background
+                task.spawn(function()
+                        local ok, stats = pcall(getGameStats, {game.GameId})
+                        local g = ok and type(stats) == "table" and stats[game.GameId]
+                        if g and g.name then
+                                Finder.current.name = g.name
+                                Finder.updateCurrentRow()
+                        end
+                end)
+
+                local handlers = Finder.countHandlers()
+
+                local passes, products
+                task.spawn(function()
+                        passes = fetchGamepasses(game.GameId) or false
+                end)
+                task.spawn(function()
+                        products = fetchProducts() or false
+                end)
+                local t0 = os.clock()
+                while (passes == nil or products == nil) and os.clock() - t0 < 20 and not destroyed do
+                        task.wait(0.1)
+                end
+                if passes == nil then
+                        passes = false
+                end
+                if products == nil then
+                        products = false
+                end
+                if destroyed then
+                        Finder.checking = false
+                        return
+                end
+
+                local ids = {}
+                if type(passes) == "table" then
+                        for _, p in ipairs(passes) do
+                                if p.id then
+                                        table.insert(ids, {id = p.id, kind = "Gamepass"})
+                                end
+                        end
+                end
+                if type(products) == "table" then
+                        for _, p in ipairs(products) do
+                                if p.id then
+                                        table.insert(ids, {id = p.id, kind = "Product"})
+                                end
+                        end
+                end
+
+                if #ids == 0 then
+                        local fetched = type(passes) == "table" or type(products) == "table"
+                        if handlers and handlers.count > 0 then
+                                Finder.finish("possible", handlers.count .. " client handler(s) but no passes to fake")
+                        elseif fetched then
+                                Finder.finish("no-monetization", "no gamepasses or products found")
+                        else
+                                Finder.finish("unknown", "couldn't scan this game")
+                        end
+                        return
+                end
+
+                -- fire every pass/product and watch what the game grants
+                local cap = math.min(#ids, 80)
+                local before = Finder.snapNow()
+                local strong, possible = {}, {}
+                local seen = {tool = {}, gear = {}, gui = {}, stat = {}}
+                local guiFirstSeen = {}
+
+                task.spawn(function()
+                        for i = 1, cap do
+                                if destroyed then
+                                        return
+                                end
+                                local item = ids[i]
+                                local fn = fire[item.kind]
+                                if fn then
+                                        pcall(fn, item.id)
+                                end
+                                task.wait(0.12)
+                        end
+                end)
+
+                local deadline = os.clock() + 0.5 + cap * 0.12 + 7
+                local lastPoll = os.clock()
+                while os.clock() < deadline and not destroyed do
+                        task.wait(0.15)
+                        if os.clock() - lastPoll >= 1.2 then
+                                lastPoll = os.clock()
+                                Finder.collectEvidence(before, Finder.snapNow(), seen, guiFirstSeen, strong, possible, os.clock())
+                        end
+                end
+                if destroyed then
+                        Finder.checking = false
+                        return
+                end
+
+                if #strong > 6 then
+                        local extra = #strong - 6
+                        for i = #strong, 7, -1 do
+                                table.remove(strong)
+                        end
+                        table.insert(strong, "+" .. extra .. " more")
+                end
+                if #possible > 4 then
+                        local extra = #possible - 4
+                        for i = #possible, 5, -1 do
+                                table.remove(possible)
+                        end
+                        table.insert(possible, "+" .. extra .. " more")
+                end
+
+                local parts = {}
+                if handlers and handlers.count > 0 then
+                        table.insert(parts, handlers.count .. " client handler(s)")
+                end
+                for _, e in ipairs(strong) do
+                        table.insert(parts, e)
+                end
+                for _, e in ipairs(possible) do
+                        table.insert(parts, e)
+                end
+                local evidence = table.concat(parts, ", ")
+                if evidence == "" then
+                        evidence = "fired " .. cap .. " passes, nothing granted"
+                end
+
+                if #strong > 0 then
+                        Finder.finish("supported", evidence)
+                elseif (handlers and handlers.count > 0) or #possible > 0 then
+                        Finder.finish("possible", evidence)
+                else
+                        Finder.finish("not-supported", evidence)
+                end
+        end)
+end
+
+-- ---------- auto-hunt ----------
+
+function Finder.huntText()
+        if Finder.huntFetching then
+                return "Fetching candidate games..."
+        end
+        local h = Finder.hunt
+        if not h.on then
+                return "OFF  •  hops through small games to find supported ones"
+        end
+        return ("ON  •  hop %d/%d  •  %d found  •  %d queued"):format(h.hops, h.maxHops, h.found, math.max(#h.queue - h.idx, 0))
+end
+
+function Finder.refreshHuntRow()
+        local row = Finder.ui.huntRow
+        if row and row.Parent then
+                row.Sub.Text = Finder.huntText()
+                row.Sub.TextColor3 = Finder.hunt.on and col.green or col.icon
+        end
+end
+
+function Finder.fetchCandidates()
+        local out, seen = {}, {}
+        local hosts = {"games.roblox.com", "games.roproxy.com"}
+        for _, host in ipairs(hosts) do
+                local cursor, param, pages = nil, "pageToken", 0
+                while pages < 8 and #out < 250 and not destroyed do
+                        local url = ("https://%s/v1/games/list?model.sortToken=Default&pageSize=100&sessionId=%s"):format(host, HttpService:GenerateGUID(false))
+                        if cursor then
+                                url = url .. "&" .. param .. "=" .. HttpService:UrlEncode(cursor)
+                        end
+                        local d = getJson(url)
+                        local list = (d and type(d.data) == "table" and #d.data > 0) and d.data or nil
+                        if list then
+                                pages += 1
+                                for _, g in ipairs(list) do
+                                        local pid, playing = tonumber(g.id), tonumber(g.playerCount)
+                                        if pid and playing and playing >= 1 and playing <= 100 and not seen[pid] then
+                                                seen[pid] = true
+                                                if not Finder.db[tostring(pid)] then
+                                                        table.insert(out, pid)
+                                                end
+                                        end
+                                end
+                                local nextCursor = d.nextPageCursor or d.nextPageToken
+                                if not nextCursor then
+                                        break
+                                end
+                                cursor = nextCursor
+                        elseif cursor and param == "pageToken" then
+                                -- other pagination param name, retry same page
+                                param = "cursor"
+                        else
+                                break
+                        end
+                        task.wait(0.2)
+                end
+                if #out >= 25 or destroyed then
+                        break
+                end
+        end
+        for i = #out, 2, -1 do
+                local j = math.random(i)
+                out[i], out[j] = out[j], out[i]
+        end
+        return out
+end
+
+function Finder.startHunt()
+        Finder.huntFetching = true
+        Finder.refreshHuntRow()
+        toast("Hunt: fetching candidate games...")
+        task.spawn(function()
+                local queue = Finder.fetchCandidates()
+                Finder.huntFetching = false
+                if destroyed then
+                        return
+                end
+                if not queue or #queue == 0 then
+                        toast("Hunt: no candidate games found", col.red)
+                        Finder.refreshHuntRow()
+                        return
+                end
+                local h = Finder.hunt
+                h.on = true
+                h.queue = queue
+                h.idx = 0
+                h.hops = 0
+                h.found = 0
+                h.fails = 0
+                h.lastHop = os.time()
+                Finder.hopping = false
+                Finder.saveHunt()
+                toast(("Hunt on: %d candidates queued"):format(#queue), col.green)
+                Finder.refreshHuntRow()
+                task.delay(1.5, Finder.hopNext)
+        end)
+end
+
+function Finder.stopHunt(reason)
+        Finder.hunt.on = false
+        Finder.hopping = false
+        Finder.saveHunt()
+        if reason then
+                toast("Hunt " .. reason, col.yellow)
+        end
+        Finder.refreshHuntRow()
+end
+
+function Finder.toggleHunt()
+        if Finder.huntFetching then
+                return
+        end
+        if Finder.hunt.on then
+                Finder.stopHunt("stopped")
+        else
+                Finder.startHunt()
+        end
+end
+
+function Finder.hopNext()
+        local h = Finder.hunt
+        if not h.on or destroyed or Finder.hopping then
+                return
+        end
+        if h.hops >= h.maxHops then
+                Finder.stopHunt(("finished: %d of %d games supported"):format(h.found, h.hops))
+                return
+        end
+        if h.fails >= 5 then
+                Finder.stopHunt("stopped: teleports keep failing")
+                return
+        end
+        local place
+        while h.idx < #h.queue do
+                h.idx += 1
+                local pid = h.queue[h.idx]
+                if pid and pid ~= game.PlaceId and not Finder.db[tostring(pid)] then
+                        place = pid
+                        break
+                end
+        end
+        if not place then
+                Finder.stopHunt(("finished: %d of %d games supported"):format(h.found, h.hops))
+                return
+        end
+        h.hops += 1
+        h.lastHop = os.time()
+        Finder.saveHunt()
+        Finder.refreshHuntRow()
+        toast(("Hunt: joining game %d of %d"):format(h.hops, h.maxHops))
+        Finder.hopping = true
+        local ok = pcall(TeleportService.Teleport, TeleportService, place, LocalPlayer)
+        if not ok then
+                Finder.hopping = false
+                h.fails += 1
+                task.delay(3, Finder.hopNext)
+        end
+end
+
+-- roblox reports failed teleports through this signal instead of errors;
+-- without it the hunt would stall whenever a hop target is full or blocked
+pcall(function()
+        bind(TeleportService.TeleportInitFailed, function()
+                if Finder.hunt.on and Finder.hopping then
+                        Finder.hopping = false
+                        Finder.hunt.fails += 1
+                        task.delay(3, Finder.hopNext)
+                end
+        end)
+end)
+
+function Finder.afterCheck()
+        if Finder.hunt.on and not destroyed then
+                task.delay(2, Finder.hopNext)
+        end
+end
+
+-- continue a hunt after a teleport once this script re-executes
+function Finder.resumeHunt()
+        local h = Finder.hunt
+        if not h.on then
+                return
+        end
+        if os.time() - (h.lastHop or 0) > 180 then
+                h.on = false
+                Finder.saveHunt()
+                toast("Hunt expired", col.yellow)
+                return
+        end
+        toast(("Hunt: resuming, hop %d/%d, %d found"):format(h.hops, h.maxHops, h.found), col.blue)
+end
+
+-- ---------- supported tab ui ----------
+
+function Finder.verdictText()
+        local m = Finder.verdictMeta[Finder.current.state] or Finder.verdictMeta.unknown
+        local parts = {m[2]}
+        local ev = Finder.trim(Finder.current.evidence)
+        if ev then
+                table.insert(parts, ev)
+        end
+        return table.concat(parts, "  •  ")
+end
+
+function Finder.updateCurrentRow()
+        local row = Finder.ui.currentRow
+        if not row or not row.Parent then
+                return
+        end
+        if Finder.current.name and row.Title.Text ~= Finder.current.name then
+                row.Title.Text = Finder.current.name
+        end
+        local m = Finder.verdictMeta[Finder.current.state] or Finder.verdictMeta.unknown
+        row.Sub.Text = Finder.verdictText()
+        row.Sub.TextColor3 = m[1]
+end
+
+function Finder.entrySub(e)
+        local m = Finder.verdictMeta[e.verdict] or Finder.verdictMeta.unknown
+        local parts = {m[2]}
+        local ev = Finder.trim(e.evidence)
+        if ev then
+                table.insert(parts, ev)
+        end
+        if e.playing then
+                table.insert(parts, commas(e.playing) .. " playing")
+        end
+        if e.when then
+                table.insert(parts, os.date("%m/%d %H:%M", e.when))
+        end
+        return table.concat(parts, "  •  ")
+end
+
+function Finder.sortedDb()
+        local rank = {supported = 0, possible = 1, ["not-supported"] = 2, ["no-monetization"] = 3, unknown = 4}
+        local entries = {}
+        for _, e in pairs(Finder.db) do
+                if type(e) == "table" and e.placeId then
+                        table.insert(entries, e)
+                end
+        end
+        table.sort(entries, function(a, b)
+                local ra, rb = rank[a.verdict] or 5, rank[b.verdict] or 5
+                if ra ~= rb then
+                        return ra < rb
+                end
+                return (a.when or 0) > (b.when or 0)
+        end)
+        while #entries > 100 do
+                table.remove(entries)
+        end
+        return entries
+end
+
 loadSupported = function()
         if loadingSupported or destroyed then
                 return
@@ -2824,109 +2394,113 @@ loadSupported = function()
 
         local empty = emptyLabels[SupportedContainer]
         clearList(SupportedContainer)
-        empty.Text = "Loading supported games..."
+        empty.Text = "Building your found-games list..."
+        Finder.ui = {}
 
         task.spawn(function()
-                local ok, list = pcall(function()
-                        return loadstring(game:HttpGet(supportedUrl))()
+                -- current game + verdict
+                Finder.ui.currentRow = makeRow(SupportedContainer, {
+                        title = Finder.current.name or "This game",
+                        sub = Finder.verdictText(),
+                        icon = ("rbxthumb://type=GameIcon&id=%d&w=150&h=150"):format(game.PlaceId),
+                        order = -3,
+                        onClick = function()
+                                copyId(game.PlaceId)
+                        end,
+                }, img.supported, function()
+                        toast("Re-checking this game...")
+                        Finder.autoCheck()
                 end)
-                if destroyed then
-                        return
-                end
-                if not ok or type(list) ~= "table" then
-                        empty.Text = "Couldn't load the supported games list."
-                        warn("[Product Faker] supported list failed: " .. tostring(list))
-                        loadingSupported = false
-                        return
-                end
+                Finder.updateCurrentRow()
 
-                clearList(SupportedContainer)
-                empty.Text = "No supported games listed."
+                -- hunt toggle
+                Finder.ui.huntRow = makeRow(SupportedContainer, {
+                        title = "Auto-Hunt",
+                        sub = Finder.huntText(),
+                        icon = img.join,
+                        order = -2,
+                }, img.join, function()
+                        Finder.toggleHunt()
+                end)
+                Finder.refreshHuntRow()
 
-                local entries = {}
-                local supportedHere = false
-
-                for i, entry in ipairs(list) do
-                        local placeId, name = entry, nil
-                        if type(entry) == "table" then
-                                placeId, name = entry.PlaceId or entry[1], entry.Name
-                        end
-                        placeId = tonumber(placeId)
-
-                        if placeId then
-                                local here = placeId == game.PlaceId
-                                supportedHere = supportedHere or here
-
-                                local row = makeRow(SupportedContainer, {
-                                        title = name or "Place " .. placeId,
-                                        sub = here and "You're in this game  •  loading..." or "Loading players...",
-                                        icon = ("rbxthumb://type=Asset&id=%d&w=150&h=150"):format(placeId),
-                                        order = here and -1 or i,
-                                }, img.join, function()
-                                        if here then
-                                                toast("You're already in this game", col.yellow)
-                                        else
-                                                toast("Teleporting...")
-                                                pcall(TeleportService.Teleport, TeleportService, placeId, LocalPlayer)
-                                        end
-                                end)
-
+                -- every game found so far
+                local entries = Finder.sortedDb()
+                for i, e in ipairs(entries) do
+                        local here = e.placeId == game.PlaceId
+                        e.row = makeRow(SupportedContainer, {
+                                title = e.name or ("Place " .. tostring(e.placeId)),
+                                sub = Finder.entrySub(e),
+                                icon = ("rbxthumb://type=GameIcon&id=%d&w=150&h=150"):format(e.placeId),
+                                order = i,
+                                onClick = function()
+                                        copyId(e.placeId)
+                                end,
+                        }, img.join, function()
                                 if here then
-                                        row.Sub.TextColor3 = col.green
+                                        toast("You're already in this game", col.yellow)
+                                else
+                                        toast("Teleporting...")
+                                        pcall(TeleportService.Teleport, TeleportService, e.placeId, LocalPlayer)
                                 end
-                                table.insert(entries, {row = row, placeId = placeId, here = here, named = name ~= nil})
+                        end)
+                        if here then
+                                e.row.Sub.TextColor3 = col.green
                         end
                 end
 
-                if supportedHere then
-                        toast("This game is supported", col.green)
-                end
+                empty.Text = "Every game you join gets auto-checked. Found games are saved."
+                Finder.built = true
 
-                -- resolve place -> universe in parallel
+                -- resolve names + live player counts
+                local tEnrich = os.clock()
                 local pending = #entries
                 for _, e in ipairs(entries) do
                         task.spawn(function()
-                                local okId, id = pcall(getUniverseId, e.placeId)
-                                e.universeId = okId and id or nil
+                                if not e.universeId then
+                                        local okId, uid = pcall(getUniverseId, e.placeId)
+                                        if okId then
+                                                e.universeId = uid
+                                        end
+                                end
                                 pending -= 1
                         end)
                 end
-                while pending > 0 and not destroyed do
+                while pending > 0 and not destroyed and os.clock() - tEnrich < 15 do
                         task.wait()
                 end
                 if destroyed then
+                        loadingSupported = false
                         return
                 end
-
-                local ids, seen = {}, {}
+                local ids, seenIds = {}, {}
                 for _, e in ipairs(entries) do
-                        if e.universeId and not seen[e.universeId] then
-                                seen[e.universeId] = true
+                        if e.universeId and not seenIds[e.universeId] then
+                                seenIds[e.universeId] = true
                                 table.insert(ids, e.universeId)
                         end
                 end
-
                 local stats = #ids > 0 and getGameStats(ids) or {}
                 if destroyed then
+                        loadingSupported = false
                         return
                 end
-
                 for _, e in ipairs(entries) do
                         local row = e.row
-                        if row.Parent then
+                        if row and row.Parent then
                                 local g = e.universeId and stats[e.universeId]
-                                local prefix = e.here and "You're in this game  •  " or ""
-                                if g and g.playing then
-                                        row.Sub.Text = prefix .. commas(g.playing) .. " playing"
-                                else
-                                        row.Sub.Text = prefix .. "Players unavailable"
-                                end
-                                if not e.named and g and g.name then
-                                        row.Title.Text = g.name
+                                if g then
+                                        if g.playing then
+                                                e.playing = g.playing
+                                        end
+                                        if g.name and not e.name then
+                                                e.name = g.name
+                                                row.Title.Text = g.name
+                                        end
+                                        row.Sub.Text = Finder.entrySub(e)
                                 end
                         end
                 end
-
                 loadingSupported = false
         end)
 end
@@ -2936,22 +2510,5 @@ env.__ProductFaker = UI
 open()
 scanProducts()
 loadSupported()
-
-task.delay(5, function()
-        if destroyed then
-                return
-        end
-        BD.loadMacros(true)
-        task.spawn(BD.buildBrowser, filterBox.Text)
-end)
-
-task.spawn(function()
-        while not destroyed do
-                task.wait(3)
-                if settings.pollFakes and not destroyed then
-                        for idStr, kind in pairs(fakedIds) do
-                                safeFire(kind, tonumber(idStr))
-                        end
-                end
-        end
-end)
+Finder.resumeHunt()
+task.delay(7, Finder.autoCheck)
