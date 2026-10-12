@@ -8,10 +8,13 @@ local PLACE_ID = 2539588846
 local GOD_HEALTH = 1000000000
 local HEAL_GAP = 0.15
 local WATCH_GAP = 2
-local NAN = 0 / 0
+local DOOR_EPS = 0.5
+local CLICK_GAP = 0.45
+local SETTLE_GAP = 0.3
+local RESOLVE_GAP = 1.5
+local RESOLVE_TRIES = 3
 
 local LocalPlayer = Players.LocalPlayer
-local Mouse = LocalPlayer:GetMouse()
 local Global = (getgenv and getgenv()) or _G
 
 if type(Global.__SpeckyWoodsCleanup) == "function" then
@@ -56,11 +59,9 @@ if game.PlaceId ~= PLACE_ID then
         return
 end
 
-local TargetPointFix = ReplicatedStorage:WaitForChild("TargetPointFix", 5)
 local LastSpot = ReplicatedStorage:WaitForChild("LastSpot", 5)
 
-if not (TargetPointFix and TargetPointFix:IsA("RemoteEvent"))
-        or not (LastSpot and LastSpot:IsA("RemoteEvent")) then
+if not (LastSpot and LastSpot:IsA("RemoteEvent")) then
         local tab = Window:Tab("Main", "zap")
         local section = tab:Section("Specky Woods")
         section:Paragraph({Text = "Game updated?"})
@@ -80,12 +81,9 @@ local lastSpotOwned = false
 local resetOk = false
 local fakeSpotOn = false
 local savedSpot = nil
-local targetPlayer = nil
-local aimActive = false
 local healToken = 0
 
 local statusParagraph = nil
-local targetDropdown = nil
 local walkSlider, jumpSlider, hipSlider
 local jumpToggle, godToggle
 
@@ -267,19 +265,155 @@ table.insert(conns, UserInputService.JumpRequest:Connect(function()
         end
 end))
 
-table.insert(conns, RunService.Heartbeat:Connect(function()
-        if not aimActive or not targetPlayer then
+local tentLocks = {
+        {
+                label = "Red Tent",
+                modelName = "RedTent",
+                enabled = false,
+                running = false,
+                door = nil,
+                lastPos = nil,
+                lastClick = 0,
+                lastMove = 0,
+                pending = false,
+                closes = 0,
+                tries = 0,
+                giveUp = false,
+                missing = false,
+        },
+        {
+                label = "Blue Tent",
+                modelName = "BlueTent",
+                enabled = false,
+                running = false,
+                door = nil,
+                lastPos = nil,
+                lastClick = 0,
+                lastMove = 0,
+                pending = false,
+                closes = 0,
+                tries = 0,
+                giveUp = false,
+                missing = false,
+        },
+}
+
+local tentStatusParagraph = nil
+local redLockToggle, blueLockToggle
+
+local function tentStatusText()
+        local lines = {}
+        for _, lock in ipairs(tentLocks) do
+                local state = "Off"
+                if lock.enabled then
+                        if lock.giveUp or lock.missing then
+                                state = "No door"
+                        else
+                                state = "On (" .. tostring(lock.closes) .. " closes)"
+                        end
+                end
+                table.insert(lines, lock.label .. ": " .. state)
+        end
+        return table.concat(lines, "\n")
+end
+
+local function pushTentStatus()
+        if tentStatusParagraph then
+                tentStatusParagraph:Set(tentStatusText())
+        end
+end
+
+local function startTentLock(lock)
+        if lock.running then
                 return
         end
-        local character = targetPlayer.Character
-        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-        if not humanoid or humanoid.Health <= 0 then
-                return
-        end
-        pcall(function()
-                TargetPointFix:FireServer(humanoid, Mouse.Hit.Position)
+        lock.running = true
+        task.spawn(function()
+                while alive and lock.enabled do
+                        local model = workspace:FindFirstChild(lock.modelName)
+                        local entrance = model and model:FindFirstChild("Entrance")
+                        local clicker = entrance and entrance:FindFirstChild("Clicker")
+                        local cd = clicker and clicker:FindFirstChild("ClickDetector")
+                        local marker = entrance and entrance:FindFirstChild("Closed")
+                        if cd and marker then
+                                if lock.missing then
+                                        lock.missing = false
+                                        pushTentStatus()
+                                end
+                                local door = lock.door
+                                if door and door.Parent ~= model then
+                                        door = nil
+                                        lock.door = nil
+                                        lock.lastPos = nil
+                                end
+                                if not door then
+                                        local found = nil
+                                        local bestDist = math.huge
+                                        for _, child in ipairs(model:GetChildren()) do
+                                                if child:IsA("BasePart") and child ~= marker then
+                                                        local dist = (child.Position - marker.Position).Magnitude
+                                                        if dist < bestDist then
+                                                                bestDist = dist
+                                                                found = child
+                                                        end
+                                                end
+                                        end
+                                        if found and bestDist <= DOOR_EPS then
+                                                lock.door = found
+                                                lock.lastPos = found.Position
+                                                lock.lastMove = os.clock()
+                                                lock.closes = 0
+                                                lock.pending = false
+                                                lock.tries = 0
+                                                lock.giveUp = false
+                                        elseif not lock.giveUp and os.clock() - lock.lastClick >= RESOLVE_GAP then
+                                                lock.lastClick = os.clock()
+                                                lock.tries = lock.tries + 1
+                                                if lock.tries >= RESOLVE_TRIES then
+                                                        lock.giveUp = true
+                                                        pushTentStatus()
+                                                end
+                                                pcall(function()
+                                                        fireclickdetector(cd)
+                                                end)
+                                        end
+                                else
+                                        local now = os.clock()
+                                        if lock.lastPos and (door.Position - lock.lastPos).Magnitude > 0.01 then
+                                                lock.lastMove = now
+                                        end
+                                        lock.lastPos = door.Position
+                                        local dist = (door.Position - marker.Position).Magnitude
+                                        if dist <= DOOR_EPS then
+                                                if lock.pending then
+                                                        lock.pending = false
+                                                        lock.closes = lock.closes + 1
+                                                        pushTentStatus()
+                                                end
+                                        elseif not lock.pending then
+                                                lock.lastClick = now
+                                                lock.pending = true
+                                                pcall(function()
+                                                        fireclickdetector(cd)
+                                                end)
+                                        elseif now - lock.lastClick >= CLICK_GAP and now - lock.lastMove >= SETTLE_GAP then
+                                                lock.lastClick = now
+                                                pcall(function()
+                                                        fireclickdetector(cd)
+                                                end)
+                                        end
+                                end
+                        else
+                                if not lock.missing then
+                                        lock.missing = true
+                                        pushTentStatus()
+                                end
+                        end
+                        RunService.Heartbeat:Wait()
+                end
+                lock.running = false
         end)
-end))
+end
 
 local mainTab = Window:Tab("Main", "zap")
 local moveSection = mainTab:Section("Movement")
@@ -390,100 +524,49 @@ guardSection:Toggle({
         end,
 })
 
-local testsTab = Window:Tab("Tests", "skull")
-local targetSection = testsTab:Section("Target")
-local aimSection = testsTab:Section("TargetPointFix")
-local tentSection = testsTab:Section("Tent Doors")
-local spotSection = testsTab:Section("Death Spot")
+local lockSection = mainTab:Section("Tent Locks")
 
-local function playerOptions()
-        local list = {}
-        for _, plr in ipairs(Players:GetPlayers()) do
-                if plr ~= LocalPlayer then
-                        table.insert(list, plr)
-                end
-        end
-        return list
-end
+tentStatusParagraph = lockSection:Paragraph({Text = tentStatusText()})
 
-local function validTarget(value)
-        return typeof(value) == "Instance" and value:IsA("Player") and value.Parent ~= nil
-end
-
-local function refreshPlayers()
-        if not targetDropdown then
-                return
-        end
-        targetDropdown:SetOptions(playerOptions())
-        if validTarget(targetDropdown.Value) then
-                targetPlayer = targetDropdown.Value
-        else
-                targetPlayer = nil
-        end
-end
-
-targetDropdown = targetSection:Dropdown({
-        Text = "Player",
-        Options = playerOptions(),
-        Callback = function(value)
-                if validTarget(value) then
-                        targetPlayer = value
+local function setTentLock(lock, toggleRef, v)
+        lock.enabled = v
+        if v then
+                if type(fireclickdetector) ~= "function" then
+                        lock.enabled = false
+                        Window:Notify({
+                                Title = "Tent Locks",
+                                Description = "fireclickdetector unavailable.",
+                                Duration = 4,
+                        })
+                        if toggleRef then
+                                toggleRef:Set(false, true)
+                        end
                 else
-                        targetPlayer = nil
+                        startTentLock(lock)
                 end
-        end,
-})
-
-table.insert(conns, Players.PlayerAdded:Connect(refreshPlayers))
-table.insert(conns, Players.PlayerRemoving:Connect(function(leaving)
-        if targetPlayer == leaving then
-                targetPlayer = nil
         end
-        refreshPlayers()
-end))
+        pushTentStatus()
+end
 
-aimSection:Toggle({
-        Text = "Aim Target At Mouse",
+redLockToggle = lockSection:Toggle({
+        Text = "Lock Red Tent",
         Value = false,
         Callback = function(v)
-                aimActive = v
+                setTentLock(tentLocks[1], redLockToggle, v)
         end,
 })
 
-aimSection:Button({
-        Text = "NaN Fling Target",
-        Callback = function()
-                if not validTarget(targetPlayer) then
-                        Window:Notify({
-                                Title = "TargetPointFix",
-                                Description = "No target.",
-                                Duration = 4,
-                        })
-                        return
-                end
-                local character = targetPlayer.Character
-                local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-                if not humanoid then
-                        Window:Notify({
-                                Title = "TargetPointFix",
-                                Description = "Target has no character.",
-                                Duration = 4,
-                        })
-                        return
-                end
-                local poison = Vector3.new(NAN, NAN, NAN)
-                for i = 1, 3 do
-                        pcall(function()
-                                TargetPointFix:FireServer(humanoid, poison)
-                        end)
-                end
-                Window:Notify({
-                        Title = "TargetPointFix",
-                        Description = "NaN fired at " .. targetPlayer.Name .. ".",
-                        Duration = 4,
-                })
+blueLockToggle = lockSection:Toggle({
+        Text = "Lock Blue Tent",
+        Value = false,
+        Callback = function(v)
+                setTentLock(tentLocks[2], blueLockToggle, v)
         end,
 })
+
+local testsTab = Window:Tab("Tests", "skull")
+local tentSection = testsTab:Section("Tent Doors")
+local spotSection = testsTab:Section("Death Spot")
 
 local function fireTent(rootName, label)
         if type(fireclickdetector) ~= "function" then
@@ -589,8 +672,10 @@ spotSection:Button({
 
 Global.__SpeckyWoodsCleanup = function()
         alive = false
-        aimActive = false
         healToken = healToken + 1
+        for _, lock in ipairs(tentLocks) do
+                lock.enabled = false
+        end
         for _, c in ipairs(conns) do
                 pcall(function()
                         c:Disconnect()
