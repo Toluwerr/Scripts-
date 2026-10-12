@@ -501,20 +501,18 @@ end
 -- =============================================================
 
 -- Two scope exclusions (user-specified), everything else with a value is tracked:
--- 1. Equipment-shop stock: items racked for sale inside the shop building
---    ("TrashAmerica"). In RUNAWAYS that is Workspace.Art.Weapons - the shop
---    stand with the Melee/Ranged rack sections, price sign and the weapons/
---    ammo hung on it.
+-- 1. Equipment-shop displays: the showcase stock racked inside the shop
+--    building ("TrashAmerica"). In RUNAWAYS that is Workspace.Case - the
+--    WeaponShowcase wall, the Street/Heat/BaseCase pedestals and the weapon
+--    skin models mounted on them. The weapons/ammo under Workspace.Art are
+--    NOT shop stock: the same weapons and ammo are findable all over the map
+--    as world loot, so they stay tracked.
 -- 2. Held/holstered/carried items: anything with an ancestor character Model
 --    (a Model with a Humanoid) - covers players AND NPCs, including holsters
 --    folders and tools equipped in hand. World drops stay visible once released.
 
 local function getEquipmentShop()
-        local art = Workspace:FindFirstChild("Art")
-        if not art then
-                return nil
-        end
-        local shop = art:FindFirstChild("Weapons")
+        local shop = Workspace:FindFirstChild("Case")
         if shop and (shop:IsA("Folder") or shop:IsA("Model")) then
                 return shop
         end
