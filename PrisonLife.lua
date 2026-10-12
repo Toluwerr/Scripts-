@@ -1,14 +1,18 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
+local Teams = game:GetService("Teams")
 
 local PLACE_ID = 155615604
-local GIVER_WAIT = 4
+local C4_TOOL_NAME = "C4 Explosive"
+local TOUCH_WAIT = 0.15
+local VERIFY_WAIT = 0.5
+local HOLD_GAP = 0.1
+local TEAM_WAIT = 8
 local DETONATE_DELAY = 0.55
 local EXPLODED_WAIT = 3
 local RETREAT_DISTANCE = 60
-local DOOR_DELAY = 0.35
-local C4_TOOL_NAME = "C4 Explosive"
+local STEAL_SCAN = 1
 
 local LocalPlayer = Players.LocalPlayer
 local Global = (getgenv and getgenv()) or _G
@@ -35,7 +39,7 @@ end
 
 local Window = Reborn:CreateWindow({
         Title = "Prison Life",
-        Size = Vector2.new(500, 360),
+        Size = Vector2.new(500, 380),
 })
 
 local function registerEarlyExit()
@@ -57,15 +61,17 @@ end
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
 local GiverPressed = Remotes and Remotes:WaitForChild("GiverPressed", 5)
+local RequestTeamChange = Remotes and Remotes:WaitForChild("RequestTeamChange", 5)
+local InteractWithItem = Remotes and Remotes:WaitForChild("InteractWithItem", 5)
 local C4Folder = Remotes and Remotes:WaitForChild("C4", 5)
 local ActivateC4 = C4Folder and C4Folder:WaitForChild("ActivateC4", 5)
-local PrisonItems = workspace:WaitForChild("Prison_ITEMS", 10)
-local GiverFolder = PrisonItems and PrisonItems:FindFirstChild("giver")
-local C4Giver = GiverFolder and GiverFolder:FindFirstChild(C4_TOOL_NAME)
+local GuardsTeam = Teams:FindFirstChild("Guards")
 
 if not (GiverPressed and GiverPressed:IsA("RemoteEvent"))
+        or not (RequestTeamChange and RequestTeamChange:IsA("RemoteFunction"))
+        or not (InteractWithItem and InteractWithItem:IsA("RemoteFunction"))
         or not (ActivateC4 and ActivateC4:IsA("RemoteFunction"))
-        or not (C4Giver and C4Giver:IsA("Model")) then
+        or not GuardsTeam then
         local tab = Window:Tab("Main", "zap")
         local section = tab:Section("Prison Life")
         section:Paragraph({Text = "Game updated?"})
@@ -73,10 +79,17 @@ if not (GiverPressed and GiverPressed:IsA("RemoteEvent"))
         return
 end
 
-local running = false
+local PrisonItems = workspace:FindFirstChild("Prison_ITEMS")
+local ButtonsFolder = PrisonItems and PrisonItems:FindFirstChild("buttons")
+
+local holdToken = 0
+local stealToken = 0
 local statusToken = 0
+local holding = false
+local stealing = false
+local busy = false
 local lastResult = "Idle"
-local stats = {blown = 0, failed = 0}
+local stats = {opened = 0, blown = 0, refused = 0}
 
 local function getRoot()
         local character = LocalPlayer.Character
@@ -91,13 +104,281 @@ end
 local function waitCharacter(timeout)
         local deadline = os.clock() + timeout
         while os.clock() < deadline do
-                local character, humanoid, root = getRoot()
-                if character then
-                        return character, humanoid, root
+                if getRoot() then
+                        return getRoot()
                 end
                 task.wait(0.1)
         end
         return nil
+end
+
+local function isGuard()
+        return LocalPlayer.Team == GuardsTeam
+end
+
+local function joinGuards()
+        if isGuard() then
+                return true
+        end
+
+        local ok, accepted = pcall(function()
+                return RequestTeamChange:InvokeServer(GuardsTeam, 1)
+        end)
+
+        if not ok or not accepted then
+                lastResult = "Team refused"
+                return false
+        end
+
+        local deadline = os.clock() + TEAM_WAIT
+        while os.clock() < deadline do
+                if isGuard() then
+                        waitCharacter(6)
+                        lastResult = "Guards joined"
+                        return true
+                end
+                task.wait(0.1)
+        end
+
+        lastResult = "Team refused"
+        return false
+end
+
+local function getDoorBlock(door)
+        local block = door:FindFirstChild("block")
+        if not block then
+                return nil
+        end
+        local hitbox = block:FindFirstChild("hitbox") or block:FindFirstChild("hitbox", true)
+        if not hitbox then
+                return nil
+        end
+        return block, hitbox
+end
+
+local function getClosedDoors()
+        local list = {}
+        local _, _, root = getRoot()
+        local origin = root and root.Position or Vector3.zero
+        for _, door in ipairs(CollectionService:GetTagged("Door")) do
+                if not door:GetAttribute("Exploded") then
+                        local block, hitbox = getDoorBlock(door)
+                        if block and hitbox then
+                                local distance = (block:GetPivot().Position - origin).Magnitude
+                                table.insert(list, {door = door, block = block, hitbox = hitbox, distance = distance})
+                        end
+                end
+        end
+        table.sort(list, function(a, b)
+                return a.distance < b.distance
+        end)
+        return list
+end
+
+local function countState()
+        local total, open, blown = 0, 0, 0
+        for _, door in ipairs(CollectionService:GetTagged("Door")) do
+                if getDoorBlock(door) then
+                        total = total + 1
+                        if door:GetAttribute("Exploded") then
+                                blown = blown + 1
+                        elseif door:GetAttribute("PlayerOpened") or door:GetAttribute("ScheduledOpen") then
+                                open = open + 1
+                        end
+                end
+        end
+        return total, open, blown
+end
+
+local function touchDoor(entry)
+        local _, _, root = getRoot()
+        if not root then
+                return false
+        end
+        root.CFrame = CFrame.new(entry.hitbox.Position)
+        task.wait(TOUCH_WAIT)
+        local door = entry.door
+        if door:GetAttribute("PlayerOpened") or door:GetAttribute("ScheduledOpen") then
+                return true
+        end
+
+        local deadline = os.clock() + VERIFY_WAIT
+        while os.clock() < deadline do
+                if door:GetAttribute("PlayerOpened") or door:GetAttribute("ScheduledOpen") then
+                        return true
+                end
+                task.wait(0.1)
+        end
+        return false
+end
+
+local function openAll()
+        if busy then
+                return
+        end
+        busy = true
+        lastResult = "Working"
+
+        if not joinGuards() then
+                busy = false
+                Window:Notify({
+                        Title = "Prison Life",
+                        Description = "Could not join Guards.",
+                        Duration = 6,
+                })
+                return
+        end
+
+        local doors = getClosedDoors()
+        local total = #doors
+        local opened = 0
+
+        for _, entry in ipairs(doors) do
+                if entry.door.Parent
+                        and not entry.door:GetAttribute("PlayerOpened")
+                        and not entry.door:GetAttribute("ScheduledOpen")
+                        and not entry.door:GetAttribute("Exploded") then
+                        if not waitCharacter(6) then
+                                lastResult = "No character"
+                                break
+                        end
+                        if touchDoor(entry) then
+                                opened = opened + 1
+                                stats.opened = stats.opened + 1
+                        else
+                                stats.refused = stats.refused + 1
+                        end
+                elseif entry.door.Parent then
+                        opened = opened + 1
+                end
+        end
+
+        busy = false
+        lastResult = "Opened " .. opened .. "/" .. total
+        Window:Notify({
+                Title = "Prison Life",
+                Description = lastResult,
+                Duration = 8,
+        })
+end
+
+local function rootTouch(entry)
+        local _, _, root = getRoot()
+        if not root then
+                return
+        end
+        root.CFrame = CFrame.new(entry.hitbox.Position)
+        task.wait(TOUCH_WAIT)
+end
+
+local function setHold(enabled)
+        if enabled == holding then
+                return
+        end
+        holding = enabled
+        if enabled then
+                holdToken = holdToken + 1
+                local token = holdToken
+                task.spawn(function()
+                        while holding and token == holdToken do
+                                if busy then
+                                        task.wait(0.5)
+                                elseif not isGuard() then
+                                        lastResult = "Not guard"
+                                        task.wait(1)
+                                elseif not getRoot() then
+                                        waitCharacter(5)
+                                else
+                                        local doors = getClosedDoors()
+                                        for _, entry in ipairs(doors) do
+                                                if not holding or token ~= holdToken or busy then
+                                                        break
+                                                end
+                                                if not getRoot() then
+                                                        break
+                                                end
+                                                if not entry.door:GetAttribute("PlayerOpened")
+                                                        and not entry.door:GetAttribute("ScheduledOpen") then
+                                                        rootTouch(entry)
+                                                end
+                                        end
+                                        task.wait(HOLD_GAP)
+                                end
+                        end
+                end)
+        else
+                holdToken = holdToken + 1
+        end
+end
+
+local function pressButton(part)
+        local _, _, root = getRoot()
+        if not root or not part.Parent then
+                return false
+        end
+        root.CFrame = CFrame.new(part.Position + Vector3.new(0, 0, 4))
+        task.wait(0.2)
+
+        local ok = pcall(function()
+                InteractWithItem:InvokeServer(part)
+        end)
+        return ok
+end
+
+local function pressGateButton()
+        if busy then
+                return
+        end
+        busy = true
+        lastResult = "Working"
+
+        if not waitCharacter(6) then
+                busy = false
+                lastResult = "No character"
+                return
+        end
+
+        local pressed = 0
+
+        if ButtonsFolder then
+                local gateModel = ButtonsFolder:FindFirstChild("Prison Gate")
+                local gatePart = gateModel and gateModel:FindFirstChild("Prison Gate")
+                if gatePart and gatePart:IsA("BasePart") then
+                        local before = gateModel:FindFirstChild("isOpen")
+                        local wasOpen = before and before:IsA("BoolValue") and before.Value
+                        pressButton(gatePart)
+                        local deadline = os.clock() + 2
+                        local isOpen = wasOpen
+                        while os.clock() < deadline do
+                                if before and before:IsA("BoolValue") then
+                                        isOpen = before.Value
+                                end
+                                if isOpen ~= wasOpen then
+                                        break
+                                end
+                                task.wait(0.1)
+                        end
+                        if isOpen ~= wasOpen then
+                                pressed = pressed + 1
+                        end
+                end
+
+                local garage = ButtonsFolder:FindFirstChild("Garage Buttons")
+                local garageOpen = garage and garage:FindFirstChild("open")
+                if garageOpen and garageOpen:IsA("BasePart") then
+                        if pressButton(garageOpen) then
+                                pressed = pressed + 1
+                        end
+                end
+        end
+
+        busy = false
+        lastResult = pressed > 0 and "Buttons pressed" or "Buttons failed"
+        Window:Notify({
+                Title = "Prison Life",
+                Description = lastResult,
+                Duration = 6,
+        })
 end
 
 local function findC4()
@@ -118,24 +399,57 @@ local function findC4()
         return nil
 end
 
-local function requestC4()
-        local tool = findC4()
-        if tool then
-                return tool
+local function findDroppedC4()
+        for _, giver in ipairs(CollectionService:GetTagged("Giver")) do
+                if CollectionService:HasTag(giver, "Drop")
+                        and giver:GetAttribute("ToolName") == C4_TOOL_NAME
+                        and giver.Parent then
+                        return giver
+                end
         end
+        for _, child in ipairs(workspace:GetChildren()) do
+                if child:IsA("Tool") and child.Name == C4_TOOL_NAME then
+                        return child
+                end
+        end
+        return nil
+end
 
-        local character, humanoid, root = waitCharacter(6)
-        if not character then
+local function grabDroppedC4()
+        local target = findDroppedC4()
+        if not target then
                 return nil
         end
 
-        root.CFrame = CFrame.new(C4Giver:GetPivot().Position + Vector3.new(0, 4, 0))
-        task.wait(0.2)
-        GiverPressed:FireServer(C4Giver)
+        if not waitCharacter(6) then
+                return nil
+        end
 
-        local deadline = os.clock() + GIVER_WAIT
+        local _, _, root = getRoot()
+        local handle = target:IsA("Tool") and target:FindFirstChild("Handle")
+        local position = handle and handle.Position or target:GetPivot().Position
+        root.CFrame = CFrame.new(position)
+
+        if target:IsA("Tool") then
+                local deadline = os.clock() + 3
+                while os.clock() < deadline do
+                        local tool = findC4()
+                        if tool then
+                                return tool
+                        end
+                        task.wait(0.1)
+                end
+                return nil
+        end
+
+        task.wait(0.2)
+        pcall(function()
+                GiverPressed:FireServer(target)
+        end)
+
+        local deadline = os.clock() + 4
         while os.clock() < deadline do
-                tool = findC4()
+                local tool = findC4()
                 if tool then
                         return tool
                 end
@@ -144,62 +458,15 @@ local function requestC4()
         return nil
 end
 
-local function isTargetDoor(door)
-        return door:FindFirstChild("block") ~= nil
-                and door:FindFirstChild("scn") ~= nil
-end
-
-local function getDoors()
-        local list = {}
-        local _, _, root = getRoot()
-        local origin = root and root.Position or Vector3.zero
-        for _, door in ipairs(CollectionService:GetTagged("Door")) do
-                if isTargetDoor(door) and not door:GetAttribute("Exploded") then
-                        local block = door:FindFirstChild("block")
-                        local distance = (block:GetPivot().Position - origin).Magnitude
-                        table.insert(list, {door = door, block = block, distance = distance})
-                end
-        end
-        table.sort(list, function(a, b)
-                return a.distance < b.distance
-        end)
-        return list
-end
-
-local function countBlown()
-        local total = 0
-        for _, door in ipairs(CollectionService:GetTagged("Door")) do
-                if isTargetDoor(door) and door:GetAttribute("Exploded") then
-                        total = total + 1
-                end
-        end
-        return total
-end
-
-local function approachDirection(pivot, rootPos)
-        local flat = (rootPos - pivot) * Vector3.new(1, 0, 1)
-        if flat.Magnitude < 0.5 then
-                return Vector3.xAxis
-        end
-        return flat.Unit
-end
-
-local function destroyDoor(entry)
-        local character, humanoid, root = waitCharacter(6)
+local function detonateDoor(entry)
+        local character, humanoid, root = getRoot()
         if not character then
                 lastResult = "No character"
                 return false
         end
 
-        local tool = requestC4()
+        local tool = findC4()
         if not tool then
-                lastResult = "C4 giver refused"
-                return false
-        end
-
-        character, humanoid, root = getRoot()
-        if not character then
-                lastResult = "No character"
                 return false
         end
 
@@ -213,7 +480,8 @@ local function destroyDoor(entry)
         tool:SetAttribute("Local_Mode", "Placement")
 
         local pivot = entry.block:GetPivot().Position
-        local approach = approachDirection(pivot, root.Position)
+        local flat = (root.Position - pivot) * Vector3.new(1, 0, 1)
+        local approach = flat.Magnitude < 0.5 and Vector3.xAxis or flat.Unit
         root.CFrame = CFrame.lookAt(
                 pivot + Vector3.new(0, 2, 0) + approach * 5,
                 pivot + Vector3.new(0, 2, 0)
@@ -229,7 +497,7 @@ local function destroyDoor(entry)
         end)
 
         if not placed then
-                lastResult = "Placement rejected"
+                lastResult = "Placement refused"
                 return false
         end
 
@@ -241,97 +509,89 @@ local function destroyDoor(entry)
         end)
 
         local deadline = os.clock() + EXPLODED_WAIT
-        while os.clock() < deadline and running do
+        while os.clock() < deadline do
                 if entry.door:GetAttribute("Exploded") then
                         return true
                 end
                 task.wait(0.1)
         end
 
-        if entry.door:GetAttribute("Exploded") then
-                return true
-        end
-
-        lastResult = "No detonation"
-        return false
+        return entry.door:GetAttribute("Exploded") == true
 end
 
-local function destroyAll()
-        if running then
+local function setSteal(enabled)
+        if enabled == stealing then
                 return
         end
-        running = true
-        lastResult = "Running"
-
-        local doors = getDoors()
-        local total = #doors
-        local index = 1
-        local giverRefuses = 0
-
-        while index <= total and running do
-                local entry = doors[index]
-                index = index + 1
-
-                if entry.door.Parent and isTargetDoor(entry.door) and not entry.door:GetAttribute("Exploded") then
-                        if not waitCharacter(8) then
-                                lastResult = "No character"
-                                break
-                        end
-
-                        local blown = destroyDoor(entry)
-                        if blown then
-                                stats.blown = stats.blown + 1
-                                giverRefuses = 0
-                                lastResult = "Door destroyed"
-                        elseif lastResult == "C4 giver refused" then
-                                stats.failed = stats.failed + 1
-                                giverRefuses = giverRefuses + 1
-                                if giverRefuses >= 2 then
-                                        break
+        stealing = enabled
+        if enabled then
+                stealToken = stealToken + 1
+                local token = stealToken
+                task.spawn(function()
+                        while stealing and token == stealToken do
+                                local drop = findDroppedC4()
+                                if drop and not busy and not findC4() then
+                                        busy = true
+                                        local tool = grabDroppedC4()
+                                        if tool then
+                                                Window:Notify({
+                                                        Title = "Prison Life",
+                                                        Description = "C4 acquired.",
+                                                        Duration = 6,
+                                                })
+                                                local doors = getClosedDoors()
+                                                for _, entry in ipairs(doors) do
+                                                        if not findC4() then
+                                                                break
+                                                        end
+                                                        if not entry.door:GetAttribute("Exploded") then
+                                                                if not waitCharacter(6) then
+                                                                        break
+                                                                end
+                                                                if detonateDoor(entry) then
+                                                                        stats.blown = stats.blown + 1
+                                                                        lastResult = "Door destroyed"
+                                                                else
+                                                                        break
+                                                                end
+                                                                task.wait(0.3)
+                                                        end
+                                                end
+                                                local _, _, blown = countState()
+                                                Window:Notify({
+                                                        Title = "Prison Life",
+                                                        Description = "Blown " .. blown,
+                                                        Duration = 8,
+                                                })
+                                        end
+                                        busy = false
                                 end
-                        else
-                                stats.failed = stats.failed + 1
-                                giverRefuses = 0
+                                task.wait(STEAL_SCAN)
                         end
-
-                        task.wait(DOOR_DELAY)
-                end
+                end)
+        else
+                stealToken = stealToken + 1
         end
-
-        running = false
-        lastResult = "Done"
-        Window:Notify({
-                Title = "Prison Life",
-                Description = string.format(
-                        "Blown %d · Failed %d · Left %d",
-                        countBlown(),
-                        stats.failed,
-                        #getDoors()
-                ),
-                Duration = 8,
-        })
 end
 
 local tab = Window:Tab("Main", "zap")
 
-local c4Section = tab:Section("C4")
-c4Section:Button({
-        Text = "Get C4",
+local teamSection = tab:Section("Team")
+teamSection:Button({
+        Text = "Join Guards",
         Primary = true,
         Callback = function()
                 task.spawn(function()
-                        if requestC4() then
-                                lastResult = "C4 ready"
+                        if joinGuards() then
                                 Window:Notify({
                                         Title = "Prison Life",
-                                        Description = "C4 ready.",
+                                        Description = "Guards joined.",
                                         Duration = 5,
                                 })
                         else
-                                lastResult = "C4 giver refused"
                                 Window:Notify({
                                         Title = "Prison Life",
-                                        Description = "C4 giver refused.",
+                                        Description = "Could not join Guards.",
                                         Duration = 5,
                                 })
                         end
@@ -341,21 +601,45 @@ c4Section:Button({
 
 local doorsSection = tab:Section("Doors")
 doorsSection:Button({
-        Text = "Destroy All Doors",
+        Text = "Open All Doors",
         Primary = true,
         Callback = function()
-                task.spawn(destroyAll)
+                task.spawn(openAll)
+        end,
+})
+doorsSection:Toggle({
+        Text = "Hold Doors Open",
+        Value = false,
+        Callback = function(value)
+                if value and not isGuard() then
+                        task.spawn(function()
+                                if joinGuards() then
+                                        setHold(true)
+                                end
+                        end)
+                else
+                        setHold(value)
+                end
         end,
 })
 doorsSection:Button({
-        Text = "Stop",
+        Text = "Press Gate Buttons",
         Callback = function()
-                running = false
+                task.spawn(pressGateButton)
+        end,
+})
+
+local c4Section = tab:Section("C4")
+c4Section:Toggle({
+        Text = "Steal Dropped C4",
+        Value = true,
+        Callback = function(value)
+                setSteal(value)
         end,
 })
 
 local statusSection = tab:Section("Status")
-local statusLabel = statusSection:Paragraph({Text = "Team None · Left 0 · Blown 0 · Failed 0 · Idle"})
+local statusLabel = statusSection:Paragraph({Text = "Team None · Open 0/0 · Blown 0 · Refused 0 · Idle"})
 
 statusSection:Button({
         Text = "Unload",
@@ -368,19 +652,25 @@ statusSection:Button({
 
 local function refreshStatus()
         local team = LocalPlayer.Team and LocalPlayer.Team.Name or "None"
+        local total, open, blown = countState()
         statusLabel:Set(string.format(
-                "Team %s · Left %d · Blown %d · Failed %d · %s",
+                "Team %s · Open %d/%d · Blown %d · Refused %d · %s",
                 team,
-                #getDoors(),
-                countBlown(),
-                stats.failed,
+                open,
+                total,
+                blown,
+                stats.refused,
                 lastResult
         ))
 end
 
 Global.__PrisonLifeCleanup = function()
+        holdToken = holdToken + 1
+        stealToken = stealToken + 1
         statusToken = statusToken + 1
-        running = false
+        holding = false
+        stealing = false
+        busy = false
         pcall(function()
                 Window:Destroy()
         end)
@@ -399,4 +689,5 @@ task.spawn(function()
         end
 end)
 
+setSteal(true)
 refreshStatus()
