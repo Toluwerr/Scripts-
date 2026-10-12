@@ -501,11 +501,15 @@ end
 -- Detection helpers
 -- =============================================================
 
--- Containers that hold static shop/dealer/template content rather than
--- dropped loot (verified against the RUNAWAYS place dump). Short ambiguous
--- names are matched exactly so folders like "Start" or "Party" survive.
-local EXCLUDE_EXACT = { "Art", "Case", "Cases", "Station", "Stations", "Lobby", "Lobbies" }
-local EXCLUDE_SUBSTRING = { "Dealer", "Display", "Shop" }
+-- Containers that hold static showcase/station content rather than loot
+-- (verified against the RUNAWAYS runtime tree).
+-- IMPORTANT: Workspace.Art is the lootable world itself (Art.Weapons holds the
+-- weapon Models, Art.Decorations the props, Art.BasketBallCourt the balls) - it
+-- must NEVER be excluded, or nothing in the world is ever tracked.
+-- Excluded instead: Case (skin showcases), Stations (Credz/GroupReward display
+-- items), Lobby/Lobbies, SoundSystem (speaker props), CarDealer (vehicles).
+local EXCLUDE_EXACT = { "Case", "Cases", "Station", "Stations", "Lobby", "Lobbies", "SoundSystem", "CarDealer" }
+local EXCLUDE_SUBSTRING = { "Dealer", "Display", "Shop", "Showcase" }
 
 local function isExcludedContext(inst)
         if LootSettings.IncludeShopDisplays then
