@@ -56,12 +56,10 @@ if game.PlaceId ~= PLACE_ID then
         return
 end
 
-local HackerKick = ReplicatedStorage:WaitForChild("HackerKick", 5)
 local TargetPointFix = ReplicatedStorage:WaitForChild("TargetPointFix", 5)
 local LastSpot = ReplicatedStorage:WaitForChild("LastSpot", 5)
 
-if not (HackerKick and HackerKick:IsA("RemoteEvent"))
-        or not (TargetPointFix and TargetPointFix:IsA("RemoteEvent"))
+if not (TargetPointFix and TargetPointFix:IsA("RemoteEvent"))
         or not (LastSpot and LastSpot:IsA("RemoteEvent")) then
         local tab = Window:Tab("Main", "zap")
         local section = tab:Section("Specky Woods")
@@ -394,7 +392,6 @@ guardSection:Toggle({
 
 local testsTab = Window:Tab("Tests", "skull")
 local targetSection = testsTab:Section("Target")
-local kickSection = testsTab:Section("HackerKick")
 local aimSection = testsTab:Section("TargetPointFix")
 local tentSection = testsTab:Section("Tent Doors")
 local spotSection = testsTab:Section("Death Spot")
@@ -444,29 +441,6 @@ table.insert(conns, Players.PlayerRemoving:Connect(function(leaving)
         end
         refreshPlayers()
 end))
-
-kickSection:Button({
-        Text = "Fire Kick At Target",
-        Callback = function()
-                if not validTarget(targetPlayer) then
-                        Window:Notify({
-                                Title = "HackerKick",
-                                Description = "No target.",
-                                Duration = 4,
-                        })
-                        return
-                end
-                local name = targetPlayer.Name
-                pcall(function()
-                        HackerKick:FireServer(targetPlayer)
-                end)
-                Window:Notify({
-                        Title = "HackerKick",
-                        Description = "Fired at " .. name .. ".",
-                        Duration = 4,
-                })
-        end,
-})
 
 aimSection:Toggle({
         Text = "Aim Target At Mouse",
