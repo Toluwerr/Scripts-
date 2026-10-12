@@ -108,6 +108,37 @@ local HudSettings = {
         Enabled = true,
 }
 
+local AutoSettings = {
+        Pickup = false,
+        PickupMinValue = 300, -- blue (Rare) tier and above
+        PickupRange = 60,
+        Attach = false,
+        AttachRange = 35,
+        Drag = false,
+        DragRange = 80,
+        DragSpeed = 90,
+}
+
+-- Runtime state for the auto-loot engine. attempts[inst] = { at, dips };
+-- pending[inst] = { name, worth, at, kind } items awaiting a result check.
+local autoState = {
+        attempts = {},
+        pending = {},
+        pendingReturn = nil,
+        vehicle = nil,
+        vehicleSeat = nil,
+        vehicleCheckedAt = 0,
+        pickedCount = 0,
+        attachedCount = 0,
+        draggingCount = 0,
+        dragSkippedCount = 0,
+        lastGrab = "",
+        lastAttach = "",
+}
+
+local autoPickupStatusLabel
+local autoCarStatusLabel
+
 -- =============================================================
 -- Tier helpers
 -- =============================================================
@@ -1314,6 +1345,417 @@ local function updateChamBudget()
         end
 end
 
+-- =============================================================
+-- Auto loot engine (pickup / car attach / drag)
+--
+-- RUNAWAYS pickup + attach are server-side (no remotes or prompts exist in
+-- the static client dump), so the automation uses the universal executor
+-- techniques, in reliability order:
+--   * ProximityPrompt: fireproximityprompt / InputHoldBegin+End (distance
+--     independent at the executor level, hold duration zeroed locally)
+--   * Touch: firetouchinterest between the item part and our root (or our
+--     car part, for attach) - covers touch-pickup servers
+--   * CFrame dip: physically teleport our character onto the item for a
+--     few frames so the server sees a genuine touch/prompt, then return
+-- Drag: ownership-gated physics - AssemblyLinearVelocity writes toward a
+-- hitch point behind the car (or player on foot), only on assemblies we
+-- actually simulate (AssemblyRootPart.ReceiveAge == 0), so nothing fakes.
+-- =============================================================
+
+local function fireTouch(part, otherPart)
+        if type(firetouchinterest) ~= "function" then
+                return false
+        end
+        local okA = pcall(firetouchinterest, part, otherPart, 0)
+        pcall(firetouchinterest, part, otherPart, 1)
+        local okB = pcall(firetouchinterest, otherPart, part, 0)
+        pcall(firetouchinterest, otherPart, part, 1)
+        return okA or okB
+end
+
+local function firePrompt(prompt)
+        if type(prompt) ~= "userdata" then
+                return false
+        end
+        pcall(function()
+                prompt.HoldDuration = 0
+        end)
+        if type(fireproximityprompt) == "function" then
+                local ok = pcall(fireproximityprompt, prompt)
+                if ok then
+                        return true
+                end
+        end
+        local ok = pcall(function()
+                prompt:InputHoldBegin()
+        end)
+        if ok then
+                task.delay(0.1, function()
+                        pcall(function()
+                                prompt:InputHoldEnd()
+                        end)
+                end)
+                return true
+        end
+        return false
+end
+
+local function findPrompt(inst)
+        local prompt = inst:FindFirstChildOfClass("ProximityPrompt")
+        if prompt then
+                return prompt
+        end
+        return inst:FindFirstChildOfClass("ProximityPrompt", true)
+end
+
+-- Resolve the vehicle we are currently driving: the Model ancestor of the
+-- VehicleSeat our character occupies. Cached for half a second.
+local function getOurVehicle()
+        local now = os.clock()
+        if now - autoState.vehicleCheckedAt < 0.5 then
+                return autoState.vehicle, autoState.vehicleSeat
+        end
+        autoState.vehicleCheckedAt = now
+        autoState.vehicle = nil
+        autoState.vehicleSeat = nil
+
+        local character = LocalPlayer.Character
+        if character then
+                local humanoid = character:FindFirstChildOfClass("Humanoid")
+                local seat = humanoid and humanoid.SeatPart
+                if seat and seat:IsA("VehicleSeat") then
+                        local node = seat
+                        while node and node ~= Workspace do
+                                if node:IsA("Model")
+                                        and not node:FindFirstChildOfClass("Humanoid")
+                                        and not node:IsDescendantOf(character)
+                                then
+                                        autoState.vehicle = node
+                                        autoState.vehicleSeat = seat
+                                        break
+                                end
+                                node = node.Parent
+                        end
+                end
+        end
+        return autoState.vehicle, autoState.vehicleSeat
+end
+
+local function vehicleRootPart(vehicle)
+        if not vehicle then
+                return nil
+        end
+        local root = vehicle.PrimaryPart or vehicle:FindFirstChildWhichIsA("BasePart", true)
+        if root and root.Parent then
+                return root
+        end
+        return nil
+end
+
+local function characterAlive()
+        local character = LocalPlayer.Character
+        if not character then
+                return nil
+        end
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        local root = character:FindFirstChild("HumanoidRootPart")
+        if not humanoid or not root or humanoid.Health <= 0 then
+                return nil
+        end
+        return root
+end
+
+-- Physically stand on the item for a few frames (fallback when the game
+-- validates real proximity). Restored on the next engine tick. Never runs
+-- while seated - moving the root would yank us out of the car seat.
+local function cframeDip(adornee, root)
+        if autoState.pendingReturn then
+                return false
+        end
+        local character = root.Parent
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.SeatPart then
+                return false
+        end
+        autoState.pendingReturn = {
+                cf = root.CFrame,
+                at = os.clock(),
+        }
+        root.CFrame = CFrame.new(adornee.Position + Vector3.new(0, 4, 0))
+        return true
+end
+
+local function noteAttempt(inst)
+        local record = autoState.attempts[inst]
+        if record then
+                record.at = os.clock()
+                return record
+        end
+        record = { at = os.clock(), dips = 0 }
+        autoState.attempts[inst] = record
+        return record
+end
+
+local function updateAutoLoot(tickCount, localRoot)
+        local now = os.clock()
+
+        -- Return the character home after a CFrame dip.
+        if autoState.pendingReturn then
+                local dip = autoState.pendingReturn
+                if now - dip.at >= 0.15 then
+                        local root = characterAlive()
+                        if root then
+                                root.CFrame = dip.cf
+                        end
+                        autoState.pendingReturn = nil
+                end
+        end
+
+        if not LootSettings.Enabled then
+                return
+        end
+
+        -- Verify pending pickup/attach results.
+        for inst, entry in pairs(autoState.pending) do
+                if now - entry.at > 5 or inst.Parent == nil then
+                        local grabbed = inst.Parent == nil
+                        if not grabbed and entry.kind == "attach" then
+                                grabbed = entry.vehicle ~= nil
+                                        and entry.vehicle.Parent ~= nil
+                                        and inst:IsDescendantOf(entry.vehicle)
+                        end
+                        if grabbed then
+                                if entry.kind == "pickup" then
+                                        autoState.pickedCount = autoState.pickedCount + 1
+                                        autoState.lastGrab = string.format(
+                                                "%s (%s)",
+                                                entry.name,
+                                                formatMoney(entry.worth)
+                                        )
+                                        if entry.worth >= 1000 then
+                                                notify("Auto pickup", autoState.lastGrab)
+                                        end
+                                else
+                                        autoState.attachedCount = autoState.attachedCount + 1
+                                        autoState.lastAttach = entry.name
+                                end
+                        else
+                                -- Back off after repeated failures so anchored
+                                -- displays / quest props are not spammed forever.
+                                local attempt = autoState.attempts[inst]
+                                if attempt then
+                                        attempt.fails = (attempt.fails or 0) + 1
+                                        if attempt.fails >= 3 then
+                                                attempt.done = true
+                                        end
+                                end
+                        end
+                        autoState.pending[inst] = nil
+                end
+        end
+
+        local root = localRoot or characterAlive()
+        local alive = root ~= nil and autoState.pendingReturn == nil
+
+        -- Auto pickup: one most-valuable candidate per slow tick.
+        if AutoSettings.Pickup and alive then
+                local best, bestWorth
+                for inst, rec in pairs(trackedLoot) do
+                        local worth = rec.worth or 0
+                        if worth >= AutoSettings.PickupMinValue
+                                and rec.distance <= AutoSettings.PickupRange
+                        then
+                                local attempt = autoState.attempts[inst]
+                                local cooldown = attempt and (attempt.done and 30 or 5) or 0
+                                if not attempt or now - attempt.at >= cooldown then
+                                        if not bestWorth or worth > bestWorth then
+                                                best, bestWorth = inst, worth
+                                        end
+                                end
+                        end
+                end
+
+                if best then
+                        local rec = trackedLoot[best]
+                        local attempt = noteAttempt(best)
+                        local prompt = findPrompt(best)
+                        local fired = false
+                        if prompt then
+                                fired = firePrompt(prompt)
+                        end
+                        if fireTouch(rec.adornee, root) then
+                                fired = true
+                        end
+                        if not fired and attempt.dips < 2 then
+                                if cframeDip(rec.adornee, root) then
+                                        attempt.dips = attempt.dips + 1
+                                        fired = true
+                                end
+                        end
+                        if attempt.dips >= 2 then
+                                attempt.done = true
+                        end
+                        if fired then
+                                autoState.pending[best] = {
+                                        name = rec.info.d,
+                                        worth = rec.worth or 0,
+                                        at = now,
+                                        kind = "pickup",
+                                }
+                        end
+                end
+        end
+
+        -- Auto attach: fire prompts/car-touches at valuable loot near our car.
+        if AutoSettings.Attach and tickCount % 2 == 0 then
+                local vehicle = getOurVehicle()
+                local carRoot = vehicleRootPart(vehicle)
+                if carRoot then
+                        local fired = 0
+                        for inst, rec in pairs(trackedLoot) do
+                                local worth = rec.worth or 0
+                                if fired >= 3 then
+                                        break
+                                end
+                                if worth >= AutoSettings.PickupMinValue
+                                        and rec.adornee
+                                        and rec.adornee.Parent
+                                then
+                                        local dist = (rec.adornee.Position - carRoot.Position).Magnitude
+                                        if dist <= AutoSettings.AttachRange then
+                                                local attempt = autoState.attempts[inst]
+                                                local cooldown = attempt and (attempt.done and 30 or 6) or 0
+                                                if not attempt or now - attempt.at >= cooldown then
+                                                        noteAttempt(inst)
+                                                        local prompt = findPrompt(inst)
+                                                        local ok = false
+                                                        if prompt then
+                                                                ok = firePrompt(prompt)
+                                                        end
+                                                        if fireTouch(rec.adornee, carRoot) then
+                                                                ok = true
+                                                        end
+                                                        if ok then
+                                                                fired = fired + 1
+                                                                autoState.pending[inst] = {
+                                                                        name = rec.info.d,
+                                                                        worth = worth,
+                                                                        at = now,
+                                                                        kind = "attach",
+                                                                        vehicle = vehicle,
+                                                                }
+                                                        end
+                                                end
+                                        end
+                                end
+                        end
+                end
+        end
+
+        -- Prune attempt records for items that are no longer tracked.
+        if tickCount % 40 == 0 then
+                for inst in pairs(autoState.attempts) do
+                        if not trackedLoot[inst] then
+                                autoState.attempts[inst] = nil
+                        end
+                end
+        end
+
+        -- Status labels.
+        if tickCount % 4 == 0 then
+                if autoPickupStatusLabel then
+                        pcall(function()
+                                local mode
+                                if type(firetouchinterest) == "function" then
+                                        mode = "touch"
+                                elseif type(fireproximityprompt) == "function" then
+                                        mode = "prompt"
+                                else
+                                        mode = "teleport"
+                                end
+                                autoPickupStatusLabel:Set(string.format(
+                                        "%s | method: %s | min %s | range %d studs | grabbed %d%s",
+                                        AutoSettings.Pickup and "ON" or "off",
+                                        mode,
+                                        formatMoney(AutoSettings.PickupMinValue),
+                                        AutoSettings.PickupRange,
+                                        autoState.pickedCount,
+                                        autoState.lastGrab ~= "" and (" | last: " .. autoState.lastGrab) or ""
+                                ))
+                        end)
+                end
+                if autoCarStatusLabel then
+                        pcall(function()
+                                local vehicle = getOurVehicle()
+                                local line
+                                if vehicle then
+                                        line = string.format(
+                                                "driving: %s | attach attempts: %d%s | drag: %d ours + %d server-held",
+                                                vehicle.Name,
+                                                autoState.attachedCount,
+                                                autoState.lastAttach ~= "" and (" | last: " .. autoState.lastAttach) or "",
+                                                autoState.draggingCount,
+                                                autoState.dragSkippedCount
+                                        )
+                                else
+                                        line = "no car detected - sit in your vehicle to attach/drag"
+                                end
+                                autoCarStatusLabel:Set(line)
+                        end)
+                end
+        end
+end
+
+-- One physics step of auto drag: pull valuable tracked loot toward a hitch
+-- point behind the car (or behind the player on foot). Only assemblies we
+-- actually simulate are moved (ReceiveAge == 0) - the rest are counted
+-- honestly as server-held.
+local function dragStep()
+        if not running or not AutoSettings.Drag or not LootSettings.Enabled then
+                return
+        end
+
+        local base
+        local vehicle = getOurVehicle()
+        local carRoot = vehicleRootPart(vehicle)
+        if carRoot then
+                base = carRoot
+        else
+                base = characterAlive()
+        end
+        if not base then
+                return
+        end
+
+        local hitch = (base.CFrame * CFrame.new(0, 2, 9)).Position
+        autoState.draggingCount = 0
+        autoState.dragSkippedCount = 0
+
+        for _, rec in pairs(trackedLoot) do
+                local worth = rec.worth or 0
+                local adornee = rec.adornee
+                if worth >= AutoSettings.PickupMinValue and adornee and adornee.Parent then
+                        local assemblyRoot = adornee.AssemblyRootPart or adornee
+                        if not assemblyRoot.Anchored then
+                                local pos = assemblyRoot.Position
+                                local toHitch = hitch - pos
+                                local dist = toHitch.Magnitude
+                                if dist <= AutoSettings.DragRange then
+                                        if assemblyRoot.ReceiveAge == 0 then
+                                                local speed = math.min(dist * 5, AutoSettings.DragSpeed)
+                                                assemblyRoot.AssemblyLinearVelocity = toHitch.Unit
+                                                        * speed
+                                                        + Vector3.new(0, 2, 0)
+                                                autoState.draggingCount = autoState.draggingCount + 1
+                                        else
+                                                autoState.dragSkippedCount = autoState.dragSkippedCount + 1
+                                        end
+                                end
+                        end
+                end
+        end
+end
+
 local function updateWorld(tickCount)
         local character = LocalPlayer.Character
         local localRoot = character and character:FindFirstChild("HumanoidRootPart")
@@ -1337,6 +1779,7 @@ local function updateWorld(tickCount)
 
         pcall(updateChamBudget)
         pcall(updateHud, tickCount)
+        pcall(updateAutoLoot, tickCount, localRoot)
 
         if statusLabel and tickCount % 4 == 0 then
                 pcall(function()
@@ -1612,6 +2055,107 @@ do
 end
 
 do
+        local AutoTab = Window:Tab("Auto Loot", "zap")
+        AutoTab:SetColumns(2)
+
+        local PickupSection = AutoTab:Section("Auto Pickup")
+
+        PickupSection:Toggle({
+                Text = "Auto Pickup (blue tier and above)",
+                Value = AutoSettings.Pickup,
+                Callback = function(value)
+                        AutoSettings.Pickup = value and true or false
+                        if AutoSettings.Pickup and not LootSettings.Enabled then
+                                notify("Auto pickup", "Enable Item ESP first - auto loot uses its tracking.")
+                        end
+                end,
+        })
+
+        PickupSection:Slider({
+                Text = "Pickup Min Value (300 = blue tier)",
+                Min = 25,
+                Max = 5000,
+                Value = AutoSettings.PickupMinValue,
+                Callback = function(value)
+                        AutoSettings.PickupMinValue = tonumber(value) or 300
+                end,
+        })
+
+        PickupSection:Slider({
+                Text = "Pickup Range (studs)",
+                Min = 10,
+                Max = 150,
+                Value = AutoSettings.PickupRange,
+                Callback = function(value)
+                        AutoSettings.PickupRange = tonumber(value) or 60
+                end,
+        })
+
+        autoPickupStatusLabel = PickupSection:Paragraph({
+                Text = "Auto pickup idle - enable Item ESP + this toggle.",
+        })
+
+        local CarSection = AutoTab:Section("Car Attach + Drag")
+
+        CarSection:Toggle({
+                Text = "Auto Attach to Car",
+                Value = AutoSettings.Attach,
+                Callback = function(value)
+                        AutoSettings.Attach = value and true or false
+                        if AutoSettings.Attach and not LootSettings.Enabled then
+                                notify("Auto attach", "Enable Item ESP first - auto loot uses its tracking.")
+                        end
+                end,
+        })
+
+        CarSection:Toggle({
+                Text = "Auto Drag (pull loot behind car)",
+                Value = AutoSettings.Drag,
+                Callback = function(value)
+                        AutoSettings.Drag = value and true or false
+                        if connections.DragHeartbeat then
+                                pcall(function()
+                                        connections.DragHeartbeat:Disconnect()
+                                end)
+                                connections.DragHeartbeat = nil
+                        end
+                        if AutoSettings.Drag then
+                                connections.DragHeartbeat = RunService.Heartbeat:Connect(function()
+                                        pcall(dragStep)
+                                end)
+                                if not LootSettings.Enabled then
+                                        notify("Auto drag", "Enable Item ESP first - auto loot uses its tracking.")
+                                end
+                        end
+                end,
+        })
+
+        CarSection:Slider({
+                Text = "Drag Range (studs)",
+                Min = 20,
+                Max = 150,
+                Value = AutoSettings.DragRange,
+                Callback = function(value)
+                        AutoSettings.DragRange = tonumber(value) or 80
+                end,
+        })
+
+        CarSection:Slider({
+                Text = "Drag Speed (studs/s)",
+                Min = 20,
+                Max = 300,
+                Value = AutoSettings.DragSpeed,
+                Callback = function(value)
+                        AutoSettings.DragSpeed = tonumber(value) or 90
+                end,
+        })
+
+        autoCarStatusLabel = CarSection:Paragraph({
+                Text = "no car detected - sit in your vehicle to attach/drag",
+        })
+end
+
+do
         local AlertTab = Window:Tab("Alerts", "bell")
 
         local AlertSection = AlertTab:Section("Rare Loot Alerts")
@@ -1752,6 +2296,23 @@ local function cleanup()
         running = false
         LootSettings.Enabled = false
         PlayerSettings.Enabled = false
+        AutoSettings.Pickup = false
+        AutoSettings.Attach = false
+        AutoSettings.Drag = false
+
+        -- If the auto-pickup CFrame dip was mid-flight, bring the
+        -- character home before tearing everything down.
+        if autoState.pendingReturn then
+                local dip = autoState.pendingReturn
+                autoState.pendingReturn = nil
+                local character = LocalPlayer.Character
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+                if root and root.Parent then
+                        pcall(function()
+                                root.CFrame = dip.cf
+                        end)
+                end
+        end
 
         for _, connection in pairs(connections) do
                 pcall(function()
