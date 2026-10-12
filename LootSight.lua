@@ -628,7 +628,7 @@ local function buildLootText(rec)
         end
 
         if LootSettings.ShowDistance then
-                table.insert(lines, rich(rec.distance .. " studs", GRAY))
+                table.insert(lines, rich(floor(rec.distance) .. " studs", GRAY))
         end
 
         return table.concat(lines, "\n")
