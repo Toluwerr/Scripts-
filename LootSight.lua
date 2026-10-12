@@ -16,7 +16,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SoundService = game:GetService("SoundService")
 
 local TAG_PREFIX = "__LootSight"
-local HUD_NAME = "__LootSightHud"
 local JUNK_VALUE = 25
 local MAX_TRACKED = 350
 local CHAM_LIMIT = 31
@@ -644,7 +643,10 @@ local trackedCount = 0
 local trackedPlayers = {}
 local lastAlertAt = {}
 local scanning = false
-local hudGui, hudStatsLabel, hudBestLabel, hudYouLabel
+local hud
+local hudLast = {}
+local hudVisible = false
+local hudWarned = false
 local alertSound
 
 local function untrackLoot(inst)
@@ -1231,99 +1233,42 @@ local function updatePlayerEsp(player, localRoot, tickCount)
 end
 
 -- =============================================================
--- Stats HUD
+-- Stats HUD (Reborn:CreateHUD overlay, library v0.9.3+)
 -- =============================================================
 
 local function ensureHud()
-        if hudGui then
-                return hudGui
+        if hud then
+                return hud
         end
 
-        hudGui = Instance.new("ScreenGui")
-        hudGui.Name = HUD_NAME
-        hudGui.ResetOnSpawn = false
-        hudGui.DisplayOrder = 9999
-        hudGui.Enabled = false
-
-        local frame = Instance.new("Frame")
-        frame.Name = "Root"
-        frame.AnchorPoint = Vector2.new(0.5, 0)
-        frame.Position = UDim2.new(0.5, 0, 0, 10)
-        frame.Size = UDim2.fromOffset(380, 96)
-        frame.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
-        frame.BackgroundTransparency = 0.18
-        frame.BorderSizePixel = 0
-        frame.Parent = hudGui
-
-        local corner = Instance.new("UICorner")
-        corner.CornerRadius = UDim.new(0, 8)
-        corner.Parent = frame
-
-        local stroke = Instance.new("UIStroke")
-        stroke.Color = Color3.fromRGB(70, 70, 90)
-        stroke.Transparency = 0.4
-        stroke.Parent = frame
-
-        local function makeLabel(name, position, size, textSize, color)
-                local label = Instance.new("TextLabel")
-                label.Name = name
-                label.BackgroundTransparency = 1
-                label.Position = position
-                label.Size = size
-                label.Font = Enum.Font.GothamBold
-                label.TextSize = textSize
-                label.TextColor3 = color
-                label.TextXAlignment = Enum.TextXAlignment.Center
-                label.TextYAlignment = Enum.TextYAlignment.Center
-                label.Text = ""
-                label.Parent = frame
-                return label
-        end
-
-        local titleLabel = makeLabel(
-                "Title",
-                UDim2.new(0, 0, 0, 3),
-                UDim2.new(1, 0, 0, 16),
-                12,
-                GRAY
-        )
-        titleLabel.Text = "LootSight"
-        hudStatsLabel = makeLabel(
-                "Stats",
-                UDim2.new(0, 0, 0, 20),
-                UDim2.new(1, 0, 0, 20),
-                15,
-                WHITE
-        )
-        hudBestLabel = makeLabel(
-                "Best",
-                UDim2.new(0, 0, 0, 42),
-                UDim2.new(1, 0, 0, 18),
-                13,
-                GOLD
-        )
-        hudYouLabel = makeLabel(
-                "You",
-                UDim2.new(0, 0, 0, 62),
-                UDim2.new(1, 0, 0, 18),
-                13,
-                GOLD
-        )
-
-        local parent = nil
-        pcall(function()
-                if gethui then
-                        parent = gethui()
+        if type(Reborn.CreateHUD) ~= "function" then
+                if not hudWarned then
+                        hudWarned = true
+                        notify("Stats HUD", "Needs Reborn v0.9.3+ - update the UI library to use the HUD.")
                 end
-        end)
-        if not parent then
-                parent = LocalPlayer:WaitForChild("PlayerGui", 5)
-        end
-        if parent then
-                hudGui.Parent = parent
+                return nil
         end
 
-        return hudGui
+        local ok, created = pcall(function()
+                return Reborn:CreateHUD({
+                        Title = "LootSight",
+                        Position = "TopLeft",
+                        Lines = {
+                                { Text = "", TextSize = 15, Color = WHITE },
+                                { Text = "", TextSize = 13, Color = GOLD },
+                                { Text = "", TextSize = 13, Color = GOLD },
+                        },
+                })
+        end)
+        if not ok or type(created) ~= "table" then
+                return nil
+        end
+
+        hud = created
+        hudLast = { stats = nil, best = nil, bestColor = nil, you = nil }
+        hudVisible = false
+        created:SetVisible(false)
+        return created
 end
 
 local youCarried = { total = 0, count = 0, at = -999 }
@@ -1331,23 +1276,27 @@ local youCarried = { total = 0, count = 0, at = -999 }
 local function updateHud(tickCount)
         local shouldShow = HudSettings.Enabled and LootSettings.Enabled and running
         if not shouldShow then
-                if hudGui then
-                        hudGui.Enabled = false
+                if hud and hudVisible then
+                        hudVisible = false
+                        hud:SetVisible(false)
                 end
                 return
         end
 
-        -- Under FPS Saver the HUD recomputes every 2nd tick; the labels are
+        -- Under FPS Saver the HUD recomputes every 2nd tick; the lines are
         -- dirty-checked below so identical strings are never rewritten.
         if PerfSettings.Saver and tickCount % 2 == 1 then
                 return
         end
 
-        local gui = ensureHud()
-        if not gui then
+        local activeHud = ensureHud()
+        if not activeHud then
                 return
         end
-        gui.Enabled = true
+        if not hudVisible then
+                hudVisible = true
+                activeHud:SetVisible(true)
+        end
 
         local total, count = 0, 0
         local bestName, bestValue, bestDistance = nil, -1, 0
@@ -1365,39 +1314,42 @@ local function updateHud(tickCount)
                 end
         end
 
-        if hudStatsLabel then
-                local statsLine = string.format(
-                        "%s in range  -  %d items",
-                        formatMoney(total),
-                        count
-                )
-                if hudStatsLabel.Text ~= statsLine then
-                        hudStatsLabel.Text = statsLine
-                end
+        local statsLine = string.format(
+                "%s in range  -  %d items",
+                formatMoney(total),
+                count
+        )
+        if hudLast.stats ~= statsLine then
+                hudLast.stats = statsLine
+                activeHud:SetLine(1, statsLine)
         end
 
-        if hudBestLabel then
-                if bestName then
-                        local bestLine = string.format(
-                                "Best: %s  %s  (%d studs)",
-                                bestName,
-                                formatMoney(bestValue),
-                                floor(bestDistance)
-                        )
-                        local bestColor = tierFor(bestValue).color
-                        if hudBestLabel.Text ~= bestLine then
-                                hudBestLabel.Text = bestLine
-                        end
-                        if hudBestLabel.TextColor3 ~= bestColor then
-                                hudBestLabel.TextColor3 = bestColor
-                        end
-                else
-                        if hudBestLabel.Text ~= "No loot in range" then
-                                hudBestLabel.Text = "No loot in range"
-                        end
-                        if hudBestLabel.TextColor3 ~= GRAY then
-                                hudBestLabel.TextColor3 = GRAY
-                        end
+        if bestName then
+                local bestLine = string.format(
+                        "Best: %s  %s  (%d studs)",
+                        bestName,
+                        formatMoney(bestValue),
+                        floor(bestDistance)
+                )
+                local bestColor = tierFor(bestValue).color
+                if hudLast.best ~= bestLine or hudLast.bestColor ~= bestColor then
+                        hudLast.best = bestLine
+                        hudLast.bestColor = bestColor
+                        activeHud:SetLine(2, {
+                                Text = bestLine,
+                                Color = bestColor,
+                                TextSize = 13,
+                        })
+                end
+        else
+                if hudLast.best ~= "No loot in range" then
+                        hudLast.best = "No loot in range"
+                        hudLast.bestColor = GRAY
+                        activeHud:SetLine(2, {
+                                Text = "No loot in range",
+                                Color = GRAY,
+                                TextSize = 13,
+                        })
                 end
         end
 
@@ -1408,15 +1360,14 @@ local function updateHud(tickCount)
                 youCarried.at = tickCount
         end
 
-        if hudYouLabel then
-                local youLine = string.format(
-                        "You carry: %s (%d items)",
-                        formatMoney(youCarried.total),
-                        youCarried.count
-                )
-                if hudYouLabel.Text ~= youLine then
-                        hudYouLabel.Text = youLine
-                end
+        local youLine = string.format(
+                "You carry: %s (%d items)",
+                formatMoney(youCarried.total),
+                youCarried.count
+        )
+        if hudLast.you ~= youLine then
+                hudLast.you = youLine
+                activeHud:SetLine(3, youLine)
         end
 end
 
@@ -2006,8 +1957,9 @@ local function setLootEspEnabled(value)
                 end
         else
                 clearTrackedLoot()
-                if hudGui then
-                        hudGui.Enabled = false
+                if hud and hudVisible then
+                        hudVisible = false
+                        hud:SetVisible(false)
                 end
         end
 end
@@ -2382,10 +2334,15 @@ do
                 Value = HudSettings.Enabled,
                 Callback = function(value)
                         HudSettings.Enabled = value and true or false
-                        if not value and hudGui then
-                                hudGui.Enabled = false
+                        if not value and hud and hudVisible then
+                                hudVisible = false
+                                hud:SetVisible(false)
                         end
                 end,
+        })
+
+        HudSection:Paragraph({
+                Text = "Drag the stats card anywhere on screen - it stays where you drop it and stays visible while the window is closed.",
         })
 
         local PerfSection = StatsTab:Section("Performance")
@@ -2573,11 +2530,13 @@ local function cleanup()
                 untrackPlayer(player)
         end
 
-        if hudGui then
+        if hud then
                 pcall(function()
-                        hudGui:Destroy()
+                        hud:Destroy()
                 end)
-                hudGui = nil
+                hud = nil
+                hudLast = {}
+                hudVisible = false
         end
 
         if alertSound then
