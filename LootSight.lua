@@ -1253,10 +1253,11 @@ local function ensureHud()
                 return Reborn:CreateHUD({
                         Title = "LootSight",
                         Position = "TopLeft",
+                        Draggable = true,
                         Lines = {
-                                { Text = "", TextSize = 15, Color = WHITE },
-                                { Text = "", TextSize = 13, Color = GOLD },
-                                { Text = "", TextSize = 13, Color = GOLD },
+                                { Text = "", TextSize = 15, Color = "Text" },
+                                { Text = "", TextSize = 13, Color = "Text" },
+                                { Text = "", TextSize = 13, Color = "Accent" },
                         },
                 })
         end)
@@ -1344,10 +1345,10 @@ local function updateHud(tickCount)
         else
                 if hudLast.best ~= "No loot in range" then
                         hudLast.best = "No loot in range"
-                        hudLast.bestColor = GRAY
+                        hudLast.bestColor = "TextMuted"
                         activeHud:SetLine(2, {
                                 Text = "No loot in range",
-                                Color = GRAY,
+                                Color = "TextMuted",
                                 TextSize = 13,
                         })
                 end
