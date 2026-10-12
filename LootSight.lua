@@ -82,7 +82,6 @@ local LootSettings = {
         ChamOpacity = 30,
         TierColors = true,
         ThroughWalls = true,
-        IncludeShopDisplays = false,
 }
 
 local AlertSettings = {
@@ -501,48 +500,10 @@ end
 -- Detection helpers
 -- =============================================================
 
--- Containers that hold static showcase/station content rather than loot
--- (verified against the RUNAWAYS runtime tree).
--- IMPORTANT: Workspace.Art is the lootable world itself (Art.Weapons holds the
--- weapon Models, Art.Decorations the props, Art.BasketBallCourt the balls) - it
--- must NEVER be excluded, or nothing in the world is ever tracked.
--- Excluded instead: Case (skin showcases), Stations (Credz/GroupReward display
--- items), Lobby/Lobbies, SoundSystem (speaker props), CarDealer (vehicles).
-local EXCLUDE_EXACT = { "Case", "Cases", "Station", "Stations", "Lobby", "Lobbies", "SoundSystem", "CarDealer" }
-local EXCLUDE_SUBSTRING = { "Dealer", "Display", "Shop", "Showcase" }
-
-local function isExcludedContext(inst)
-        if LootSettings.IncludeShopDisplays then
-                return false
-        end
-        for _, ancestor in ipairs(inst:GetAncestors()) do
-                local name = ancestor.Name
-                for _, keyword in ipairs(EXCLUDE_EXACT) do
-                        if name == keyword then
-                                return true
-                        end
-                end
-                local lowerName = name:lower()
-                for _, keyword in ipairs(EXCLUDE_SUBSTRING) do
-                        if lowerName:find(keyword:lower(), 1, true) then
-                                return true
-                        end
-                end
-        end
-        return false
-end
-
-local function getOwningPlayer(inst)
-        local model = inst:FindFirstAncestorOfClass("Model")
-        while model do
-                local player = Players:GetPlayerFromCharacter(model)
-                if player then
-                        return player
-                end
-                model = model:FindFirstAncestorOfClass("Model")
-        end
-        return inst:FindFirstAncestorOfClass("Player")
-end
+-- No container exclusions by design: any instance that resolves to an item
+-- with a value is tracked - world loot, shop/case displays, reward stations
+-- and weapons carried or holstered on players alike. Visibility is controlled
+-- only by the user-facing filters (Min Value / Max Distance / Hide Junk).
 
 local function resolveItem(inst)
         local info = byItem[inst.Name]
@@ -775,13 +736,6 @@ local function onInstanceAdded(inst)
                 return
         end
 
-        if getOwningPlayer(inst) then
-                return
-        end
-        if isExcludedContext(inst) then
-                return
-        end
-
         local adornee = getAdornee(inst)
         if not adornee then
                 return
@@ -835,12 +789,6 @@ local function updateLootRecord(inst, localRoot)
         end
 
         if not inst.Parent or not rec.adornee or not rec.adornee.Parent then
-                untrackLoot(inst)
-                return
-        end
-
-        -- Picked up by a player: hand it over to the player ESP.
-        if getOwningPlayer(inst) then
                 untrackLoot(inst)
                 return
         end
@@ -1468,18 +1416,6 @@ do
                 Value = LootSettings.HideJunk,
                 Callback = function(value)
                         LootSettings.HideJunk = value and true or false
-                end,
-        })
-
-        FilterSection:Toggle({
-                Text = "Include Shop Displays",
-                Value = LootSettings.IncludeShopDisplays,
-                Callback = function(value)
-                        LootSettings.IncludeShopDisplays = value and true or false
-                        if LootSettings.Enabled then
-                                clearTrackedLoot()
-                                scanWorkspace()
-                        end
                 end,
         })
 
