@@ -1600,6 +1600,7 @@ local function runExtract()
                         local retryCount = 0
                         local refindCount = 0
                         local sourceCount = 0
+                        local byteCount = 0
                         local manifestLines = {
                                 "Game: " .. placeName .. " (" .. tostring(game.PlaceId) .. ")",
                                 "Generated: " .. generatedAt,
@@ -1615,39 +1616,95 @@ local function runExtract()
                                         .. " scripts skipped"
                         else
                                 local function chainDecompile(instance)
+                                        local notes = {}
+                                        local originalRunContext = nil
+                                        local pendingRestore = false
+
+                                        local function addNote(text)
+                                                notes[#notes + 1] = text
+                                        end
+
+                                        local function clean(text)
+                                                return (tostring(text):gsub("%[string [^]]*%]:%d+: ", ""))
+                                        end
+
+                                        local function restoreRunContext()
+                                                if pendingRestore and originalRunContext ~= nil then
+                                                        pcall(function()
+                                                                instance.RunContext = originalRunContext
+                                                        end)
+                                                end
+
+                                                pendingRestore = false
+                                        end
+
                                         local ok, source = pcall(decompile, instance)
 
                                         if ok and type(source) == "string" and #source > 0 then
                                                 return true, source, "direct"
                                         end
 
-                                        local reason = ok and "empty result" or tostring(source):sub(1, 120)
+                                        addNote(ok and "direct: empty" or ("direct: " .. clean(source):sub(1, 90)))
 
                                         if instance.ClassName == "Script" then
                                                 local contextOk, runContext = pcall(function()
                                                         return instance.RunContext
                                                 end)
 
-                                                if contextOk and runContext ~= Enum.RunContext.Client then
-                                                        local flipOk = pcall(function()
-                                                                instance.RunContext = Enum.RunContext.Client
-                                                        end)
+                                                if contextOk then
+                                                        originalRunContext = runContext
 
-                                                        if flipOk then
-                                                                ok, source = pcall(decompile, instance)
-
-                                                                pcall(function()
-                                                                        instance.RunContext = runContext
+                                                        if runContext == Enum.RunContext.Client then
+                                                                addNote("runcontext already client yet decompile refused")
+                                                        else
+                                                                local writeOk, writeErr = pcall(function()
+                                                                        instance.RunContext = Enum.RunContext.Client
                                                                 end)
 
-                                                                if ok and type(source) == "string" and #source > 0 then
-                                                                        return true, source, "runcontext"
+                                                                if not writeOk
+                                                                        and type(getthreadcontext) == "function"
+                                                                        and type(setthreadcontext) == "function" then
+                                                                        local level = getthreadcontext()
+
+                                                                        pcall(function()
+                                                                                setthreadcontext(7)
+                                                                        end)
+
+                                                                        writeOk, writeErr = pcall(function()
+                                                                                instance.RunContext = Enum.RunContext.Client
+                                                                        end)
+
+                                                                        pcall(function()
+                                                                                setthreadcontext(level)
+                                                                        end)
                                                                 end
 
-                                                                reason = ok
-                                                                        and "runcontext flip: empty result"
-                                                                        or ("runcontext flip: " .. tostring(source):sub(1, 100))
+                                                                if not writeOk then
+                                                                        addNote("runcontext write blocked: " .. clean(writeErr):sub(1, 90))
+                                                                else
+                                                                        local verifyOk, nowContext = pcall(function()
+                                                                                return instance.RunContext
+                                                                        end)
+
+                                                                        if not (verifyOk and nowContext == Enum.RunContext.Client) then
+                                                                                addNote("runcontext write did not stick")
+                                                                        else
+                                                                                pendingRestore = true
+                                                                                ok, source = pcall(decompile, instance)
+
+                                                                                if ok and type(source) == "string" and #source > 0 then
+                                                                                        restoreRunContext()
+                                                                                        return true, source, "runcontext"
+                                                                                end
+
+                                                                                addNote(ok
+                                                                                        and "client runcontext decompile: empty"
+                                                                                        or ("client runcontext decompile: " .. clean(source):sub(1, 90)))
+                                                                        end
+                                                                end
                                                         end
+                                                else
+                                                        addNote("runcontext read failed: " .. clean(runContext):sub(1, 60))
                                                 end
                                         end
 
@@ -1656,30 +1713,30 @@ local function runExtract()
                                         ok, source = pcall(decompile, instance)
 
                                         if ok and type(source) == "string" and #source > 0 then
+                                                restoreRunContext()
                                                 return true, source, "retry"
                                         end
 
-                                        if not ok then
-                                                reason = tostring(source):sub(1, 120)
-                                        end
+                                        addNote(ok and "retry1: empty" or ("retry1: " .. clean(source):sub(1, 90)))
 
                                         task.wait(0.85)
 
                                         ok, source = pcall(decompile, instance)
 
                                         if ok and type(source) == "string" and #source > 0 then
+                                                restoreRunContext()
                                                 return true, source, "retry"
                                         end
 
-                                        if not ok then
-                                                reason = tostring(source):sub(1, 120)
-                                        end
+                                        addNote(ok and "retry2: empty" or ("retry2: " .. clean(source):sub(1, 90)))
+
+                                        restoreRunContext()
 
                                         if instance.Parent == nil then
-                                                reason = "instance removed before decompile"
+                                                addNote("instance removed before decompile")
                                         end
 
-                                        return false, nil, reason
+                                        return false, nil, table.concat(notes, " | ")
                                 end
 
                                 local function sourceRead(instance)
@@ -1695,7 +1752,11 @@ local function runExtract()
                                                 return true, text, "source"
                                         end
 
-                                        return false, nil, ok and "source unreadable" or ("source read: " .. tostring(text):sub(1, 80))
+                                        if ok then
+                                                return false, nil, "source empty"
+                                        end
+
+                                        return false, nil, "source read: " .. (tostring(text):gsub("%[string [^]]*%]:%d+: ", "")):sub(1, 60)
                                 end
 
                                 local function resolveByPath(path)
@@ -1726,13 +1787,13 @@ local function runExtract()
                                                         return true, source, route
                                                 end
 
-                                                local srcOk, text = sourceRead(instance)
+                                                local srcOk, text, srcReason = sourceRead(instance)
 
                                                 if srcOk then
                                                         return true, text, "source"
                                                 end
 
-                                                return false, nil, route
+                                                return false, nil, route .. " | source: " .. tostring(srcReason)
                                         end
 
                                         local srcOk, text = sourceRead(instance)
@@ -1816,13 +1877,29 @@ local function runExtract()
                                                 end
                                         else
                                                 failedCount = failedCount + 1
+                                                local savedByteName = nil
+
+                                                if type(getscriptbytecode) == "function" then
+                                                        local byteOk, bytecode = pcall(getscriptbytecode, entry.instance)
+
+                                                        if byteOk and type(bytecode) == "string" and #bytecode > 0 then
+                                                                local byteName = string.format("%03d_%s.luauc", i, sanitizeName(entry.name, 50))
+                                                                local byteWriteOk = pcall(writeFile, scriptsDir .. "/" .. byteName, bytecode)
+
+                                                                if byteWriteOk then
+                                                                        savedByteName = byteName
+                                                                        byteCount = byteCount + 1
+                                                                end
+                                                        end
+                                                end
 
                                                 manifestLines[#manifestLines + 1] = "FAIL      "
                                                         .. entry.className
                                                         .. "  "
                                                         .. entry.path
                                                         .. "  - "
-                                                        .. tostring(note):sub(1, 100)
+                                                        .. tostring(note):sub(1, 200)
+                                                        .. (savedByteName and ("  [bytecode saved: " .. savedByteName .. "]") or "")
                                         end
                                 end
                         end
@@ -1842,6 +1919,8 @@ local function runExtract()
                                 .. refindCount
                                 .. ", source recovered: "
                                 .. sourceCount
+                                .. ", bytecode saved: "
+                                .. byteCount
 
                         manifestLines[#manifestLines + 1] = "skipped: "
                                 .. skippedDefaults
@@ -2031,6 +2110,7 @@ local function runExtract()
                                         scriptsViaRetry = retryCount,
                                         scriptsViaRefind = refindCount,
                                         scriptsViaSource = sourceCount,
+                                        scriptsBytecodeSaved = byteCount,
                                         skippedRobloxDefaults = skippedDefaults,
                                         skippedOtherPlayerCopies = skippedOtherPlayers,
                                         skippedOutsideGameContainers = skippedOutside,
@@ -2077,6 +2157,10 @@ local function runExtract()
 
                         if sweepFailures > 0 then
                                 doneText = doneText .. ", old output not fully removed"
+                        end
+
+                        if byteCount > 0 then
+                                doneText = doneText .. ", bytecode saved: " .. byteCount
                         end
 
                         setStatus(doneText .. " -> " .. toFullPath(asZip and zipPath or root))
