@@ -331,6 +331,11 @@ local ASSET_PROPS = {
         ParticleEmitter = { "Texture" },
         Beam = { "Texture" },
         Trail = { "Texture" },
+        ImageLabel = { "Image" },
+        ImageButton = { "Image" },
+        ShirtGraphic = { "Graphic" },
+        VideoFrame = { "Video" },
+        SurfaceAppearance = { "ColorMap", "NormalMap", "MetalnessMap", "RoughnessMap" },
         Sky = { "SkyboxBk", "SkyboxDn", "SkyboxFt", "SkyboxLf", "SkyboxRt", "SkyboxUp" }
 }
 
@@ -341,6 +346,636 @@ local REMOTE_CLASSES = {
         BindableEvent = true,
         BindableFunction = true
 }
+
+local VALUE_CLASSES = {
+        StringValue = true,
+        NumberValue = true,
+        IntValue = true,
+        FloatValue = true,
+        BoolValue = true,
+        ObjectValue = true,
+        BrickColorValue = true,
+        CFrameValue = true,
+        RayValue = true,
+        Vector3Value = true,
+        Color3Value = true
+}
+
+local EXECUTOR_TOKENS = {
+        "getgenv",
+        "hookmetamethod",
+        "hookfunction",
+        "getrawmetatable",
+        "setreadonly",
+        "checkcaller",
+        "getcallingscript",
+        "identifyexecutor",
+        "is_synapse_function",
+        "gethui"
+}
+
+local STAT_TOKENS = {
+        "WalkSpeed",
+        "JumpPower",
+        "JumpHeight",
+        "HipHeight",
+        "MaxHealth"
+}
+
+local REMOTE_CODE_TOKENS = {
+        "loadstring(",
+        "HttpGet(",
+        "HttpPost("
+}
+
+local HTTP_TOKENS = {
+        "GetAsync(",
+        "RequestAsync(",
+        "PostAsync(",
+        "HttpEnabled"
+}
+
+local TELEPORT_TOKENS = {
+        "TeleportService",
+        ":Teleport("
+}
+
+local FINDING_ORDER = {
+        "executor-detect",
+        "kick",
+        "stats-watch",
+        "remote-code",
+        "http-api",
+        "teleport",
+        "fires-remotes"
+}
+
+local FINDING_SCORES = {
+        ["executor-detect"] = 100,
+        ["kick"] = 60,
+        ["stats-watch"] = 40,
+        ["remote-code"] = 30,
+        ["http-api"] = 25,
+        ["teleport"] = 15,
+        ["fires-remotes"] = 10
+}
+
+local function patternEscape(text)
+        return (tostring(text):gsub("([^%w%s])", "%%%1"))
+end
+
+local function trimText(text, limit)
+        local value = tostring(text):gsub("%c", " ")
+        value = value:gsub("%s+", " ")
+        value = value:gsub("^ ", "")
+        return value:sub(1, limit or 160)
+end
+
+local typeOf = typeof or type
+
+local function formatValue(value)
+        local kind = typeOf(value)
+
+        if kind == "string" then
+                return '"' .. trimText(value, 160) .. '"'
+        elseif kind == "number" then
+                return string.format("%.14g", value)
+        elseif kind == "boolean" then
+                return tostring(value)
+        elseif kind == "nil" then
+                return "nil"
+        elseif kind == "Instance" then
+                local pathOk, instancePath = pcall(function()
+                        return value:GetFullName()
+                end)
+
+                if pathOk then
+                        return tostring(value) .. " (" .. instancePath .. ")"
+                end
+
+                return tostring(value)
+        end
+
+        return trimText(value, 200)
+end
+
+local function makeAnalyzer(remoteByName)
+        local analyzer = {
+                findings = {},
+                urls = {},
+                placeIds = {},
+                unresolved = {},
+                analyzed = 0
+        }
+
+        local nameSet = {}
+        local urlSeen = {}
+        local placeIdSeen = {}
+
+        for remoteName in pairs(remoteByName) do
+                nameSet[remoteName] = true
+        end
+
+        local function noteCall(record, fileName, lineNo, callText)
+                record.calls = record.calls or {}
+
+                if #record.calls < 8 then
+                        record.calls[#record.calls + 1] = fileName .. ":" .. lineNo .. "  " .. callText
+                elseif #record.calls == 8 then
+                        record.calls[#record.calls + 1] = "(more calls omitted)"
+                end
+
+                record.callCount = (record.callCount or 0) + 1
+        end
+
+        local function noteRef(record, fileName)
+                record.refs = record.refs or {}
+                record.refs[fileName] = true
+        end
+
+        local function collectQuotedNames(line, out)
+                for literal in line:gmatch('"([^"]+)"') do
+                        if nameSet[literal] then
+                                out[#out + 1] = literal
+                        end
+                end
+
+                for literal in line:gmatch("'([^']+)'") do
+                        if nameSet[literal] then
+                                out[#out + 1] = literal
+                        end
+                end
+        end
+
+        local function assignmentNames(line, varName)
+                local esc = patternEscape(varName)
+                local pos = 1
+
+                while true do
+                        local matchStart = line:find(esc .. "%s*=[^=~<>]", pos)
+
+                        if not matchStart then
+                                return nil
+                        end
+
+                        local before = matchStart > 1 and line:sub(matchStart - 1, matchStart - 1) or ""
+                        local boundaryOk = before == "" or not before:match("[%w_%.%]%\"']")
+
+                        if boundaryOk then
+                                local names = {}
+                                collectQuotedNames(line, names)
+
+                                for tail in line:gmatch("([%w_]+)%s*$") do
+                                        if nameSet[tail] then
+                                                names[#names + 1] = tail
+                                        end
+                                end
+
+                                return names
+                        end
+
+                        pos = matchStart + 1
+                end
+        end
+
+        local function resolveReceiver(receiver, lines, lineNo, currentLine)
+                if receiver and nameSet[receiver] then
+                        return { receiver }
+                end
+
+                if receiver then
+                        local scanFrom = math.max(1, lineNo - 300)
+
+                        for j = lineNo - 1, scanFrom, -1 do
+                                local names = assignmentNames(lines[j], receiver)
+
+                                if names then
+                                        if #names > 0 then
+                                                return names
+                                        end
+
+                                        break
+                                end
+                        end
+                end
+
+                local lineNames = {}
+                collectQuotedNames(currentLine, lineNames)
+
+                for tail in currentLine:gmatch("%.([%w_]+)%s*:") do
+                        if nameSet[tail] then
+                                lineNames[#lineNames + 1] = tail
+                        end
+                end
+
+                return lineNames
+        end
+
+        local function callTextFrom(lines, lineNo, lineText)
+                local text = lineText
+                local opens = select(2, text:gsub("%(", ""))
+                local closes = select(2, text:gsub("%)", ""))
+                local last = lineNo
+
+                while opens > closes and last < #lines and last - lineNo < 3 do
+                        last = last + 1
+                        local nextLine = lines[last]
+                        text = text .. " " .. trimText(nextLine, 120)
+                        opens = opens + select(2, nextLine:gsub("%(", ""))
+                        closes = closes + select(2, nextLine:gsub("%)", ""))
+                end
+
+                return trimText(text, 300)
+        end
+
+        function analyzer.analyze(fileName, source, scriptPath)
+                analyzer.analyzed = analyzer.analyzed + 1
+
+                local script = {
+                        file = fileName,
+                        path = scriptPath or "",
+                        hits = {},
+                        extra = {},
+                        score = 0
+                }
+
+                local seenCategory = {}
+
+                local function hit(categoryId, lineNo, lineText)
+                        local bucket = script.hits[categoryId]
+
+                        if not bucket then
+                                bucket = {}
+                                script.hits[categoryId] = bucket
+                        end
+
+                        if #bucket < 6 then
+                                bucket[#bucket + 1] = lineNo .. ": " .. trimText(lineText, 200)
+                        else
+                                script.extra[categoryId] = (script.extra[categoryId] or 0) + 1
+                        end
+
+                        if not seenCategory[categoryId] then
+                                seenCategory[categoryId] = true
+                                script.score = script.score + (FINDING_SCORES[categoryId] or 0)
+                        end
+                end
+
+                local lines = {}
+
+                for line in source:gmatch("[^\r\n]+") do
+                        lines[#lines + 1] = line
+                end
+
+                for lineNo, line in ipairs(lines) do
+                        local fireServerAt = line:find(":FireServer(", 1, true)
+                        local invokeServerAt = line:find(":InvokeServer(", 1, true)
+                        local fireBindableAt = line:find(":Fire(", 1, true)
+                        local invokeBindableAt = line:find(":Invoke(", 1, true)
+
+                        if fireServerAt or invokeServerAt then
+                                local receiver = fireServerAt
+                                        and line:match("([%w_]+)%s*:%s*FireServer%s*%(")
+                                        or line:match("([%w_]+)%s*:%s*InvokeServer%s*%(")
+                                local names = resolveReceiver(receiver, lines, lineNo, line)
+                                local callText = callTextFrom(lines, lineNo, line)
+
+                                hit("fires-remotes", lineNo, line)
+
+                                if #names > 0 then
+                                        for _, remoteName in ipairs(names) do
+                                                for _, record in ipairs(remoteByName[remoteName]) do
+                                                        noteCall(record, fileName, lineNo, callText)
+                                                end
+                                        end
+                                elseif #analyzer.unresolved < 40 then
+                                        analyzer.unresolved[#analyzer.unresolved + 1] = {
+                                                file = fileName,
+                                                lineNo = lineNo,
+                                                text = callText
+                                        }
+                                end
+                        elseif fireBindableAt or invokeBindableAt then
+                                local receiver = fireBindableAt
+                                        and line:match("([%w_]+)%s*:%s*Fire%s*%(")
+                                        or line:match("([%w_]+)%s*:%s*Invoke%s*%(")
+                                local names = resolveReceiver(receiver, lines, lineNo, line)
+
+                                if #names > 0 then
+                                        local callText = callTextFrom(lines, lineNo, line)
+
+                                        for _, remoteName in ipairs(names) do
+                                                for _, record in ipairs(remoteByName[remoteName]) do
+                                                        noteCall(record, fileName, lineNo, callText)
+                                                end
+                                        end
+                                end
+                        end
+
+                        if line:find("OnClientEvent", 1, true) or line:find("OnClientInvoke", 1, true) then
+                                local receiver = line:match("([%w_]+)%s*%.%s*OnClientEvent")
+                                        or line:match("([%w_]+)%s*%.%s*OnClientInvoke")
+                                local names = resolveReceiver(receiver, lines, lineNo, line)
+
+                                for _, remoteName in ipairs(names) do
+                                        for _, record in ipairs(remoteByName[remoteName]) do
+                                                record.listenerCount = (record.listenerCount or 0) + 1
+                                                record.listenerFile = record.listenerFile or fileName
+                                        end
+                                end
+                        end
+
+                        local lowerLine = nil
+
+                        for _, token in ipairs(EXECUTOR_TOKENS) do
+                                lowerLine = lowerLine or line:lower()
+
+                                if lowerLine:find(token, 1, true) then
+                                        hit("executor-detect", lineNo, line)
+                                        break
+                                end
+                        end
+
+                        for _, token in ipairs(STAT_TOKENS) do
+                                if line:find(token, 1, true) then
+                                        hit("stats-watch", lineNo, line)
+                                        break
+                                end
+                        end
+
+                        if line:find(":Kick(", 1, true) then
+                                hit("kick", lineNo, line)
+                        end
+
+                        for _, token in ipairs(REMOTE_CODE_TOKENS) do
+                                if line:find(token, 1, true) then
+                                        hit("remote-code", lineNo, line)
+                                        break
+                                end
+                        end
+
+                        for _, token in ipairs(HTTP_TOKENS) do
+                                if line:find(token, 1, true) then
+                                        hit("http-api", lineNo, line)
+                                        break
+                                end
+                        end
+
+                        for _, token in ipairs(TELEPORT_TOKENS) do
+                                if line:find(token, 1, true) then
+                                        hit("teleport", lineNo, line)
+                                        break
+                                end
+                        end
+                end
+
+                for url in source:gmatch("https?://[%w%.%-_%~%:%/%?%#%[%]@!%$&%(%)%*%+%,%;=%%]+") do
+                        if not urlSeen[url] and #analyzer.urls < 300 then
+                                urlSeen[url] = true
+                                analyzer.urls[#analyzer.urls + 1] = { url = url:sub(1, 300), file = fileName }
+                        end
+                end
+
+                for placeId in source:gmatch("Teleport%s*%(%s*(%d+)") do
+                        if not placeIdSeen[placeId] and #analyzer.placeIds < 50 then
+                                placeIdSeen[placeId] = true
+                                analyzer.placeIds[#analyzer.placeIds + 1] = { id = placeId, file = fileName }
+                        end
+                end
+
+                for placeId in source:gmatch("TeleportToPlaceInstance%s*%(%s*(%d+)") do
+                        if not placeIdSeen[placeId] and #analyzer.placeIds < 50 then
+                                placeIdSeen[placeId] = true
+                                analyzer.placeIds[#analyzer.placeIds + 1] = { id = placeId, file = fileName }
+                        end
+                end
+
+                for remoteName in pairs(nameSet) do
+                        if source:find('"' .. remoteName .. '"', 1, true)
+                                or source:find("'" .. remoteName .. "'", 1, true) then
+                                for _, record in ipairs(remoteByName[remoteName]) do
+                                        noteRef(record, fileName)
+                                end
+                        end
+                end
+
+                if next(script.hits) then
+                        analyzer.findings[#analyzer.findings + 1] = script
+                end
+        end
+
+        return analyzer
+end
+
+local function makeRemoteReport(remoteRecords, analyzer, header)
+        local fireable = {}
+        local bindables = {}
+
+        for _, record in ipairs(remoteRecords) do
+                if record.className == "BindableEvent" or record.className == "BindableFunction" then
+                        bindables[#bindables + 1] = record
+                else
+                        fireable[#fireable + 1] = record
+                end
+        end
+
+        local function byCalls(a, b)
+                if (a.callCount or 0) ~= (b.callCount or 0) then
+                        return (a.callCount or 0) > (b.callCount or 0)
+                end
+
+                return a.path < b.path
+        end
+
+        table.sort(fireable, byCalls)
+        table.sort(bindables, byCalls)
+
+        local function recordBlock(record)
+                local block = { record.className .. "  " .. record.path }
+
+                if record.calls and #record.calls > 0 then
+                        block[#block + 1] = "  calls:"
+
+                        for _, callText in ipairs(record.calls) do
+                                block[#block + 1] = "    " .. callText
+                        end
+                end
+
+                if (record.listenerCount or 0) > 0 then
+                        block[#block + 1] = "  client listeners: " .. record.listenerCount .. "  (" .. tostring(record.listenerFile) .. ")"
+                end
+
+                local refFiles = {}
+
+                if record.refs then
+                        for fileName in pairs(record.refs) do
+                                refFiles[#refFiles + 1] = fileName
+                        end
+                end
+
+                table.sort(refFiles)
+
+                if #refFiles > 0 then
+                        local shown = {}
+
+                        for i = 1, math.min(#refFiles, 10) do
+                                shown[#shown + 1] = refFiles[i]
+                        end
+
+                        local refLine = "  referenced by: " .. table.concat(shown, ", ")
+
+                        if #refFiles > 10 then
+                                refLine = refLine .. " (+" .. (#refFiles - 10) .. " more)"
+                        end
+
+                        block[#block + 1] = refLine
+                end
+
+                if (record.callCount or 0) == 0 and #refFiles == 0 and (record.listenerCount or 0) == 0 then
+                        block[#block + 1] = "  no client references found"
+                end
+
+                return block
+        end
+
+        local parts = { header }
+
+        parts[#parts + 1] = "FIREABLE BY CLIENT  (RemoteEvent / UnreliableRemoteEvent / RemoteFunction)  -  " .. #fireable
+        parts[#parts + 1] = ""
+
+        if #fireable == 0 then
+                parts[#parts + 1] = "none visible to the client"
+        else
+                for _, record in ipairs(fireable) do
+                        for _, blockLine in ipairs(recordBlock(record)) do
+                                parts[#parts + 1] = blockLine
+                        end
+
+                        parts[#parts + 1] = ""
+                end
+        end
+
+        parts[#parts + 1] = "LOCAL BINDABLES  (BindableEvent / BindableFunction)  -  " .. #bindables
+        parts[#parts + 1] = ""
+
+        if #bindables == 0 then
+                parts[#parts + 1] = "none visible to the client"
+        else
+                for _, record in ipairs(bindables) do
+                        for _, blockLine in ipairs(recordBlock(record)) do
+                                parts[#parts + 1] = blockLine
+                        end
+
+                        parts[#parts + 1] = ""
+                end
+        end
+
+        if #analyzer.unresolved > 0 then
+                parts[#parts + 1] = "UNRESOLVED CLIENT CALLS  -  " .. #analyzer.unresolved
+                parts[#parts + 1] = ""
+
+                for _, call in ipairs(analyzer.unresolved) do
+                        parts[#parts + 1] = "  " .. call.file .. ":" .. call.lineNo .. "  " .. call.text
+                end
+        end
+
+        return table.concat(parts, "\n") .. "\n"
+end
+
+local function makeFindingsReport(analyzer, header)
+        local sorted = {}
+
+        for _, script in ipairs(analyzer.findings) do
+                sorted[#sorted + 1] = script
+        end
+
+        table.sort(sorted, function(a, b)
+                if a.score ~= b.score then
+                        return a.score > b.score
+                end
+
+                return a.file < b.file
+        end)
+
+        local function categoryTag(script)
+                local tags = {}
+
+                for _, categoryId in ipairs(FINDING_ORDER) do
+                        if script.hits[categoryId] then
+                                tags[#tags + 1] = categoryId
+                        end
+                end
+
+                return table.concat(tags, " ")
+        end
+
+        local parts = { header }
+
+        if analyzer.analyzed == 0 then
+                parts[#parts + 1] = "no decompiled sources to analyze"
+                parts[#parts + 1] = ""
+        elseif #sorted == 0 then
+                parts[#parts + 1] = "no security-relevant patterns found in " .. analyzer.analyzed .. " scripts"
+                parts[#parts + 1] = ""
+        else
+                parts[#parts + 1] = "RANKED SCRIPTS  (" .. #sorted .. " of " .. analyzer.analyzed .. " analyzed)"
+
+                for i, script in ipairs(sorted) do
+                        parts[#parts + 1] = i .. ". " .. script.file .. "  [" .. categoryTag(script) .. "]  " .. script.path
+                end
+
+                parts[#parts + 1] = ""
+        end
+
+        parts[#parts + 1] = "URLS  (" .. #analyzer.urls .. ")"
+
+        if #analyzer.urls == 0 then
+                parts[#parts + 1] = "none found"
+        else
+                for _, urlRecord in ipairs(analyzer.urls) do
+                        parts[#parts + 1] = urlRecord.url .. "  <-  " .. urlRecord.file
+                end
+        end
+
+        parts[#parts + 1] = ""
+        parts[#parts + 1] = "TELEPORT PLACE IDS  (" .. #analyzer.placeIds .. ")"
+
+        if #analyzer.placeIds == 0 then
+                parts[#parts + 1] = "none found"
+        else
+                for _, placeRecord in ipairs(analyzer.placeIds) do
+                        parts[#parts + 1] = placeRecord.id .. "  <-  " .. placeRecord.file
+                end
+        end
+
+        if #sorted > 0 then
+                parts[#parts + 1] = ""
+                parts[#parts + 1] = "DETAILS"
+
+                for _, script in ipairs(sorted) do
+                        parts[#parts + 1] = ""
+                        parts[#parts + 1] = script.file .. "  " .. script.path
+
+                        for _, categoryId in ipairs(FINDING_ORDER) do
+                                local bucket = script.hits[categoryId]
+
+                                if bucket then
+                                        parts[#parts + 1] = "  " .. categoryId
+
+                                        for _, hitLine in ipairs(bucket) do
+                                                parts[#parts + 1] = "    " .. hitLine
+                                        end
+
+                                        if script.extra[categoryId] then
+                                                parts[#parts + 1] = "    (+" .. script.extra[categoryId] .. " more)"
+                                        end
+                                end
+                        end
+                end
+        end
+
+        return table.concat(parts, "\n") .. "\n"
+end
 
 local extracting = false
 local cancelRequested = false
@@ -574,9 +1209,17 @@ local function runExtract()
                         local total = #descendants
 
                         local treeLines = {}
-                        local remotesLines = {}
                         local assetsLines = {}
                         local scriptEntries = {}
+                        local valuesLines = {}
+                        local interactLines = {}
+                        local remoteRecords = {}
+                        local remoteByName = {}
+                        local valueInstanceCount = 0
+                        local attributeLineCount = 0
+                        local humanoidLineCount = 0
+                        local clickDetectorCount = 0
+                        local proximityPromptCount = 0
 
                         local classCounts = {}
                         local materialCounts = {}
@@ -614,9 +1257,10 @@ local function runExtract()
 
                         for i, instance in ipairs(descendants) do
                                 local className = instance.ClassName
+                                local fullName = instance:GetFullName()
 
                                 classCounts[className] = (classCounts[className] or 0) + 1
-                                treeLines[#treeLines + 1] = className .. "  " .. instance:GetFullName()
+                                treeLines[#treeLines + 1] = className .. "  " .. fullName
 
                                 local assetProps = ASSET_PROPS[className]
 
@@ -636,13 +1280,132 @@ local function runExtract()
                                                                 .. "  "
                                                                 .. value
                                                                 .. "  "
-                                                                .. instance:GetFullName()
+                                                                .. fullName
                                                 end
                                         end
                                 end
 
                                 if REMOTE_CLASSES[className] then
-                                        remotesLines[#remotesLines + 1] = className .. "  " .. instance:GetFullName()
+                                        local record = {
+                                                className = className,
+                                                name = instance.Name,
+                                                path = fullName,
+                                                calls = {},
+                                                callCount = 0,
+                                                refs = {},
+                                                listenerCount = 0,
+                                                listenerFile = nil
+                                        }
+
+                                        remoteRecords[#remoteRecords + 1] = record
+
+                                        local bucket = remoteByName[instance.Name]
+
+                                        if not bucket then
+                                                bucket = {}
+                                                remoteByName[instance.Name] = bucket
+                                        end
+
+                                        bucket[#bucket + 1] = record
+                                end
+
+                                if VALUE_CLASSES[className] then
+                                        local readOk, currentValue = pcall(function()
+                                                return instance.Value
+                                        end)
+
+                                        if readOk then
+                                                valueInstanceCount = valueInstanceCount + 1
+                                                valuesLines[#valuesLines + 1] = className
+                                                        .. "  "
+                                                        .. instance.Name
+                                                        .. " = "
+                                                        .. formatValue(currentValue)
+                                                        .. "  "
+                                                        .. fullName
+                                        end
+                                end
+
+                                if className == "ClickDetector" then
+                                        clickDetectorCount = clickDetectorCount + 1
+
+                                        local rangeOk, maxRange = pcall(function()
+                                                return instance.MaxActivationDistance
+                                        end)
+
+                                        interactLines[#interactLines + 1] = "ClickDetector  MaxActivationDistance="
+                                                .. (rangeOk and string.format("%.14g", maxRange) or "?")
+                                                .. "  "
+                                                .. fullName
+                                elseif className == "ProximityPrompt" then
+                                        proximityPromptCount = proximityPromptCount + 1
+
+                                        local promptOk, actionText, objectText, holdTime, promptRange, lineOfSight = pcall(function()
+                                                return instance.ActionText, instance.ObjectText, instance.HoldDuration, instance.MaxActivationDistance, instance.RequiresLineOfSight
+                                        end)
+
+                                        if promptOk then
+                                                interactLines[#interactLines + 1] = "ProximityPrompt  Action="
+                                                        .. trimText(actionText, 40)
+                                                        .. "  Object="
+                                                        .. trimText(objectText, 40)
+                                                        .. "  Hold="
+                                                        .. string.format("%.14g", holdTime)
+                                                        .. "  MaxActivationDistance="
+                                                        .. string.format("%.14g", promptRange)
+                                                        .. "  LineOfSight="
+                                                        .. tostring(lineOfSight)
+                                                        .. "  "
+                                                        .. fullName
+                                        else
+                                                interactLines[#interactLines + 1] = "ProximityPrompt  " .. fullName
+                                        end
+                                end
+
+                                if className == "Humanoid" and instance:IsDescendantOf(Players) then
+                                        local snapOk, walkSpeed, jumpPower, jumpHeight, health, maxHealth = pcall(function()
+                                                return instance.WalkSpeed, instance.JumpPower, instance.JumpHeight, instance.Health, instance.MaxHealth
+                                        end)
+
+                                        if snapOk then
+                                                humanoidLineCount = humanoidLineCount + 1
+                                                valuesLines[#valuesLines + 1] = "Humanoid  WalkSpeed="
+                                                        .. string.format("%.14g", walkSpeed)
+                                                        .. "  JumpPower="
+                                                        .. string.format("%.14g", jumpPower)
+                                                        .. "  JumpHeight="
+                                                        .. string.format("%.14g", jumpHeight)
+                                                        .. "  Health="
+                                                        .. string.format("%.14g", health)
+                                                        .. "/"
+                                                        .. string.format("%.14g", maxHealth)
+                                                        .. "  "
+                                                        .. fullName
+                                        end
+                                end
+
+                                local attrOk, attributes = pcall(instance.GetAttributes, instance)
+
+                                if attrOk and type(attributes) == "table" then
+                                        local attrNames = {}
+
+                                        for attributeName in pairs(attributes) do
+                                                attrNames[#attrNames + 1] = attributeName
+                                        end
+
+                                        if #attrNames > 0 then
+                                                table.sort(attrNames)
+
+                                                for _, attributeName in ipairs(attrNames) do
+                                                        attributeLineCount = attributeLineCount + 1
+                                                        valuesLines[#valuesLines + 1] = "Attribute  "
+                                                                .. attributeName
+                                                                .. " = "
+                                                                .. formatValue(attributes[attributeName])
+                                                                .. "  "
+                                                                .. fullName
+                                                end
+                                        end
                                 end
 
                                 if className == "LocalScript" or className == "ModuleScript" then
@@ -731,12 +1494,20 @@ local function runExtract()
                                 writeFile(root .. "/tree.txt", header .. "no instances found\n")
                         end
 
-                        setStatus("Writing remotes (" .. #remotesLines .. ")...")
+                        setStatus("Writing values (" .. #valuesLines .. " lines)...")
 
-                        if #remotesLines > 0 then
-                                writeFile(root .. "/remotes.txt", header .. table.concat(remotesLines, "\n") .. "\n")
+                        if #valuesLines > 0 then
+                                writeFile(root .. "/values.txt", header .. table.concat(valuesLines, "\n") .. "\n")
                         else
-                                writeFile(root .. "/remotes.txt", header .. "no remote events or functions visible to the client\n")
+                                writeFile(root .. "/values.txt", header .. "no value instances, attributes or humanoids found\n")
+                        end
+
+                        setStatus("Writing interactables (" .. #interactLines .. ")...")
+
+                        if #interactLines > 0 then
+                                writeFile(root .. "/interactables.txt", header .. table.concat(interactLines, "\n") .. "\n")
+                        else
+                                writeFile(root .. "/interactables.txt", header .. "no click detectors or proximity prompts found\n")
                         end
 
                         setStatus("Writing assets (" .. #assetsLines .. ")...")
@@ -746,6 +1517,8 @@ local function runExtract()
                         else
                                 writeFile(root .. "/assets.txt", header .. "no asset ids found\n")
                         end
+
+                        local analyzer = makeAnalyzer(remoteByName)
 
                         local decompiledCount = 0
                         local failedCount = 0
@@ -785,6 +1558,7 @@ local function runExtract()
                                                                 .. entry.className
                                                                 .. "  "
                                                                 .. entry.path
+                                                        analyzer.analyze(fileName, source, entry.path)
                                                 else
                                                         failedCount = failedCount + 1
                                                         manifestLines[#manifestLines + 1] = "WRITEFAIL  "
@@ -831,6 +1605,20 @@ local function runExtract()
                                 return
                         end
 
+                        setStatus("Writing remotes report (" .. #remoteRecords .. " remotes)...")
+                        writeFile(root .. "/remotes.txt", makeRemoteReport(remoteRecords, analyzer, header))
+
+                        if abortNow() then
+                                return
+                        end
+
+                        setStatus("Writing findings (" .. #analyzer.findings .. " flagged scripts)...")
+                        writeFile(root .. "/findings.txt", makeFindingsReport(analyzer, header))
+
+                        if abortNow() then
+                                return
+                        end
+
                         setStatus("Writing overview.json...")
 
                         local lightingInfo = {}
@@ -860,9 +1648,67 @@ local function runExtract()
                         end
 
                         local creatorName = nil
+                        local descriptionText = nil
+                        local priceInRobux = nil
+                        local createdDate = nil
+                        local updatedDate = nil
 
-                        if infoOk and type(info) == "table" and type(info.Creator) == "table" then
-                                creatorName = info.Creator.Name
+                        if infoOk and type(info) == "table" then
+                                if type(info.Creator) == "table" and type(info.Creator.Name) == "string" then
+                                        creatorName = info.Creator.Name
+                                end
+
+                                if type(info.Description) == "string" then
+                                        descriptionText = trimText(info.Description, 600)
+                                end
+
+                                if type(info.PriceInRobux) == "number" then
+                                        priceInRobux = info.PriceInRobux
+                                end
+
+                                if type(info.Created) == "string" then
+                                        createdDate = info.Created
+                                end
+
+                                if type(info.Updated) == "string" then
+                                        updatedDate = info.Updated
+                                end
+                        end
+
+                        local playersInfo = {}
+
+                        for _, player in ipairs(Players:GetPlayers()) do
+                                playersInfo[#playersInfo + 1] = {
+                                        name = player.Name,
+                                        displayName = player.DisplayName,
+                                        userId = player.UserId,
+                                        team = player.Team and player.Team.Name or nil,
+                                        accountAge = player.AccountAge
+                                }
+                        end
+
+                        local fireableCount = 0
+                        local bindableCount = 0
+                        local remoteWithCalls = 0
+                        local remoteWithRefsOnly = 0
+                        local remoteUnreferenced = 0
+
+                        for _, record in ipairs(remoteRecords) do
+                                local isBindable = record.className == "BindableEvent" or record.className == "BindableFunction"
+
+                                if isBindable then
+                                        bindableCount = bindableCount + 1
+                                else
+                                        fireableCount = fireableCount + 1
+                                end
+
+                                if record.callCount > 0 then
+                                        remoteWithCalls = remoteWithCalls + 1
+                                elseif next(record.refs) then
+                                        remoteWithRefsOnly = remoteWithRefsOnly + 1
+                                elseif not isBindable then
+                                        remoteUnreferenced = remoteUnreferenced + 1
+                                end
                         end
 
                         local overview = {
@@ -874,12 +1720,18 @@ local function runExtract()
                                         creatorId = game.CreatorId,
                                         creatorType = tostring(game.CreatorType),
                                         creatorName = creatorName,
+                                        description = descriptionText,
+                                        priceInRobux = priceInRobux,
+                                        created = createdDate,
+                                        updated = updatedDate,
                                         playerCount = #Players:GetPlayers(),
                                         maxPlayers = Players.MaxPlayers,
                                         privateServerId = game.PrivateServerId ~= "" and game.PrivateServerId or nil
                                 },
+                                players = playersInfo,
                                 workspace = {
                                         streamingEnabled = Workspace.StreamingEnabled,
+                                        streamingCaveat = Workspace.StreamingEnabled and "workspace streaming is on - distant parts may not have been replicated during this extraction" or nil,
                                         partCount = partCount,
                                         anchoredCount = anchoredCount,
                                         unanchoredCount = partCount - anchoredCount,
@@ -893,8 +1745,32 @@ local function runExtract()
                                         topClasses = topEntries(classCounts, 25),
                                         topMaterials = topEntries(materialCounts, 15)
                                 },
+                                values = {
+                                        valueInstances = valueInstanceCount,
+                                        attributes = attributeLineCount,
+                                        humanoidSnapshots = humanoidLineCount
+                                },
+                                interactables = {
+                                        clickDetectors = clickDetectorCount,
+                                        proximityPrompts = proximityPromptCount
+                                },
+                                remoteAnalysis = {
+                                        total = #remoteRecords,
+                                        fireableByClient = fireableCount,
+                                        bindables = bindableCount,
+                                        withClientCalls = remoteWithCalls,
+                                        referencedOnly = remoteWithRefsOnly,
+                                        unreferenced = remoteUnreferenced,
+                                        unresolvedCalls = #analyzer.unresolved
+                                },
+                                codeAnalysis = {
+                                        scriptsAnalyzed = analyzer.analyzed,
+                                        scriptsFlagged = #analyzer.findings,
+                                        urls = #analyzer.urls,
+                                        teleportPlaceIds = #analyzer.placeIds
+                                },
                                 extraction = {
-                                        remotesFound = #remotesLines,
+                                        remotesFound = #remoteRecords,
                                         assetIdsFound = #assetsLines,
                                         clientScripts = #scriptEntries,
                                         scriptsDecompiled = decompiledCount,
@@ -928,16 +1804,18 @@ local function runExtract()
                         setStatus("Done: "
                                 .. total
                                 .. " instances, "
-                                .. partCount
-                                .. " parts, "
                                 .. decompiledCount
                                 .. "/"
                                 .. #scriptEntries
-                                .. " game scripts, "
-                                .. #remotesLines
+                                .. " scripts, "
+                                .. #remoteRecords
                                 .. " remotes, "
-                                .. #assetsLines
-                                .. " assets -> "
+                                .. #valuesLines
+                                .. " values, "
+                                .. #analyzer.findings
+                                .. " flagged, "
+                                .. #analyzer.urls
+                                .. " urls -> "
                                 .. toFullPath(asZip and zipPath or root))
                 end)
 
