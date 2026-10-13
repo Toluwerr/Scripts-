@@ -1522,6 +1522,8 @@ local function runExtract()
 
                         local decompiledCount = 0
                         local failedCount = 0
+                        local runcontextCount = 0
+                        local retryCount = 0
                         local manifestLines = {
                                 "Game: " .. placeName .. " (" .. tostring(game.PlaceId) .. ")",
                                 "Generated: " .. generatedAt,
@@ -1536,6 +1538,66 @@ local function runExtract()
                                         .. #scriptEntries
                                         .. " scripts skipped"
                         else
+                                local function tryDecompile(instance)
+                                        local ok, source = pcall(decompile, instance)
+
+                                        if ok and type(source) == "string" and #source > 0 then
+                                                return true, source, nil
+                                        end
+
+                                        local reason = ok and "empty result" or tostring(source):sub(1, 120)
+                                        local flipTried = false
+
+                                        if instance.ClassName == "Script" then
+                                                local contextOk, runContext = pcall(function()
+                                                        return instance.RunContext
+                                                end)
+
+                                                if contextOk and runContext ~= Enum.RunContext.Client then
+                                                        local flipOk = pcall(function()
+                                                                instance.RunContext = Enum.RunContext.Client
+                                                        end)
+
+                                                        if flipOk then
+                                                                flipTried = true
+                                                                ok, source = pcall(decompile, instance)
+
+                                                                pcall(function()
+                                                                        instance.RunContext = runContext
+                                                                end)
+
+                                                                if ok and type(source) == "string" and #source > 0 then
+                                                                        return true, source, "runcontext"
+                                                                end
+
+                                                                if not ok then
+                                                                        reason = "runcontext flip: " .. tostring(source):sub(1, 100)
+                                                                else
+                                                                        reason = "runcontext flip: empty result"
+                                                                end
+                                                        end
+                                                end
+                                        end
+
+                                        task.wait(0.35)
+
+                                        ok, source = pcall(decompile, instance)
+
+                                        if ok and type(source) == "string" and #source > 0 then
+                                                return true, source, "retry"
+                                        end
+
+                                        if not ok and not flipTried then
+                                                reason = tostring(source):sub(1, 120)
+                                        end
+
+                                        if instance.Parent == nil then
+                                                reason = "instance removed before decompile"
+                                        end
+
+                                        return false, nil, reason
+                                end
+
                                 for i, entry in ipairs(scriptEntries) do
                                         setStatus("Decompiling " .. i .. " / " .. #scriptEntries .. ": " .. entry.name)
                                         task.wait()
@@ -1544,15 +1606,22 @@ local function runExtract()
                                                 return
                                         end
 
-                                        local decompileOk, source = pcall(decompile, entry.instance)
+                                        local ok, source, note = tryDecompile(entry.instance)
 
-                                        if decompileOk and type(source) == "string" and #source > 0 then
+                                        if ok then
                                                 local fileName = string.format("%03d_%s.lua", i, sanitizeName(entry.name, 50))
                                                 local writeOk, writeErr = pcall(writeFile, scriptsDir .. "/" .. fileName, source)
 
                                                 if writeOk then
                                                         decompiledCount = decompiledCount + 1
-                                                        manifestLines[#manifestLines + 1] = "OK        "
+
+                                                        if note == "runcontext" then
+                                                                runcontextCount = runcontextCount + 1
+                                                        elseif note == "retry" then
+                                                                retryCount = retryCount + 1
+                                                        end
+
+                                                        manifestLines[#manifestLines + 1] = (note == "runcontext" and "OK(RC)    " or "OK        ")
                                                                 .. fileName
                                                                 .. "  <-  "
                                                                 .. entry.className
@@ -1571,14 +1640,12 @@ local function runExtract()
                                         else
                                                 failedCount = failedCount + 1
 
-                                                local reason = decompileOk and "empty result" or tostring(source):sub(1, 80)
-
                                                 manifestLines[#manifestLines + 1] = "FAIL      "
                                                         .. entry.className
                                                         .. "  "
                                                         .. entry.path
                                                         .. "  - "
-                                                        .. reason
+                                                        .. tostring(note):sub(1, 100)
                                         end
                                 end
                         end
@@ -1590,6 +1657,10 @@ local function runExtract()
                                 .. #scriptEntries
                                 .. ", failed: "
                                 .. failedCount
+                                .. ", runcontext legacy recovered: "
+                                .. runcontextCount
+                                .. ", retry recovered: "
+                                .. retryCount
 
                         manifestLines[#manifestLines + 1] = "skipped: "
                                 .. skippedDefaults
@@ -1775,6 +1846,8 @@ local function runExtract()
                                         clientScripts = #scriptEntries,
                                         scriptsDecompiled = decompiledCount,
                                         scriptsFailed = failedCount,
+                                        scriptsViaRunContext = runcontextCount,
+                                        scriptsViaRetry = retryCount,
                                         skippedRobloxDefaults = skippedDefaults,
                                         skippedOtherPlayerCopies = skippedOtherPlayers,
                                         skippedOutsideGameContainers = skippedOutside,
