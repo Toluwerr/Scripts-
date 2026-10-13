@@ -1054,14 +1054,88 @@ local function runExtract()
 
                         local root = "GameIntel/" .. tostring(game.PlaceId) .. "_" .. sanitizeName(placeName, 40)
                         local scriptsDir = root .. "/scripts"
+                        local siblingZip = "GameIntel_"
+                                .. tostring(game.PlaceId)
+                                .. "_"
+                                .. sanitizeName(placeName, 40)
+                                .. ".zip"
 
                         if asZip then
-                                zipPath = "GameIntel_"
-                                        .. tostring(game.PlaceId)
-                                        .. "_"
-                                        .. sanitizeName(placeName, 40)
-                                        .. ".zip"
+                                zipPath = siblingZip
+                        end
 
+                        local sweepFailures = 0
+
+                        do
+                                local idMark = tostring(game.PlaceId) .. "_"
+                                local zipMark = "GameIntel_" .. tostring(game.PlaceId) .. "_"
+                                local kills = {}
+
+                                if type(listfolder) == "function" then
+                                        local okList, listing = pcall(listfolder, "GameIntel")
+
+                                        if okList and type(listing) == "table" then
+                                                for _, entryName in ipairs(listing) do
+                                                        local name = tostring(entryName)
+
+                                                        if name:sub(1, #idMark) == idMark then
+                                                                kills[#kills + 1] = "GameIntel/" .. name
+                                                        end
+                                                end
+                                        end
+
+                                        local okRoot, rootListing = pcall(listfolder, "")
+
+                                        if okRoot and type(rootListing) == "table" then
+                                                for _, entryName in ipairs(rootListing) do
+                                                        local name = tostring(entryName)
+
+                                                        if name:sub(1, #zipMark) == zipMark and name:sub(-4) == ".zip" then
+                                                                kills[#kills + 1] = name
+                                                        end
+                                                end
+                                        end
+                                else
+                                        kills[#kills + 1] = root
+                                        kills[#kills + 1] = siblingZip
+                                end
+
+                                local function killPath(target)
+                                        if type(delfolder) == "function" then
+                                                local gone = pcall(delfolder, target)
+
+                                                if gone then
+                                                        return true
+                                                end
+                                        end
+
+                                        if type(delfile) == "function" then
+                                                local gone = pcall(delfile, target)
+
+                                                if gone then
+                                                        return true
+                                                end
+                                        end
+
+                                        if type(isfolder) == "function" and isfolder(target) then
+                                                return false
+                                        end
+
+                                        if type(isfile) == "function" and isfile(target) then
+                                                return false
+                                        end
+
+                                        return true
+                                end
+
+                                for _, target in ipairs(kills) do
+                                        if not killPath(target) then
+                                                sweepFailures = sweepFailures + 1
+                                        end
+                                end
+                        end
+
+                        if asZip then
                                 local probeOk, probeErr = writeZipNow()
 
                                 if not probeOk then
@@ -1524,6 +1598,8 @@ local function runExtract()
                         local failedCount = 0
                         local runcontextCount = 0
                         local retryCount = 0
+                        local refindCount = 0
+                        local sourceCount = 0
                         local manifestLines = {
                                 "Game: " .. placeName .. " (" .. tostring(game.PlaceId) .. ")",
                                 "Generated: " .. generatedAt,
@@ -1538,15 +1614,14 @@ local function runExtract()
                                         .. #scriptEntries
                                         .. " scripts skipped"
                         else
-                                local function tryDecompile(instance)
+                                local function chainDecompile(instance)
                                         local ok, source = pcall(decompile, instance)
 
                                         if ok and type(source) == "string" and #source > 0 then
-                                                return true, source, nil
+                                                return true, source, "direct"
                                         end
 
                                         local reason = ok and "empty result" or tostring(source):sub(1, 120)
-                                        local flipTried = false
 
                                         if instance.ClassName == "Script" then
                                                 local contextOk, runContext = pcall(function()
@@ -1559,7 +1634,6 @@ local function runExtract()
                                                         end)
 
                                                         if flipOk then
-                                                                flipTried = true
                                                                 ok, source = pcall(decompile, instance)
 
                                                                 pcall(function()
@@ -1570,11 +1644,9 @@ local function runExtract()
                                                                         return true, source, "runcontext"
                                                                 end
 
-                                                                if not ok then
-                                                                        reason = "runcontext flip: " .. tostring(source):sub(1, 100)
-                                                                else
-                                                                        reason = "runcontext flip: empty result"
-                                                                end
+                                                                reason = ok
+                                                                        and "runcontext flip: empty result"
+                                                                        or ("runcontext flip: " .. tostring(source):sub(1, 100))
                                                         end
                                                 end
                                         end
@@ -1587,7 +1659,19 @@ local function runExtract()
                                                 return true, source, "retry"
                                         end
 
-                                        if not ok and not flipTried then
+                                        if not ok then
+                                                reason = tostring(source):sub(1, 120)
+                                        end
+
+                                        task.wait(0.85)
+
+                                        ok, source = pcall(decompile, instance)
+
+                                        if ok and type(source) == "string" and #source > 0 then
+                                                return true, source, "retry"
+                                        end
+
+                                        if not ok then
                                                 reason = tostring(source):sub(1, 120)
                                         end
 
@@ -1598,6 +1682,90 @@ local function runExtract()
                                         return false, nil, reason
                                 end
 
+                                local function sourceRead(instance)
+                                        if instance == nil then
+                                                return false, nil, "instance gone"
+                                        end
+
+                                        local ok, text = pcall(function()
+                                                return instance.Source
+                                        end)
+
+                                        if ok and type(text) == "string" and #text > 0 then
+                                                return true, text, "source"
+                                        end
+
+                                        return false, nil, ok and "source unreadable" or ("source read: " .. tostring(text):sub(1, 80))
+                                end
+
+                                local function resolveByPath(path)
+                                        local current = game
+
+                                        for token in string.gmatch(tostring(path), "[^%.]+") do
+                                                local ok, child = pcall(function()
+                                                        return current:FindFirstChild(token)
+                                                end)
+
+                                                if not ok or child == nil then
+                                                        return nil
+                                                end
+
+                                                current = child
+                                        end
+
+                                        return current
+                                end
+
+                                local function tryDecompile(instance, path)
+                                        local dead = instance == nil or instance.Parent == nil
+
+                                        if not dead then
+                                                local ok, source, route = chainDecompile(instance)
+
+                                                if ok then
+                                                        return true, source, route
+                                                end
+
+                                                local srcOk, text = sourceRead(instance)
+
+                                                if srcOk then
+                                                        return true, text, "source"
+                                                end
+
+                                                return false, nil, route
+                                        end
+
+                                        local srcOk, text = sourceRead(instance)
+
+                                        if srcOk then
+                                                return true, text, "source"
+                                        end
+
+                                        for _ = 1, 3 do
+                                                local fresh = resolveByPath(path)
+
+                                                if fresh and fresh.Parent ~= nil then
+                                                        local fok, fsource, froute = chainDecompile(fresh)
+
+                                                        if fok then
+                                                                return true, fsource, "refind " .. froute
+                                                        end
+
+                                                        local rsOk, rsText = sourceRead(fresh)
+
+                                                        if rsOk then
+                                                                return true, rsText, "source"
+                                                        end
+
+                                                        return false, nil, "refound but still failed: " .. tostring(froute)
+                                                end
+
+                                                task.wait(1)
+                                        end
+
+                                        return false, nil, "instance removed and not refound"
+                                end
+
                                 for i, entry in ipairs(scriptEntries) do
                                         setStatus("Decompiling " .. i .. " / " .. #scriptEntries .. ": " .. entry.name)
                                         task.wait()
@@ -1606,7 +1774,7 @@ local function runExtract()
                                                 return
                                         end
 
-                                        local ok, source, note = tryDecompile(entry.instance)
+                                        local ok, source, note = tryDecompile(entry.instance, entry.path)
 
                                         if ok then
                                                 local fileName = string.format("%03d_%s.lua", i, sanitizeName(entry.name, 50))
@@ -1614,14 +1782,23 @@ local function runExtract()
 
                                                 if writeOk then
                                                         decompiledCount = decompiledCount + 1
+                                                        local tag = "OK        "
 
-                                                        if note == "runcontext" then
+                                                        if note == "runcontext" or note == "refind runcontext" then
+                                                                tag = "OK(RC)    "
                                                                 runcontextCount = runcontextCount + 1
-                                                        elseif note == "retry" then
+                                                        elseif note == "retry" or note == "refind retry" then
+                                                                tag = "OK(RT)    "
                                                                 retryCount = retryCount + 1
+                                                        elseif note == "source" then
+                                                                tag = "OK(SRC)   "
+                                                                sourceCount = sourceCount + 1
+                                                        elseif note ~= "direct" then
+                                                                tag = "OK(RF)    "
+                                                                refindCount = refindCount + 1
                                                         end
 
-                                                        manifestLines[#manifestLines + 1] = (note == "runcontext" and "OK(RC)    " or "OK        ")
+                                                        manifestLines[#manifestLines + 1] = tag
                                                                 .. fileName
                                                                 .. "  <-  "
                                                                 .. entry.className
@@ -1661,6 +1838,10 @@ local function runExtract()
                                 .. runcontextCount
                                 .. ", retry recovered: "
                                 .. retryCount
+                                .. ", refind recovered: "
+                                .. refindCount
+                                .. ", source recovered: "
+                                .. sourceCount
 
                         manifestLines[#manifestLines + 1] = "skipped: "
                                 .. skippedDefaults
@@ -1848,6 +2029,8 @@ local function runExtract()
                                         scriptsFailed = failedCount,
                                         scriptsViaRunContext = runcontextCount,
                                         scriptsViaRetry = retryCount,
+                                        scriptsViaRefind = refindCount,
+                                        scriptsViaSource = sourceCount,
                                         skippedRobloxDefaults = skippedDefaults,
                                         skippedOtherPlayerCopies = skippedOtherPlayers,
                                         skippedOutsideGameContainers = skippedOutside,
@@ -1874,13 +2057,15 @@ local function runExtract()
                                 end
                         end
 
-                        setStatus("Done: "
+                        local doneText = "Done: "
                                 .. total
                                 .. " instances, "
                                 .. decompiledCount
                                 .. "/"
                                 .. #scriptEntries
                                 .. " scripts, "
+                                .. failedCount
+                                .. " failed, "
                                 .. #remoteRecords
                                 .. " remotes, "
                                 .. #valuesLines
@@ -1888,8 +2073,13 @@ local function runExtract()
                                 .. #analyzer.findings
                                 .. " flagged, "
                                 .. #analyzer.urls
-                                .. " urls -> "
-                                .. toFullPath(asZip and zipPath or root))
+                                .. " urls"
+
+                        if sweepFailures > 0 then
+                                doneText = doneText .. ", old output not fully removed"
+                        end
+
+                        setStatus(doneText .. " -> " .. toFullPath(asZip and zipPath or root))
                 end)
 
                 local wasCancelled = cancelRequested
