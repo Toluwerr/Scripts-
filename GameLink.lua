@@ -232,10 +232,12 @@ local function httpPost(path, body)
 end
 
 local function httpGetCmd()
-        local url = BASE .. "/api/link/cmd?t=" .. TOKEN .. "&sid=" .. sid
+        -- cache buster: some executors cache HttpGet by url, which would stop
+        -- the server from seeing our polls and flip the session to stale
+        local url = BASE .. "/api/link/cmd?t=" .. TOKEN .. "&sid=" .. sid .. "&_=" .. tostring(os.clock() * 1000)
 
         local ok, body = pcall(function()
-                return game:HttpGet(url)
+                return game:HttpGet(url, true)
         end)
 
         if ok and type(body) == "string" then
