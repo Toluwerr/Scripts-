@@ -90,7 +90,7 @@ local function jsonEncode(value)
         if count > 0 then
                 local items = {}
 
-                for i = 1, math.min(count, 40) do
+                for i = 1, math.min(count, 64) do
                         items[#items + 1] = jsonEncode(value[i])
                 end
 
@@ -103,7 +103,7 @@ local function jsonEncode(value)
         for key, item in pairs(value) do
                 seen = seen + 1
 
-                if seen <= 24 then
+                if seen <= 32 then
                         fields[#fields + 1] = '"' .. jsonEscape(tostring(key)) .. '":' .. jsonEncode(item)
                 end
         end
@@ -118,7 +118,7 @@ end
 local function serialize(value, depth)
         depth = depth or 0
 
-        if depth > 5 then
+        if depth > 7 then
                 return "..."
         end
 
@@ -129,8 +129,8 @@ local function serialize(value, depth)
         end
 
         if kind == "string" then
-                if #value > 400 then
-                        return value:sub(1, 400) .. "..."
+                if #value > 2000 then
+                        return value:sub(1, 2000) .. "..."
                 end
 
                 return value
@@ -167,7 +167,7 @@ local function serialize(value, depth)
         local itemCount = #value
 
         if itemCount > 0 then
-                for i = 1, math.min(itemCount, 30) do
+                for i = 1, math.min(itemCount, 48) do
                         out[i] = serialize(value[i], depth + 1)
                 end
 
@@ -179,7 +179,7 @@ local function serialize(value, depth)
         for key, item in pairs(value) do
                 seen = seen + 1
 
-                if seen > 20 then
+                if seen > 32 then
                         out.__trunc = "keys hidden"
                         break
                 end
@@ -520,6 +520,8 @@ local function connect()
                 placeName = game.Name,
                 jobId = game.JobId or "",
                 player = LocalPlayer.Name,
+                userId = LocalPlayer.UserId,
+                displayName = LocalPlayer.DisplayName,
                 executor = identifyexecutor and identifyexecutor() or "unknown",
                 transport = "request"
         })
