@@ -24,7 +24,10 @@ do
         Reborn = library
 end
 
-local TOKEN = "glm-96fa14df95a351a2176d890d"
+local TOKEN = ""
+if type(Global.GameLinkToken) == "string" then
+        TOKEN = Global.GameLinkToken:gsub("^[%s]+", ""):gsub("[%s]+$", "")
+end
 
 local BASE = ""
 if type(Global.GameLinkBase) == "string" then
@@ -507,6 +510,11 @@ local function connect()
                 return
         end
 
+        if #TOKEN == 0 then
+                setStatus("No token. Copy the snippet from the site (it sets getgenv().GameLinkToken) then press Connect")
+                return
+        end
+
         if requestFn() == nil then
                 setStatus("This executor has no request/http_request/syn.request - cannot POST to the bridge")
                 return
@@ -601,7 +609,7 @@ statusLabel = LinkSection:Paragraph({
 })
 
 baseUrlLabel = LinkSection:Paragraph({
-        Text = "URL: " .. (#BASE > 0 and BASE or "unset - getgenv().GameLinkBase = \"...\"")
+        Text = "URL: " .. (#BASE > 0 and BASE or "unset - getgenv().GameLinkBase = \"...\"") .. " | token: " .. (#TOKEN > 0 and "set" or "unset - getgenv().GameLinkToken = \"...\"")
 })
 
 LinkSection:Toggle({
