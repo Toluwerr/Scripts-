@@ -245,13 +245,13 @@ local function httpGetCmd()
         end)
 
         if ok and type(body) == "string" then
-                return body
+                return true, body
         end
 
         local fn = requestFn()
 
         if not fn then
-                return ""
+                return false, ""
         end
 
         local ok2, res = pcall(fn, {
@@ -261,10 +261,10 @@ local function httpGetCmd()
         })
 
         if ok2 and type(res) == "table" and type(res.Body) == "string" then
-                return res.Body
+                return true, res.Body
         end
 
-        return ""
+        return false, ""
 end
 
 local function parseCmd(body)
@@ -565,11 +565,14 @@ local function connect()
                 while linked and running do
                         tick = tick + 1
 
-                        local beat = (tick % 5 == 0)
+                        -- Heartbeat EVERY round trip (used to be every 5th):
+                        -- the server counts any event POST as a beat, so one
+                        -- slow request can no longer open a 10s+ silence gap
+                        -- that flips the session offline and blocks the agent.
+                        -- The cmd poll below also refreshes presence serverside.
+                        local flushOk = flushAndBeat(true)
 
-                        local flushOk = flushAndBeat(beat)
-
-                        local body = httpGetCmd()
+                        local cmdOk, body = httpGetCmd()
                         local id, code = parseCmd(body)
 
                         if id and id > 0 and code then
@@ -577,7 +580,7 @@ local function connect()
                                 executeCommand(id, code)
                         end
 
-                        if flushOk then
+                        if flushOk and cmdOk then
                                 failures = 0
                         else
                                 failures = failures + 1
@@ -585,10 +588,11 @@ local function connect()
                         end
 
                         if failures >= 30 then
-                                setStatus("Link down after 30 failed round trips - stopped")
-                                linked = false
-                                restoreHook()
-                                break
+                                -- never give up on the link: back off and keep
+                                -- retrying so it heals itself when the bridge
+                                -- comes back instead of stopping for good
+                                setStatus("Link unstable - retrying (" .. failures .. " failed round trips)")
+                                task.wait(5)
                         end
 
                         if tick % 5 == 0 then
