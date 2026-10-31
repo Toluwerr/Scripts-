@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
+local MarketplaceService = game:GetService("MarketplaceService")
 
 local LocalPlayer = Players.LocalPlayer
 local Global = (getgenv and getgenv()) or _G
@@ -500,6 +501,18 @@ local function executeCommand(id, code)
         end)
 end
 
+local function publicPlaceName()
+        local ok, info = pcall(function()
+                return MarketplaceService:GetProductInfo(game.PlaceId)
+        end)
+
+        if ok and type(info) == "table" and type(info.Name) == "string" and #info.Name > 0 then
+                return info.Name
+        end
+
+        return nil
+end
+
 local function connect()
         if linked or stopping then
                 return
@@ -526,6 +539,8 @@ local function connect()
                 sid = sid,
                 placeId = game.PlaceId,
                 placeName = game.Name,
+                universeId = game.GameId,
+                publicName = publicPlaceName(),
                 jobId = game.JobId or "",
                 player = LocalPlayer.Name,
                 userId = LocalPlayer.UserId,
@@ -624,6 +639,7 @@ LinkSection:Button({
         Text = "Connect",
         Primary = true,
         Callback = function()
+                Global.GameLinkAuto = true
                 connect()
         end
 })
@@ -631,6 +647,7 @@ LinkSection:Button({
 LinkSection:Button({
         Text = "Disconnect",
         Callback = function()
+                Global.GameLinkAuto = false
                 disconnectLink()
         end
 })
@@ -643,6 +660,19 @@ LinkSection:Button({
                 end
         end
 })
+
+-- auto-connect when the snippet already provided base + token; also re-runs
+-- after a teleport (queue_on_teleport below), so the session always matches
+-- the place the player is actually in
+if #BASE > 0 and #TOKEN > 0 and Global.GameLinkAuto ~= false then
+        task.defer(connect)
+end
+
+local queueTeleport = queue_on_teleport or (syn and syn.queue_on_teleport)
+
+if type(queueTeleport) == "function" then
+        pcall(queueTeleport, 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Toluwerr/Scripts-/main/GameLink.lua"))()')
+end
 
 local function cleanup()
         if not running then
