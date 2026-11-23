@@ -1,0 +1,3242 @@
+local outerState = ... 
+if game.GameId ~= 10770730129 then error("Open Ragdoll Soccer before running this script.") end
+setthreadidentity(8)
+local Reborn = assert(loadstring(game:HttpGet("https://raw.githubusercontent.com/Toluwer/Reborn/cb5d73f9b387c11ef16e4b887d7bf28fb38fb7a7/src/Reborn.luau"), "@Reborn"))()
+assert(type(Reborn) == "table" and type(Reborn.CreateWindow) == "function" and type(Reborn.Destroy) == "function", "Reborn could not load")
+local env = getgenv()
+local previous = env.__PoopSoccer
+local retainedSettings = type(previous) == "table" and type(previous.settings) == "table" and table.clone(previous.settings)
+local retainedShots = type(previous) == "table" and type(previous.shots) == "table" and previous.shots
+local retainedClosed = type(previous) == "table" and previous.window and previous.window.Closed
+if env.__PoopSoccerLife then env.__PoopSoccerLife.cleanup() end
+local life = {active = true, cleaners = {}, errors = {}}
+function life.alive() return life.active end
+function life.onCleanup(fn)
+    if not life.active then fn(); return function() end end
+    table.insert(life.cleaners, fn)
+    return function()
+        local index = table.find(life.cleaners, fn)
+        if index then table.remove(life.cleaners, index) end
+    end
+end
+function life.connect(signal, fn)
+    local connection = signal:Connect(function(...)
+        if life.active then fn(...) end
+    end)
+    life.onCleanup(function() connection:Disconnect() end)
+    return connection
+end
+function life.override(object, key, value)
+    local original = object[key]
+    local frozen = table.isfrozen(object)
+    if frozen then setreadonly(object, false) end
+    object[key] = value
+    if frozen then setreadonly(object, true) end
+    local restored = false
+    local unregister
+    local function restore()
+        if restored then return end
+        restored = true
+        if unregister then unregister() end
+        if object[key] == value then
+            local currentlyFrozen = table.isfrozen(object)
+            if currentlyFrozen then setreadonly(object, false) end
+            object[key] = original
+            if currentlyFrozen then setreadonly(object, true) end
+        end
+    end
+    unregister = life.onCleanup(restore)
+    return restore
+end
+function life.cleanup()
+    if not life.active then return end
+    life.active = false
+    local cleaners = life.cleaners
+    life.cleaners = {}
+    for i = #cleaners, 1, -1 do
+        local ok, err = pcall(cleaners[i])
+        if not ok then table.insert(life.errors, tostring(err)) end
+    end
+end
+life.onCleanup(function() Reborn:Destroy() end)
+env.__PoopSoccerLife = life
+if outerState then outerState.onCleanup(life.cleanup) end
+
+local Players = game:GetService("Players")
+local Run = game:GetService("RunService")
+local Input = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local Tags = game:GetService("CollectionService")
+local Http = game:GetService("HttpService")
+local player = Players.LocalPlayer
+local shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+local gameModules = shared:WaitForChild("Game")
+local client = player:WaitForChild("PlayerScripts"):WaitForChild("Client"):WaitForChild("Game")
+local function module(parent, name) return require(parent:WaitForChild(name, 15)) end
+local Dribble = module(client, "DribbleClient")
+local Ball = module(client, "BallView")
+local Mannequin = module(client, "MannequinClient")
+local Flight = module(gameModules:WaitForChild("Kick"), "Flight")
+local Families = module(gameModules.Kick, "Families")
+local Strike = module(gameModules.Kick, "Strike")
+local KickPlan = module(gameModules.Kick, "Plan")
+local KickRules = module(gameModules.Kick, "Rules")
+local Path = module(gameModules:WaitForChild("Dribble"), "BallPath")
+local Contacts = module(gameModules.Dribble, "Contacts")
+local Tuning = module(gameModules:WaitForChild("MannequinAnimation"), "Tuning")
+local PokeLegs = module(gameModules.MannequinAnimation, "PokeLegs")
+local Net = module(shared, "Net")
+local kickPlanRemote = Net:RemoteEvent("KickPlan")
+local kickCancelRemote = Net:RemoteEvent("KickCancel")
+
+local function finite(n) return type(n) == "number" and n == n and math.abs(n) < math.huge end
+local defaults = {
+    shooting = true, style = "Finesse", corner = "Auto", curve = "Automatic",
+    power = 100, spin = 50, assist = false, 
+    speedEnabled = false, speed = 1.5, sprint = false,
+    trajectory = true, marker = true, notifications = true,
+    passStrength = 100, passType = "Direct pass", passPower = 85, passCurve = "Automatic", passSpin = 25,
+    passTargets = "Teammates", passCone = 14, passLead = true, aimDot = true,
+    autoPoke = true,
+    passHeightMode = "Automatic", passAngle = 37, passAdaptive = false,
+    autoGK = false, gkPosition = false,
+    passDecision = "Balanced", smartPassType = "Automatic", 
+    antiAFK = true, rejoinGK = true, performance = true, reducePostEffects = true, keepShadows = false, fpsCap = 240,
+}
+local S: any = {version = "0.30", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", passStatus = "B | Look at a teammate to pass", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
+local settingsPath = "Poop/soccer.settings.json"
+pcall(function()
+    if isfile(settingsPath) then
+        local saved = Http:JSONDecode(readfile(settingsPath))
+        if type(saved) == "table" then
+            for k, v in pairs(defaults) do
+                if type(saved[k]) == type(v) then S.settings[k] = saved[k] end
+            end
+        end
+    end
+end)
+if retainedSettings then
+    for k, v in pairs(defaults) do
+        if type(retainedSettings[k]) == type(v) then S.settings[k] = retainedSettings[k] end
+    end
+end
+
+for key, default in pairs(defaults) do
+    if type(default) == "number" and not finite(S.settings[key]) then S.settings[key] = default end
+end
+S.settings.speed = math.clamp(S.settings.speed, 0.5, 4)
+S.settings.power = math.clamp(S.settings.power, 50, 108)
+S.settings.spin = math.clamp(S.settings.spin, 0, 70)
+local styles = {"Power", "Finesse", "Trivela", "Laced", "Knuckleball (low spin)", "Curve"}
+local corners = {"Auto", "Top left", "Top right", "Low left", "Low right", "Centre"}
+local passTypes = {"Direct pass", "Curled pass", "Driven pass", "Lofted pass", "Power pass"}
+if not table.find(passTypes, S.settings.passType) then S.settings.passType = "Direct pass" end
+if not table.find({"Automatic", "Left", "Right"}, S.settings.passCurve) then S.settings.passCurve = "Automatic" end
+S.settings.passTargets = "Teammates"
+if S.settings.passPower ~= S.settings.passPower or math.abs(S.settings.passPower) == math.huge or S.settings.passPower < 0 then S.settings.passPower = 85 end
+if S.settings.passAngle ~= S.settings.passAngle or S.settings.passAngle < 0 or S.settings.passAngle >= 90 then S.settings.passAngle = 37 end
+if not table.find({"Automatic", "Custom"}, S.settings.passHeightMode) then S.settings.passHeightMode = "Automatic" end
+S.settings.passSpin = math.clamp(S.settings.passSpin, 0, 60)
+S.settings.passCone = math.clamp(S.settings.passCone, 5, 25)
+if not table.find(styles, S.settings.style) then S.settings.style = "Power" end
+if not table.find(corners, S.settings.corner) then S.settings.corner = "Auto" end
+if not table.find({"Automatic", "Left", "Right"}, S.settings.curve) then S.settings.curve = "Automatic" end
+env.__PoopSoccer = S
+local cfg = S.settings
+cfg.curve = "Automatic"
+cfg.passStrength = math.clamp(cfg.passStrength, 25, 150)
+if cfg.smartPassType == "Curve left" or cfg.smartPassType == "Curve right" then cfg.smartPassType = "Curved" end
+local function save()
+    local ok, err = pcall(function()
+        if not isfolder("Poop") then makefolder("Poop") end
+        writefile(settingsPath, Http:JSONEncode(cfg))
+    end)
+    S.saveError = if ok then nil else tostring(err)
+    return ok, err
+end
+local notifySink
+local function notify(title, message, force)
+    if (not cfg.notifications and not force) or not notifySink or not life.alive() then return end
+    local identity = getthreadidentity()
+    setthreadidentity(8)
+    local ok, err = pcall(notifySink, title, message)
+    setthreadidentity(identity)
+    if not ok then S.notificationError = tostring(err) end
+end
+local function root()
+    local char = player.Character
+    return char and char:FindFirstChild("Root")
+end
+local function now() return workspace:GetServerTimeNow() end
+local function ownState() return Dribble.kickState() end
+
+local nativeHoldFree = Dribble.holdFree
+local externalHoldUntil = 0
+local releaseGuard
+local function guardHoldUntil()
+    return if releaseGuard then math.min(now() + 0.2, releaseGuard.started + 1) else 0
+end
+life.override(Dribble, "holdFree", function(untilTime)
+    externalHoldUntil = untilTime
+    return nativeHoldFree(math.max(untilTime, guardHoldUntil()))
+end)
+local function clearReleaseGuard(reason)
+    if not releaseGuard then return end
+    releaseGuard.ended = reason
+    releaseGuard.duration = now() - releaseGuard.started
+    releaseGuard = nil
+    nativeHoldFree(externalHoldUntil)
+end
+local function guardRelease(sample)
+    releaseGuard = {ball = sample.ball, pid = sample.pid + 1, character = player.Character, started = now()}
+    S.releaseGuard = releaseGuard
+    nativeHoldFree(math.max(externalHoldUntil, guardHoldUntil()))
+end
+life.onCleanup(function() clearReleaseGuard("Hub unloaded") end)
+life.connect(Run.PreSimulation, function()
+    if not releaseGuard then return end
+    local r = root()
+    local b = Ball.getBall()
+    if not r or player.Character ~= releaseGuard.character or b ~= releaseGuard.ball then
+        clearReleaseGuard("Character or ball changed")
+        return
+    end
+    local pid = b:GetAttribute("PossessionId")
+    if pid and pid ~= releaseGuard.pid and pid ~= releaseGuard.pid - 1 then
+        clearReleaseGuard("Another touch")
+        return
+    end
+    local position = Ball.getPosition()
+    if position and (position - r.Position).Magnitude > 9 then
+        clearReleaseGuard("Ball cleared reach")
+    elseif now() - releaseGuard.started >= 1 then
+        clearReleaseGuard("Release ended")
+    else
+        nativeHoldFree(math.max(externalHoldUntil, guardHoldUntil()))
+    end
+end)
+local function possessionId()
+    local b = Ball.getBall()
+    return b and b:GetAttribute("PossessionId")
+end
+local function mouth()
+    local lines = Contacts.goalLines()
+    local char = player.Character
+    if not lines or not char then return nil end
+    local area = module(gameModules, "KeeperRules").area(char:GetAttribute("Team"))
+    if not area then return nil end
+    local out = -area.side
+    for _, frame in ipairs(Tags:GetTagged("SoccerGoalFrame")) do
+        if frame:IsA("BasePart") and frame:IsDescendantOf(workspace) and (frame.Position.X - area.centre.X) * out > 0 then
+            local scale = frame.Size.Y / 9.142857142857142
+            local ground = frame.Position.Y - frame.Size.Y / 2
+            return {
+                x = if out == 1 then lines[2] else lines[1], z = frame.Position.Z,
+                out = out, width = 13.071428571428571 * scale,
+                ground = ground, top = ground + 8.714285714285714 * scale,
+            }
+        end
+    end
+    return nil
+end
+local function ballSample()
+    local b = Ball.getBall()
+    local r = root()
+    if not b or not r then return nil, "Spawn on the pitch first" end
+    local at = now()
+    local state = ownState()
+    if state then
+        if not finite(state.pid) then return nil, "Ball possession is syncing; try again" end
+        return {ball = b, from = Path.sample(state.seg, at, state.P), time = at, state = state, pid = state.pid}
+    end
+    local source = Ball.getSource()
+    local position = Ball.getPosition()
+    if not position then return nil, "Ball is unavailable" end
+    if (r.Position - position).Magnitude > 11 then return nil, "Get close to the ball or take possession" end
+    if source ~= "free" and source ~= "released" then return nil, "Another player has possession" end
+    local sample = Ball.freeSample(at)
+    if not sample or sample == Vector3.zero then sample = position end
+    local pid = possessionId()
+    if not finite(pid) then return nil, "Ball possession is syncing; try again" end
+    return {ball = b, from = sample, time = at, pid = pid}
+end
+local function opponents(includeAllies)
+    local char = player.Character
+    local team = char and char:GetAttribute("Team")
+    local result = {}
+    for _, model in ipairs(workspace:GetChildren()) do
+        if model:IsA("Model") and model ~= char then
+            local otherRoot = model:FindFirstChild("Root")
+            local otherTeam = model:GetAttribute("Team")
+            if otherRoot and otherRoot:IsA("BasePart") and otherTeam and (includeAllies or otherTeam ~= team) then
+                local engine = S.passingEngine
+                local actor = engine and engine.actor(model, Players:GetPlayerFromCharacter(model), now())
+                table.insert(result, {root = otherRoot, model = model, actor = actor, enemy = otherTeam ~= team})
+            end
+        end
+    end
+    return result
+end
+local function targetFor(goal, from, configuration)
+    local options = configuration or cfg
+    local radius = 0.84
+    local side = goal.width - radius - 1.25
+    local top = goal.top - radius - 1.1
+    local low = goal.ground + radius + 1.15
+    local function point(left, high)
+        return Vector3.new(goal.x, if high then top else low, goal.z + (if left then -1 else 1) * goal.out * side)
+    end
+    if options.corner == "Top left" then return point(true, true) end
+    if options.corner == "Top right" then return point(false, true) end
+    if options.corner == "Low left" then return point(true, false) end
+    if options.corner == "Low right" then return point(false, false) end
+    if options.corner == "Centre" then return Vector3.new(goal.x, (top + low) / 2, goal.z) end
+    local enemies = opponents()
+    local ranked = {}
+    for _, candidate in ipairs({point(true, true), point(false, true), point(true, false), point(false, false)}) do
+        local score = if candidate.Y > (top + low) / 2 then 3 else 0
+        local closest = 80
+        for _, enemy in ipairs(enemies) do
+            local predicted = enemy.root.Position + enemy.root.AssemblyLinearVelocity * 0.15
+            local flatDistance = Vector2.new(predicted.X - candidate.X, predicted.Z - candidate.Z).Magnitude
+            closest = math.min(closest, flatDistance)
+        end
+        score = score + closest - (candidate - from).Magnitude * 0.012
+        table.insert(ranked, {point = candidate, score = score})
+    end
+    table.sort(ranked, function(a, b) return a.score > b.score end)
+    local points = {}
+    for _, item in ipairs(ranked) do table.insert(points, item.point) end
+    return points[1], points
+end
+local function profile(style, from, target, configuration)
+    local options = configuration or cfg
+    local familyName = if style == "Curve" then "Finesse" elseif style == "Knuckleball (low spin)" then "Power" else style
+    local family = Families[familyName] or Families.Power
+    local side = 0
+    local back = family.back or 0
+    if style == "Finesse" or style == "Curve" or style == "Trivela" then
+        local direction = if options.curve == "Left" then 1 elseif options.curve == "Right" then -1 else math.sign((target.Z - from.Z) * (target.X - from.X))
+        if direction == 0 then direction = 1 end
+        side = options.spin * direction
+    end
+    if style == "Knuckleball (low spin)" then back = 0 end
+    local speed = family.speed[2] * 1.05 * math.clamp(options.power, 50, 108) / 100
+    return familyName, speed, side, back
+end
+
+local function goalPassage(simulation, goal, radius)
+    local lowerZ = goal.z - goal.width + radius + 0.4
+    local upperZ = goal.z + goal.width - radius - 0.4
+    local lowerY = goal.ground + radius - 0.12
+    local upperY = goal.top - radius - 0.4
+    local firstDepth = (simulation.pos[1].X - goal.x) * goal.out
+    if firstDepth > radius then return nil, "Ball is already behind the goal line" end
+    local entered = firstDepth >= -radius
+    local minZ, maxZ, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
+    local function include(point)
+        minZ, maxZ = math.min(minZ, point.Z), math.max(maxZ, point.Z)
+        minY, maxY = math.min(minY, point.Y), math.max(maxY, point.Y)
+    end
+    if entered then include(simulation.pos[1]) end
+    for i = 2, simulation.n do
+        local a, b = simulation.pos[i - 1], simulation.pos[i]
+        local da, db = (a.X - goal.x) * goal.out, (b.X - goal.x) * goal.out
+        if not entered and da < -radius and db >= -radius then
+            entered = true
+            include(a:Lerp(b, (-radius - da) / (db - da)))
+        end
+        if entered then
+            if db < -radius then return nil, "Shot turns back before entering the goal" end
+            if da < radius and db >= radius then
+                local exit = a:Lerp(b, (radius - da) / (db - da))
+                include(exit)
+                local dz = if minZ < lowerZ then lowerZ - minZ elseif maxZ > upperZ then upperZ - maxZ else 0
+                local dy = if maxY > upperY then upperY - maxY elseif minY < lowerY then lowerY - minY else 0
+                return {
+                    valid = dz == 0 and dy == 0,
+                    shiftZ = dz, shiftY = dy,
+                    position = exit, time = (i - 2 + (radius - da) / (db - da)) * Flight.STEP,
+                    margin = math.min(minZ - lowerZ, upperZ - maxZ, minY - lowerY, upperY - maxY),
+                    minZ = minZ, maxZ = maxZ, minY = minY, maxY = maxY,
+                }
+            end
+            include(b)
+        end
+    end
+    return nil, "Shot does not fully cross the goal line"
+end
+
+local function fitShot(sample, target, goal, family, speed, side, back, attempts)
+    local radius = sample.ball.Size.X * 0.5
+    local params = Flight.params(sample.ball)
+    local groundY = Ball.groundBallY()
+    local aim = target
+    for _ = 1, attempts or 3 do
+        local velocity, spin, flightTime, miss = Flight.solve(sample.from, aim, speed, side, back, params, groundY, math.rad(70))
+        if not finite(flightTime) or not finite(miss) or miss > 1.1 then return nil end
+        local simulation = Flight.simulate(sample.from, velocity, spin, 0, params, groundY, math.min(flightTime + 1, 10))
+        local passage = goalPassage(simulation, goal, radius)
+        if not passage then return nil end
+        if passage.valid then
+            return {
+                target = aim, family = family, velocity = velocity, spin = spin,
+                flightTime = passage.time, miss = miss, sample = sample, passage = passage,
+                simulation = simulation, side = side, back = back, speed = speed, goal = goal,
+            }
+        end
+        local nextAim = Vector3.new(goal.x,
+            math.clamp(aim.Y + passage.shiftY * 1.12, goal.ground + radius + 0.2, goal.top - radius - 0.3),
+            math.clamp(aim.Z + passage.shiftZ * 1.12, goal.z - goal.width + radius + 0.3, goal.z + goal.width - radius - 0.3))
+        if (nextAim - aim).Magnitude < 0.01 then return nil end
+        aim = nextAim
+    end
+    return nil
+end
+
+local function clearanceScore(plan, bodies)
+    local closest, interception = 35, 0.8
+    local reachTime = S.passingEngine and S.passingEngine.reachTime
+    local stride = math.max(1, math.floor(plan.simulation.n / 28))
+    for i = 1, plan.simulation.n, stride do
+        local time = (i - 1) * Flight.STEP
+        if time > plan.flightTime then break end
+        local point = plan.simulation.pos[i]
+        for _, body in ipairs(bodies) do
+            local predicted = body.root.Position + body.root.AssemblyLinearVelocity * math.min(time, 0.3)
+            local keeper = body.model:GetAttribute("Role") == "Goalkeeper"
+            local bodyY = math.clamp(point.Y, predicted.Y - 2.8, predicted.Y + 3.1)
+            local radius = if keeper then 3.5 else 2.1
+            closest = math.min(closest, (point - Vector3.new(predicted.X, bodyY, predicted.Z)).Magnitude - radius)
+            if body.enemy and body.actor and reachTime then
+                local jump = if keeper and time > 0.35 then math.min((time - 0.35) * 12, 4) else 0
+                if point.Y <= body.actor.pos.Y + 3.1 + jump then
+                    local arrival = reachTime(body.actor, point, radius + 0.84, if body.actor.available then 0.14 else 0.65)
+                    interception = math.min(interception, arrival - time)
+                end
+            end
+        end
+    end
+    return interception * 20 + closest * 0.3 - plan.flightTime * 3 + math.min(plan.passage.margin, 2)
+end
+
+local previewChoice
+local function choiceKey(options)
+    return table.concat({options.style, options.corner, options.curve, tostring(options.power), tostring(options.spin)}, ":")
+end
+local function calculate(sample, preview, configuration)
+    local options = configuration or cfg
+    local goal = mouth()
+    if not goal then return nil, "No opponent goal is loaded" end
+    local target, ranked = targetFor(goal, sample.from, options)
+    local points = ranked or {target}
+    if not preview and options.corner == "Auto" then
+        table.insert(points, Vector3.new(goal.x, (goal.ground + goal.top) / 2, goal.z))
+    end
+    local key = choiceKey(options)
+    local preferredSide
+    if preview then
+        local preferred = previewChoice and previewChoice.key == key and previewChoice.out == goal.out and previewChoice.target
+        points = {preferred or target}
+        if preferred then preferredSide = previewChoice.side end
+    end
+    local bodies = if preview then {} else opponents(true)
+    local best, bestScore
+    for _, point in ipairs(points) do
+        local family, speed, side, back = profile(options.style, sample.from, point, options)
+        if preferredSide ~= nil then side = preferredSide end
+        local directions = {side}
+        if not preview and options.curve == "Automatic" and side ~= 0 then table.insert(directions, -side) end
+        for _, chosenSide in ipairs(directions) do
+            local plan = fitShot(sample, point, goal, family, speed, chosenSide, back, if preview then 1 else 3)
+            if plan then
+                local score = clearanceScore(plan, bodies)
+                if not bestScore or score > bestScore then best, bestScore = plan, score end
+            end
+        end
+    end
+
+    if not preview and not best and options.curve == "Automatic" and (options.style == "Power" or options.style == "Laced" or options.style == "Knuckleball (low spin)") then
+        local amounts = if options.style == "Knuckleball (low spin)" then {8} else {12, 30}
+        for _, amount in ipairs(amounts) do
+            for _, point in ipairs(points) do
+                local family, speed, _, back = profile(options.style, sample.from, point, options)
+                for _, side in ipairs({amount, -amount}) do
+                    local plan = fitShot(sample, point, goal, family, speed, side, back)
+                    if plan then
+                        local score = clearanceScore(plan, bodies)
+                        if not bestScore or score > bestScore then best, bestScore = plan, score end
+                    end
+                end
+            end
+            if best then break end
+        end
+    end
+    if best and not preview and not configuration then previewChoice = {target = best.target, key = key, out = goal.out, side = best.side} end
+    return best, if best then nil else "No clear route through the goal at this power; move closer or change technique"
+end
+S.calculate = calculate
+S.goalPassage = goalPassage
+function S.planAt(position, options)
+    local ball = Ball.getBall()
+    if not ball then return nil, "No ball is loaded" end
+    local configuration = table.clone(cfg)
+    for key, value in pairs(options or {}) do configuration[key] = value end
+    return calculate({ball = ball, from = position, time = now(), pid = possessionId()}, false, configuration)
+end
+local goalRemote = game:GetService("ReplicatedStorage"):FindFirstChild("GoalPopup")
+if goalRemote then
+    life.connect(goalRemote.OnClientEvent, function(payload)
+        if type(payload) == "table" and payload.scorer == player.UserId then
+            S.lastGoalEvent = {at = now(), payload = payload}
+            local b = Ball.getBall()
+            local flight = b and b:GetAttribute("KickFlight")
+            local fields = type(flight) == "string" and string.split(flight, "|")
+            local pid = fields and tonumber(fields[2])
+            if payload.ownGoal ~= 1 and payload.ownGoal ~= true and pid then
+                for i = #S.shots, 1, -1 do
+                    local shot = S.shots[i]
+                    if shot.pid and pid == shot.pid + 1 and fields[14] == shot.family
+                        and tonumber(fields[13]) == shot.characterId and now() - shot.at < 12 then
+                        shot.goalConfirmed = true
+                        shot.goalEvent = S.lastGoalEvent
+                        break
+                    end
+                end
+            end
+        end
+    end)
+end
+local function trackShot(plan, before)
+    local entry = {
+        at = now(), family = plan.family, style = cfg.style, miss = plan.miss,
+        from = tostring(plan.sample.from), target = tostring(plan.target), velocity = tostring(plan.velocity),
+        accepted = false, goalConfirmed = false, result = "Awaiting server", pid = plan.sample.pid,
+        trackingVersion = "0.3",
+        expectedTime = plan.sample.time,
+        passageMargin = plan.passage.margin, planningVersion = "0.4",
+        side = plan.side, spin = tostring(plan.spin),
+        samples = {},
+        characterId = player.Character and player.Character:GetAttribute("DribbleId"),
+    }
+    table.insert(S.shots, entry)
+    if #S.shots > 30 then table.remove(S.shots, 1) end
+    S.lastShot = entry
+    task.spawn(function()
+        local finishAt = os.clock() + math.clamp(plan.flightTime + 3.5, 4, 12)
+        local b = plan.sample.ball
+        while life.alive() and b.Parent and Ball.getBall() == b and os.clock() < finishAt do
+            local flight = b.Parent and b:GetAttribute("KickFlight")
+            if flight and flight ~= before then
+                local fields = string.split(flight, "|")
+                local by = tonumber(fields[13])
+                if entry.characterId and by == entry.characterId and fields[14] == plan.family
+                    and type(entry.pid) == "number" and tonumber(fields[2]) == entry.pid + 1 then
+                    entry.accepted = true
+                    entry.serverFlight = flight
+                end
+            end
+            if entry.goalConfirmed then
+                entry.result = "Goal confirmed"
+                if S.lastShot == entry then S.status = "Goal confirmed | " .. entry.style end
+                notify("Goal", entry.style .. " scored.")
+                return
+            end
+            if #entry.samples < 50 then
+                table.insert(entry.samples, {at = now(), pos = tostring(Ball.getPosition()), sim = b:GetAttribute("BallSim")})
+            end
+            task.wait(0.12)
+        end
+        if not life.alive() then return end
+        entry.result = if entry.accepted then "Server accepted; no goal confirmed" else "Release not confirmed by server"
+        if S.lastShot == entry then S.status = entry.result end
+    end)
+end
+local lastAction = -10
+S.lastKickMotion = nil
+local kickMotion
+local function cancelKickMotion(reason)
+    local motion = kickMotion
+    if not motion then return end
+    kickMotion = nil
+    if motion.animator.kick and motion.animator.kick.id == motion.id then motion.animator.kick = nil end
+    if not motion.released then
+        pcall(function() kickCancelRemote:FireServer(motion.id) end)
+        motion.status = reason or "Cancelled"
+    end
+end
+life.onCleanup(function() cancelKickMotion("Hub unloaded") end)
+life.connect(Net:RemoteEvent("KickPlanRelay").OnClientEvent, function(sender, packet)
+    local motion = S.lastKickMotion
+    if sender == player and motion and type(packet) == "table" and packet.id == motion.id then
+        motion.relayed = true
+        motion.relayAt = now()
+        motion.status = "Server relayed kick motion"
+    end
+end)
+local motionRenderName = "PoopSoccerKickMotion"
+Run:BindToRenderStep(motionRenderName, Enum.RenderPriority.Camera.Value - 2, function()
+    local motion = kickMotion
+    if not motion then return end
+    local character = player.Character
+    if not life.alive() or character ~= motion.character or character:GetAttribute("BodyState") ~= "Animated" then
+        cancelKickMotion("Kick interrupted")
+        return
+    end
+    local remaining = motion.contactAt - now()
+    if motion.released or remaining < -0.25 then
+        
+        if motion.animator.kick and motion.animator.kick.id == motion.id then motion.animator.kick = nil end
+        kickMotion = nil
+        return
+    end
+    motion.spec.at = math.max(remaining, 0.001)
+    motion.animator.kick = motion.spec
+end)
+life.onCleanup(function() Run:UnbindFromRenderStep(motionRenderName) end)
+local function beginKickMotion(sample, plan)
+    local character = player.Character
+    local animator = character and Mannequin.getAnimator(character)
+    local r = root()
+    local family = Families[plan.family]
+    if not animator or not r or not family or character:GetAttribute("BodyState") ~= "Animated" then return nil end
+    cancelKickMotion("Replaced")
+    local lead = math.clamp(math.max((family.plantAt or 0.12) + 0.17, (family.swing or 0.08) + 0.2), 0.28, 0.4)
+    local contactAt = now() + lead
+    local contact = if sample.state then Path.sample(sample.state.seg, contactAt, sample.state.P) else Ball.freeSample(contactAt)
+    if not contact or contact == Vector3.zero then contact = sample.from end
+    local direction = plan.velocity * Vector3.new(1, 0, 1)
+    if direction.Magnitude < 0.01 then direction = r.CFrame.LookVector * Vector3.new(1, 0, 1) end
+    direction = direction.Unit
+    local leg = if r.CFrame:PointToObjectSpace(contact).X < -0.4 then 1 else 2
+    local ground = Ball.groundBallY(contact) - 0.84
+    local _, plant, plantYaw = KickPlan.spots(contact, direction, leg, family, ground, 1, r.CFrame.LookVector)
+    env.__PoopSoccerKickId = (env.__PoopSoccerKickId or 1000000) + 1
+    local id = env.__PoopSoccerKickId
+    local plantAt = family.plantAt or 0.12
+    local spec = {id = id, leg = leg, at = lead, ball = contact, dir = direction, family = family,
+        power = 1, plant = plant, plantYaw = plantYaw, plantAt = plantAt}
+    local motion = {id = id, character = character, animator = animator, spec = spec, contactAt = contactAt,
+        requestedAt = now(), pid = sample.pid, family = plan.family, relayed = false, released = false,
+        status = "Kick motion sent | checking server relay"}
+    kickMotion = motion
+    S.lastKickMotion = motion
+    if sample.state then Dribble.holdTouches(contactAt + 0.12) end
+    animator.kick = spec
+    kickPlanRemote:FireServer({id = id, leg = leg, t = contactAt, shift = 0, ball = contact, dir = direction,
+        family = plan.family, power = 1, plant = plant, plantYaw = plantYaw, plantAt = plantAt,
+        vel = plan.velocity, spin = plan.spin or Vector3.zero})
+    return motion
+end
+function S.shoot(silent)
+    if not life.alive() then return false end
+    if S.busy or os.clock() - lastAction < 0.5 then return false end
+    S.busy = true
+    local ok, sent, reason = pcall(function()
+        local sample, why = ballSample()
+        if not sample then return false, why end
+        local plan, whyPlan = calculate(sample)
+        if not plan then return false, whyPlan end
+        local motion = beginKickMotion(sample, plan)
+        if motion then
+            S.status = "Planting foot | " .. cfg.style
+            while life.alive() and now() < motion.contactAt do
+                if player.Character ~= motion.character or motion.character:GetAttribute("BodyState") ~= "Animated" then
+                    return false, "Kick interrupted; try F again when standing"
+                end
+                Run.Heartbeat:Wait()
+            end
+            if not life.alive() then return false, "Hub unloaded" end
+        end
+
+        local fresh, freshWhy = ballSample()
+        if not fresh or fresh.pid ~= sample.pid then return false, freshWhy or "Possession changed; try F again" end
+        plan = fitShot(fresh, plan.target, plan.goal, plan.family, plan.speed, plan.side, plan.back)
+        if not plan then return false, "The ball moved out of this shot's route; try F again" end
+        sample = fresh
+        local before = sample.ball:GetAttribute("KickFlight")
+        local released
+        if sample.state then
+            released = Dribble.strike(sample.from, plan.velocity, plan.spin, plan.family, sample.time)
+        else
+            released = Dribble.strikeFree(sample.from, plan.velocity, plan.spin, plan.family, sample.time)
+        end
+        if not released then return false, "Ball is no longer available" end
+        if motion then
+            motion.released = true
+            motion.releasedAt = now()
+            motion.contactOffset = motion.releasedAt - motion.contactAt
+            motion.status = if motion.relayed then "Server relayed kick motion" else "Kick motion sent | relay not confirmed"
+        end
+        guardRelease(sample)
+        lastAction = os.clock()
+        S.status = cfg.style .. " released | checking goal"
+        trackShot(plan, before)
+        return true
+    end)
+    S.busy = false
+    if not ok or not sent then cancelKickMotion("Shot cancelled") end
+    if not ok then
+        S.error = tostring(sent)
+        S.status = "Shot error | " .. tostring(sent)
+        if not silent then notify("Shot unavailable", "The ball state changed. Try F again.") end
+        return false
+    end
+    if not sent then
+        S.status = reason or "Shot unavailable"
+        if not silent then notify("Shot unavailable", S.status) end
+    end
+    return sent
+end
+
+local passSight = RaycastParams.new()
+passSight.FilterType = Enum.RaycastFilterType.Exclude
+passSight.RespectCanCollide = false
+
+local baseline = table.clone(Tuning.Speed)
+local speedFields = {"Walk", "Jog", "Sprint", "SideStep", "BackStep", "SideStepSprint", "BackStepSprint", "Strafe", "StrafeBack", "SideSprint", "BackSprint"}
+local lastApplied = {}
+local function applySpeed()
+    if not life.alive() then return end
+    for _, key in ipairs(speedFields) do
+        local value = baseline[key] * (if cfg.speedEnabled then cfg.speed else 1)
+        Tuning.Speed[key] = value
+        lastApplied[key] = value
+    end
+end
+life.onCleanup(function()
+    for _, key in ipairs(speedFields) do
+        if Tuning.Speed[key] == lastApplied[key] then Tuning.Speed[key] = baseline[key] end
+    end
+end)
+applySpeed()
+S.applySpeed = applySpeed
+local nativeSprint = Mannequin.keepSprint
+life.override(Mannequin, "keepSprint", function()
+    if cfg.sprint then return true end
+    return nativeSprint and nativeSprint() or false
+end)
+local nativeSolve = Strike.solve
+life.override(Strike, "solve", function(request)
+    if cfg.assist then
+        local replacement = table.clone(request)
+        replacement.exact = true
+        replacement.errorScale = 0
+        return nativeSolve(replacement)
+    end
+    return nativeSolve(request)
+end)
+
+local pokeSight = RaycastParams.new()
+pokeSight.FilterType = Enum.RaycastFilterType.Exclude
+pokeSight.RespectCanCollide = true
+local pokeAction, pokeCallback
+local lastPokeAttempt = -10
+function S.pokeOpportunity()
+    if not life.alive() then return nil, "Hub unloaded" end
+    local character, r = player.Character, root()
+    local ball = Ball.getBall()
+    if not character or not r or not ball then return nil, "Spawn on the pitch first" end
+    if S.busy or ownState() or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return nil, "Waiting for controls" end
+    if character:GetAttribute("BodyState") ~= "Animated" then return nil, "Waiting until standing" end
+    local team = character:GetAttribute("Team")
+    if team ~= "Blue" and team ~= "Red" then return nil, "Join a team first" end
+    if workspace:GetAttribute("ProServer") == true then
+        local phase = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
+        if phase and phase:GetAttribute("Phase") ~= "Play" then return nil, "Waiting for play" end
+    end
+    local carrierId = ball:GetAttribute("Possessor")
+    if type(carrierId) ~= "number" or carrierId <= 0 or carrierId == character:GetAttribute("DribbleId") then return nil, "No opposing ball carrier" end
+    local carrier, carrierRoot, carrierPlayer
+    for _, other in ipairs(Players:GetPlayers()) do
+        local model = other.Character
+        if other ~= player and model and model:GetAttribute("DribbleId") == carrierId then
+            carrier, carrierRoot, carrierPlayer = model, model:FindFirstChild("Root"), other
+            break
+        end
+    end
+    if not carrier or not carrierRoot or carrier:GetAttribute("Team") == team then return nil, "No opposing ball carrier" end
+    if carrier:GetAttribute("Team") ~= "Blue" and carrier:GetAttribute("Team") ~= "Red" then return nil, "Carrier is off the pitch" end
+    local controller = character:FindFirstChild("ControllerManager")
+    if not controller or controller.ActiveController ~= controller:FindFirstChild("GroundController") then return nil, "Waiting until grounded" end
+    if now() < (player:GetAttribute("PokeReadyAt") or 0) then return nil, "Poke cooling down" end
+    local animator = Mannequin.getAnimator(character)
+    if not animator or animator.kick or (animator.kickS and not animator.kickS.done) or PokeLegs.reaching(animator) then return nil, "Waiting for current action" end
+    local position, velocity = Ball.freeState()
+    position = position or Ball.getPosition()
+    if not position then return nil, "Ball unavailable" end
+    velocity = velocity or carrierRoot.AssemblyLinearVelocity
+    local predicted = position + velocity * Vector3.new(1, 0, 1) * PokeLegs.CONTACT
+    local origin = r.Position + (animator.visualOffset or Vector3.zero)
+    local delta = (predicted - origin) * Vector3.new(1, 0, 1)
+    local distance = delta.Magnitude
+    local carrierDistance = ((carrierRoot.Position - r.Position) * Vector3.new(1, 0, 1)).Magnitude
+    if distance > PokeLegs.MAX_REACH - 0.25 or carrierDistance > PokeLegs.MAX_REACH + 3 then return nil, "Carrier outside poke reach" end
+    local forward = r.CFrame.LookVector * Vector3.new(1, 0, 1)
+    local turn = distance > 0.5 and forward.Magnitude > 0.001 and forward.Unit:Dot(delta.Unit) < math.cos(PokeLegs.MAX_TURN)
+    local futureOrigin = origin + r.AssemblyLinearVelocity * Vector3.new(1, 0, 1) * (PokeLegs.CONTACT * 0.8)
+    if ((predicted - futureOrigin) * Vector3.new(1, 0, 1)).Magnitude > PokeLegs.MAX_REACH - 0.1 then return nil, "Ball moving out of reach" end
+    if predicted.Y - (Ball.groundBallY(predicted) - 0.84) > PokeLegs.MAX_HEIGHT then return nil, "Ball above poke height" end
+    local ignored = {character, ball}
+    local ballView = workspace:FindFirstChild("BallView")
+    if ballView then table.insert(ignored, ballView) end
+    pokeSight.FilterDescendantsInstances = ignored
+    local obstacle = workspace:Raycast(origin, predicted - origin, pokeSight)
+    if obstacle and not obstacle.Instance:IsDescendantOf(carrier) then return nil, "Poke path blocked" end
+    return {ball = ball, model = carrier, root = carrierRoot, player = carrierPlayer, id = carrierId,
+        pid = ball:GetAttribute("PossessionId"), distance = distance, carrierDistance = carrierDistance, animator = animator,
+        turn = turn, direction = if distance > 0.01 then delta.Unit else forward, characterRoot = r, controller = controller}
+end
+local function nativePokeCallback()
+    if pokeAction and pokeAction.Parent and pokeCallback then return pokeCallback end
+    local context = player.PlayerScripts:FindFirstChild("Poke")
+    local action = context and context:FindFirstChild("Poke")
+    if not action then return nil end
+    for _, connection in ipairs(getconnections(action.Pressed)) do
+        local callback = connection.Function
+        if callback and string.find(debug.info(callback, "s"), "PokeClient", 1, true) then
+            pokeAction, pokeCallback = action, callback
+            return callback
+        end
+    end
+    return nil
+end
+function S.pokeCarrier(silent)
+    if not life.alive() then return false end
+    local opportunity, reason = S.pokeOpportunity()
+    if not opportunity then
+        S.pokeStatus = reason
+        if not silent then notify("Poke", reason) end
+        return false
+    end
+    if opportunity.turn then
+        local r, direction = opportunity.characterRoot, opportunity.direction
+        opportunity.controller.FacingDirection = direction
+        r.CFrame = CFrame.lookAt(r.Position, r.Position + direction)
+        S.lastPokeAlignment = {at = now(), pid = opportunity.pid, direction = direction}
+        return false
+    end
+    if S.lastPokeAlignment and S.lastPokeAlignment.pid == opportunity.pid and now() - S.lastPokeAlignment.at < 0.04 then return false end
+    if os.clock() - lastPokeAttempt < 0.2 then return false end
+    lastPokeAttempt = os.clock()
+    local callback = nativePokeCallback()
+    if not callback then S.pokeStatus = "Native poke control is loading"; return false end
+    if opportunity.ball:GetAttribute("Possessor") ~= opportunity.id or opportunity.ball:GetAttribute("PossessionId") ~= opportunity.pid then return false end
+    local before = opportunity.animator.poke
+    local ok, err = pcall(callback)
+    if not ok then S.pokeError = tostring(err); S.pokeStatus = "Poke unavailable"; return false end
+    local active = opportunity.animator.poke
+    if not active or active == before then S.pokeStatus = "Native poke is not ready"; return false end
+    local record: any = {at = now(), target = opportunity.player.DisplayName, userId = opportunity.player.UserId,
+        ball = opportunity.ball, ownId = player.Character:GetAttribute("DribbleId"), carrierId = opportunity.id, possessorAtAttempt = opportunity.ball:GetAttribute("Possessor"), pid = opportunity.pid,
+        distance = opportunity.distance, carrierDistance = opportunity.carrierDistance, pokeId = active.id,
+        won = false, status = "Poking the ball carrier"}
+    S.lastPoke = record
+    if cfg.autoPoke then S.pokeRecovery.cushion(record) end
+    table.insert(S.pokeHistory, record)
+    if #S.pokeHistory > 20 then table.remove(S.pokeHistory, 1) end
+    S.pokeStatus = "Poking " .. record.target
+    if not silent then notify("Poke", "Targeting ball carrier " .. record.target .. ".") end
+    task.spawn(function()
+        local finish = os.clock() + 1.7
+        while life.alive() and opportunity.ball.Parent and os.clock() < finish do
+            local character = player.Character
+            local mine = character and character:GetAttribute("DribbleId")
+            local holder = opportunity.ball:GetAttribute("Possessor")
+            local pid = opportunity.ball:GetAttribute("PossessionId")
+            if Ball.getBall() ~= opportunity.ball then break end
+            local poke = opportunity.animator.pokeS
+            if character and poke and poke.id == record.pokeId and not poke.done
+                and now() - record.at < PokeLegs.REACH + PokeLegs.HOLD + 0.1 then
+                local position = Ball.getPosition()
+                if position then
+                    for _, name in ipairs({"LeftFoot", "RightFoot"}) do
+                        local foot = character:FindFirstChild(name)
+                        if foot and foot:IsA("BasePart") then
+                            local p, half = foot.CFrame:PointToObjectSpace(position), foot.Size * 0.5
+                            local closest = Vector3.new(math.clamp(p.X, -half.X, half.X), math.clamp(p.Y, -half.Y, half.Y), math.clamp(p.Z, -half.Z, half.Z))
+                            local gap = (p - closest).Magnitude
+                            record.footGap = math.min(record.footGap or math.huge, gap)
+                            if gap < opportunity.ball.Size.X * 0.5 + 0.12 then record.contactAt = now() end
+                        end
+                    end
+                end
+            end
+            local flight = Flight.decode(opportunity.ball:GetAttribute("KickFlight"))
+            local freshShot = flight and flight.by == record.ownId and flight.t >= record.at - 0.05
+            local release = {pid = pid, owner = tonumber(holder) or 0, by = opportunity.ball:GetAttribute("ReleasedBy"),
+                at = opportunity.ball:GetAttribute("ReleasedAt"), now = now(), freshShot = freshShot == true}
+            if S.pokeRecovery.releaseMatches(record, release) then
+                record.releaseConfirmed = true
+                record.releaseAt, record.releasedBy = release.at, release.by
+                if release.owner <= 0 then
+                    record.recoveryPid = pid
+                    if not record.recoveryUntil then record.recoveryUntil = math.min(record.at + 1.5, now() + 0.85) end
+                end
+            end
+            if pid ~= record.pid and holder ~= record.carrierId then
+                record.changed = true
+                record.status = "Carrier lost possession"
+            end
+            if mine == record.ownId and holder == mine and pid ~= record.pid and record.releaseConfirmed then
+                record.won = true
+                record.receipt = {at = now(), pid = pid, owner = holder, releasedBy = opportunity.ball:GetAttribute("ReleasedBy"), releasedAt = opportunity.ball:GetAttribute("ReleasedAt")}
+                record.status = "Ball won from " .. record.target
+                break
+            end
+            task.wait(0.04)
+        end
+        if life.alive() and S.lastPoke == record then
+            if not record.changed and not record.won then record.status = "Poke finished; carrier kept possession" end
+            S.pokeStatus = record.status
+            if record.won then notify("Pickpocket", record.status) end
+        end
+    end)
+    return true
+end
+local guides = Instance.new("Folder")
+guides.Name = "PoopSoccerGuides"
+guides.Parent = workspace
+life.onCleanup(function() guides:Destroy() end)
+local function guidePart(name, size, colour)
+    local part = Instance.new("Part")
+    part.Name = name
+    part.Anchored, part.CanCollide, part.CanTouch, part.CanQuery = true, false, false, false
+    part.CastShadow = false
+    part.Material = Enum.Material.Neon
+    part.Color = colour
+    part.Size = size
+    part.Transparency = 1
+    part.Parent = guides
+    return part
+end
+local targetMarker = guidePart("Target", Vector3.one * 0.65, Color3.fromRGB(255, 191, 92))
+targetMarker.Shape = Enum.PartType.Ball
+local ballMarker = guidePart("Ball", Vector3.new(0.08, 2.2, 2.2), Color3.fromRGB(104, 211, 171))
+ballMarker.Shape = Enum.PartType.Cylinder
+
+local RestartAccess = {reads = 0, installed = false}
+function RestartAccess.allowed(phase, kind, taker)
+    return (phase == "Dead" or phase == "Restart") and (kind == "FreeKick" or kind == "IndirectFreeKick" or kind == "ThrowIn" or kind == "Throw-in" or kind == "Throw" or kind == "Penalty" or kind == "GoalKick" or kind == "Corner" or kind == "KickOff")
+        and taker ~= player.UserId
+end
+S.restartAccess = RestartAccess
+do
+    local pro = client:FindFirstChild("Pro")
+    local setPiece = pro and pro:FindFirstChild("SetPiece")
+    local state = game.ReplicatedStorage:FindFirstChild("ProState")
+    if setPiece and state then
+        local ok, err = pcall(function()
+            local native = require(setPiece)
+            local step
+            for _, value in pairs(debug.getupvalues(native.start)) do
+                if type(value) == "function" and debug.info(value, "n") == "step" then step = value; break end
+            end
+            if not step then error("Set-piece movement callback unavailable") end
+            local index
+            for i, value in pairs(debug.getupvalues(step)) do if value == state then index = i; break end end
+            if not index then error("Set-piece state unavailable") end
+            local proxy = {}
+            function proxy:GetAttribute(key)
+                if key == "KeepTeam" and RestartAccess.allowed(state:GetAttribute("Phase"), state:GetAttribute("Restart"), state:GetAttribute("Taker")) then
+                    RestartAccess.reads += 1
+                    RestartAccess.lastAllowed = {at = now(), phase = state:GetAttribute("Phase"), kind = state:GetAttribute("Restart"), taker = state:GetAttribute("Taker")}
+                    return ""
+                end
+                return state:GetAttribute(key)
+            end
+            function proxy:GetAttributeChangedSignal(key) return state:GetAttributeChangedSignal(key) end
+            debug.setupvalue(step, index, proxy)
+            RestartAccess.installed = debug.getupvalue(step, index) == proxy
+            life.onCleanup(function()
+                if debug.getupvalue(step, index) == proxy then debug.setupvalue(step, index, state) end
+            end)
+        end)
+        if not ok then RestartAccess.error = tostring(err) end
+    end
+end
+
+do
+    local pro = client:FindFirstChild("Pro")
+    local penaltyLine = pro and pro:FindFirstChild("PenaltyLine")
+    local state = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
+    if penaltyLine and state then
+        local ok, err = pcall(function()
+            local seen = {}
+            local function find(fn, depth)
+                if seen[fn] or depth > 4 then return nil end
+                seen[fn] = true
+                if debug.info(fn, "n") == "holding" then return fn end
+                for _, value in pairs(debug.getupvalues(fn)) do
+                    if type(value) == "function" then
+                        local result = find(value, depth + 1)
+                        if result then return result end
+                    end
+                end
+                return nil
+            end
+            local holding = find(require(penaltyLine).start, 0)
+            if not holding then error("Penalty movement callback unavailable") end
+            for index, value in pairs(debug.getupvalues(holding)) do
+                if value == state then
+                    local proxy = {}
+                    function proxy:GetAttribute(key)
+                        if key == "LineKeep" and state:GetAttribute("Restart") == "Penalty"
+                            and RestartAccess.allowed(state:GetAttribute("Phase"), "Penalty", state:GetAttribute("Taker")) then
+                            RestartAccess.penaltyReads = (RestartAccess.penaltyReads or 0) + 1
+                            return 0
+                        end
+                        return state:GetAttribute(key)
+                    end
+                    function proxy:GetAttributeChangedSignal(key) return state:GetAttributeChangedSignal(key) end
+                    debug.setupvalue(holding, index, proxy)
+                    RestartAccess.penaltyInstalled = debug.getupvalue(holding, index) == proxy
+                    life.onCleanup(function()
+                        if debug.getupvalue(holding, index) == proxy then debug.setupvalue(holding, index, state) end
+                    end)
+                    return
+                end
+            end
+            error("Penalty state unavailable")
+        end)
+        if not ok then RestartAccess.penaltyError = tostring(err) end
+    end
+end
+do
+    local kickoff = client:FindFirstChild("KickoffHold")
+    if kickoff then
+        local ok, err = pcall(function()
+            local native = module(client, "KickoffHold")
+            local keep = table.clone(native.FREEZE_KEEP)
+            keep.Mannequin = true
+            local restore = life.override(native, "FREEZE_KEEP", keep)
+            local hold, held
+            for _, value in pairs(debug.getupvalues(native.hold)) do
+                if type(value) == "function" and debug.info(value, "n") == "hold" then hold = value; break end
+            end
+            if not hold then restore(); error("Kickoff movement callback unavailable") end
+            for _, value in pairs(debug.getupvalues(hold)) do
+                if type(value) == "table" and value ~= native then held = value; break end
+            end
+            if not held then restore(); error("Kickoff input state unavailable") end
+            for action, record in pairs(held) do
+                local context = action:FindFirstAncestorOfClass("InputContext")
+                if context and context.Name == "Mannequin" then
+                    record.watch:Disconnect()
+                    held[action] = nil
+                    action.Enabled = record.was
+                end
+            end
+            RestartAccess.kickoffInstalled = true
+            life.onCleanup(function()
+                restore()
+                if native.holding() then
+                    for _, action in ipairs(player.PlayerScripts:GetDescendants()) do
+                        if action:IsA("InputAction") then hold(action) end
+                    end
+                end
+            end)
+        end)
+        if not ok then RestartAccess.kickoffError = tostring(err) end
+    end
+end
+local Visual = (function()
+    local Sim = module(gameModules, "BallSim")
+    local World = module(gameModules.BallSim, "World")
+    local Bounds = module(gameModules, "PitchBounds")
+    local V: any = {generation = 0, planning = false, nextAt = 0, drawFrames = 0, forecastCount = 0}
+    local parts, drawn, velocities, shown = {}, {}, {}, {}
+    local green = Color3.fromRGB(104, 211, 171)
+    for i = 1, 48 do parts[i] = guidePart("Flight", Vector3.new(0.055, 0.055, 1), green) end
+    local hidden = true
+    local function validVector(value)
+        return typeof(value) == "Vector3" and finite(value.X) and finite(value.Y) and finite(value.Z)
+    end
+    local function currentPid()
+        local state = ownState()
+        return if state then state.pid else possessionId()
+    end
+    local function hide()
+        if not hidden then
+            for _, part in ipairs(parts) do part.Transparency = 1 end
+            targetMarker.Transparency = 1
+        end
+        hidden = true
+        table.clear(drawn); table.clear(velocities); table.clear(shown)
+    end
+    V.hide = hide
+    function V.smooth(position, velocity, target, dt)
+        local time, frequency = math.clamp(dt, 0, 0.1), 28
+        local decay = math.exp(-frequency * time)
+        local delta = position - target
+        local term = velocity + delta * frequency
+        return target + (delta + term * time) * decay, (velocity - term * (frequency * time)) * decay
+    end
+    function V.goalCrossing(previous, current, bounds, lines, radius)
+        local earliest, point
+        for _, goal in ipairs(bounds and bounds.goals or {}) do
+            local side = goal.side
+            local line = lines[if side == -1 then 1 else 2]
+            if (side ~= -1 and side ~= 1) or not finite(line) then continue end
+            local a, b = (previous.X - line) * side, (current.X - line) * side
+            if a < radius and b >= radius then
+                local fraction = (radius - a) / (b - a)
+                local crossing = previous:Lerp(current, fraction)
+                if crossing.Z >= goal.lo.Z + radius and crossing.Z <= goal.hi.Z - radius
+                    and crossing.Y >= goal.lo.Y + radius - 0.12 and crossing.Y <= goal.hi.Y - radius
+                    and (not earliest or fraction < earliest) then earliest, point = fraction, crossing end
+            end
+        end
+        return earliest, point
+    end
+    function V.trace(from, velocity, spin, seconds, work)
+        local world, params = World.get(), World.params()
+        local ground = world.groundY
+        local state = Sim.fromEvent(World.FLIGHT, {t = 0, kind = "kick", n = 0, pos = from, vel = velocity, spin = spin}, ground)
+        local sandbox = {groundY = ground, frames = {}, bodies = {}}
+        local rows = {{t = 0, p = state.pos, v = state.vel}}
+        local bounds = Bounds.get()
+        local lines = Contacts.goalLines()
+        local pro = workspace:GetAttribute("ProServer") == true
+        local stop
+        for i = 1, math.ceil(math.clamp(seconds, 0.05, 6) / Sim.STEP) do
+            local previous = state
+            local hitTime, hitPosition
+            for _, frame in ipairs(world.frames) do
+                local time, point = frame:sweep(previous.pos, previous.vel, if previous.rolling then 0 else params.gravity, Sim.STEP, params.radius)
+                if time and point and time >= 0 and time <= Sim.STEP and (not hitTime or time < hitTime) then hitTime, hitPosition = time, point end
+            end
+            if hitTime then
+                rows[#rows + 1] = {t = previous.t + hitTime, p = hitPosition, v = previous.vel}
+                state = {t = previous.t + hitTime, pos = hitPosition, vel = previous.vel}
+                stop = "Contact"
+                break
+            end
+            state = Sim.step(World.FLIGHT, state, Sim.STEP, params, sandbox, false, 0, nil)
+            if not validVector(state.pos) then return nil end
+            local fraction, crossing = V.goalCrossing(previous.pos, state.pos, bounds, lines, params.radius)
+            if fraction then
+                rows[#rows + 1] = {t = previous.t + (state.t - previous.t) * fraction, p = crossing, v = previous.vel:Lerp(state.vel, fraction)}
+                stop = "Goal"
+                break
+            end
+            rows[#rows + 1] = {t = state.t, p = state.pos, v = state.vel}
+            if bounds and (pro or bounds.lines) then
+                local edge, radius = bounds.edge, params.radius
+                local outsideZ = state.pos.Z < edge.lo.Z - radius or state.pos.Z > edge.hi.Z + radius
+                local outsideX = state.pos.X < edge.lo.X - radius or state.pos.X > edge.hi.X + radius
+                local opening = false
+                for _, goal in ipairs(bounds.goals or {}) do
+                    if state.pos.Z > goal.lo.Z + radius and state.pos.Z < goal.hi.Z - radius and state.pos.Y < goal.hi.Y - radius then opening = true; break end
+                end
+                if outsideZ or (outsideX and not opening) then stop = "Out"; break end
+            end
+            if Sim.resting(state, World.FLIGHT) then break end
+            if work and i % 12 == 0 then work() end
+        end
+        if #rows < 2 or rows[#rows].t < 0.005 then return nil end
+        return {rows = rows, horizon = rows[#rows].t, ground = ground, stop = stop, endpoint = rows[#rows].p}
+    end
+    function V.sample(trace, time)
+        local rows = trace.rows
+        if time <= 0 then return rows[1].p end
+        if time >= rows[#rows].t then return rows[#rows].p end
+        local lo, hi = 1, #rows
+        while hi - lo > 1 do local mid = math.floor((lo + hi) * 0.5); if rows[mid].t <= time then lo = mid else hi = mid end end
+        local a, b = rows[lo], rows[hi]
+        local dt = b.t - a.t
+        local u = math.clamp((time - a.t) / math.max(dt, 1e-7), 0, 1)
+        local u2, u3 = u * u, u * u * u
+        local point = a.p * (2 * u3 - 3 * u2 + 1) + a.v * (dt * (u3 - 2 * u2 + u))
+            + b.p * (-2 * u3 + 3 * u2) + b.v * (dt * (u3 - u2))
+        return Vector3.new(point.X, math.max(point.Y, trace.ground), point.Z)
+    end
+    local function calculateVisual(sample, options, cancelled, synchronous)
+        local NativeFlight = Flight
+        local slice = os.clock()
+        local function budget()
+            if cancelled and cancelled() then error("Preview superseded", 0) end
+            if synchronous then return end
+            local cost = (os.clock() - slice) * 1000
+            if cost >= 1.5 then
+                V.maxWorkSliceMs = math.max(V.maxWorkSliceMs or 0, cost)
+                task.wait(); slice = os.clock()
+                if cancelled and cancelled() then error("Preview superseded", 0) end
+            end
+        end
+        local Flight = table.clone(NativeFlight)
+        Flight.solve = function(...)
+            budget()
+            local result = table.pack(NativeFlight.solve(...))
+            budget()
+            return table.unpack(result, 1, result.n)
+        end
+        Flight.simulate = function(...)
+            budget()
+            local result = NativeFlight.simulate(...)
+            budget()
+            return result
+        end
+        local function opponents(includeAllies)
+            local char = player.Character
+            local team = char and char:GetAttribute("Team")
+            local result = {}
+            for _, model in ipairs(workspace:GetChildren()) do
+                if model:IsA("Model") and model ~= char then
+                    local otherRoot = model:FindFirstChild("Root")
+                    local otherTeam = model:GetAttribute("Team")
+                    if otherRoot and otherRoot:IsA("BasePart") and otherTeam and (includeAllies or otherTeam ~= team) then
+                        local engine = S.passingEngine
+                local actor = engine and engine.actor(model, Players:GetPlayerFromCharacter(model), now())
+                table.insert(result, {root = otherRoot, model = model, actor = actor, enemy = otherTeam ~= team})
+                    end
+                end
+            end
+            return result
+        end
+        local function targetFor(goal, from, configuration)
+            local options = configuration or cfg
+            local radius = 0.84
+            local side = goal.width - radius - 1.25
+            local top = goal.top - radius - 1.1
+            local low = goal.ground + radius + 1.15
+            local function point(left, high)
+                return Vector3.new(goal.x, if high then top else low, goal.z + (if left then -1 else 1) * goal.out * side)
+            end
+            if options.corner == "Top left" then return point(true, true) end
+            if options.corner == "Top right" then return point(false, true) end
+            if options.corner == "Low left" then return point(true, false) end
+            if options.corner == "Low right" then return point(false, false) end
+            if options.corner == "Centre" then return Vector3.new(goal.x, (top + low) / 2, goal.z) end
+            local enemies = opponents()
+            local ranked = {}
+            for _, candidate in ipairs({point(true, true), point(false, true), point(true, false), point(false, false)}) do
+                local score = if candidate.Y > (top + low) / 2 then 3 else 0
+                local closest = 80
+                for _, enemy in ipairs(enemies) do
+                    local predicted = enemy.root.Position + enemy.root.AssemblyLinearVelocity * 0.15
+                    local flatDistance = Vector2.new(predicted.X - candidate.X, predicted.Z - candidate.Z).Magnitude
+                    closest = math.min(closest, flatDistance)
+                end
+                score = score + closest - (candidate - from).Magnitude * 0.012
+                table.insert(ranked, {point = candidate, score = score})
+            end
+            table.sort(ranked, function(a, b) return a.score > b.score end)
+            local points = {}
+            for _, item in ipairs(ranked) do table.insert(points, item.point) end
+            return points[1], points
+        end
+        local function profile(style, from, target, configuration)
+            local options = configuration or cfg
+            local familyName = if style == "Curve" then "Finesse" elseif style == "Knuckleball (low spin)" then "Power" else style
+            local family = Families[familyName] or Families.Power
+            local side = 0
+            local back = family.back or 0
+            if style == "Finesse" or style == "Curve" or style == "Trivela" then
+                local direction = if options.curve == "Left" then 1 elseif options.curve == "Right" then -1 else math.sign((target.Z - from.Z) * (target.X - from.X))
+                if direction == 0 then direction = 1 end
+                side = options.spin * direction
+            end
+            if style == "Knuckleball (low spin)" then back = 0 end
+            local speed = family.speed[2] * 1.05 * math.clamp(options.power, 50, 108) / 100
+            return familyName, speed, side, back
+        end
+
+        local function goalPassage(simulation, goal, radius)
+            local lowerZ = goal.z - goal.width + radius + 0.4
+            local upperZ = goal.z + goal.width - radius - 0.4
+            local lowerY = goal.ground + radius - 0.12
+            local upperY = goal.top - radius - 0.4
+            local firstDepth = (simulation.pos[1].X - goal.x) * goal.out
+            if firstDepth > radius then return nil, "Ball is already behind the goal line" end
+            local entered = firstDepth >= -radius
+            local minZ, maxZ, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
+            local function include(point)
+                minZ, maxZ = math.min(minZ, point.Z), math.max(maxZ, point.Z)
+                minY, maxY = math.min(minY, point.Y), math.max(maxY, point.Y)
+            end
+            if entered then include(simulation.pos[1]) end
+            for i = 2, simulation.n do
+                local a, b = simulation.pos[i - 1], simulation.pos[i]
+                local da, db = (a.X - goal.x) * goal.out, (b.X - goal.x) * goal.out
+                if not entered and da < -radius and db >= -radius then
+                    entered = true
+                    include(a:Lerp(b, (-radius - da) / (db - da)))
+                end
+                if entered then
+                    if db < -radius then return nil, "Shot turns back before entering the goal" end
+                    if da < radius and db >= radius then
+                        local exit = a:Lerp(b, (radius - da) / (db - da))
+                        include(exit)
+                        local dz = if minZ < lowerZ then lowerZ - minZ elseif maxZ > upperZ then upperZ - maxZ else 0
+                        local dy = if maxY > upperY then upperY - maxY elseif minY < lowerY then lowerY - minY else 0
+                        return {
+                            valid = dz == 0 and dy == 0,
+                            shiftZ = dz, shiftY = dy,
+                            position = exit, time = (i - 2 + (radius - da) / (db - da)) * Flight.STEP,
+                            margin = math.min(minZ - lowerZ, upperZ - maxZ, minY - lowerY, upperY - maxY),
+                            minZ = minZ, maxZ = maxZ, minY = minY, maxY = maxY,
+                        }
+                    end
+                    include(b)
+                end
+            end
+            return nil, "Shot does not fully cross the goal line"
+        end
+
+        local function fitShot(sample, target, goal, family, speed, side, back, attempts)
+            local radius = sample.ball.Size.X * 0.5
+            local params = Flight.params(sample.ball)
+            local groundY = Ball.groundBallY()
+            local aim = target
+            for _ = 1, attempts or 3 do
+                local velocity, spin, flightTime, miss = Flight.solve(sample.from, aim, speed, side, back, params, groundY, math.rad(70))
+                if not finite(flightTime) or not finite(miss) or miss > 1.1 then return nil end
+                local simulation = Flight.simulate(sample.from, velocity, spin, 0, params, groundY, math.min(flightTime + 1, 10))
+                local passage = goalPassage(simulation, goal, radius)
+                if not passage then return nil end
+                if passage.valid then
+                    return {
+                        target = aim, family = family, velocity = velocity, spin = spin,
+                        flightTime = passage.time, miss = miss, sample = sample, passage = passage,
+                        simulation = simulation, side = side, back = back, speed = speed, goal = goal,
+                    }
+                end
+                local nextAim = Vector3.new(goal.x,
+                    math.clamp(aim.Y + passage.shiftY * 1.12, goal.ground + radius + 0.2, goal.top - radius - 0.3),
+                    math.clamp(aim.Z + passage.shiftZ * 1.12, goal.z - goal.width + radius + 0.3, goal.z + goal.width - radius - 0.3))
+                if (nextAim - aim).Magnitude < 0.01 then return nil end
+                aim = nextAim
+            end
+            return nil
+        end
+
+        local function clearanceScore(plan, bodies)
+            local closest, interception = 35, 0.8
+            local reachTime = S.passingEngine and S.passingEngine.reachTime
+            local stride = math.max(1, math.floor(plan.simulation.n / 28))
+            for i = 1, plan.simulation.n, stride do
+                local time = (i - 1) * Flight.STEP
+                if time > plan.flightTime then break end
+                local point = plan.simulation.pos[i]
+                for _, body in ipairs(bodies) do
+                    local predicted = body.root.Position + body.root.AssemblyLinearVelocity * math.min(time, 0.3)
+                    local keeper = body.model:GetAttribute("Role") == "Goalkeeper"
+                    local bodyY = math.clamp(point.Y, predicted.Y - 2.8, predicted.Y + 3.1)
+                    local radius = if keeper then 3.5 else 2.1
+                    closest = math.min(closest, (point - Vector3.new(predicted.X, bodyY, predicted.Z)).Magnitude - radius)
+                    if body.enemy and body.actor and reachTime then
+                        local jump = if keeper and time > 0.35 then math.min((time - 0.35) * 12, 4) else 0
+                        if point.Y <= body.actor.pos.Y + 3.1 + jump then
+                            local arrival = reachTime(body.actor, point, radius + 0.84, if body.actor.available then 0.14 else 0.65)
+                            interception = math.min(interception, arrival - time)
+                        end
+                    end
+                end
+            end
+            return interception * 20 + closest * 0.3 - plan.flightTime * 3 + math.min(plan.passage.margin, 2)
+        end
+
+        local previewChoice
+        local function choiceKey(options)
+            return table.concat({options.style, options.corner, options.curve, tostring(options.power), tostring(options.spin)}, ":")
+        end
+        local function calculate(sample, preview, configuration)
+            local options = configuration or cfg
+            local goal = mouth()
+            if not goal then return nil, "No opponent goal is loaded" end
+            local target, ranked = targetFor(goal, sample.from, options)
+            local points = ranked or {target}
+            if not preview and options.corner == "Auto" then
+                table.insert(points, Vector3.new(goal.x, (goal.ground + goal.top) / 2, goal.z))
+            end
+            local key = choiceKey(options)
+            local preferredSide
+            if preview then
+                local preferred = previewChoice and previewChoice.key == key and previewChoice.out == goal.out and previewChoice.target
+                points = {preferred or target}
+                if preferred then preferredSide = previewChoice.side end
+            end
+            local bodies = if preview then {} else opponents(true)
+            local best, bestScore
+            for _, point in ipairs(points) do
+                local family, speed, side, back = profile(options.style, sample.from, point, options)
+                if preferredSide ~= nil then side = preferredSide end
+                local directions = {side}
+                if not preview and options.curve == "Automatic" and side ~= 0 then table.insert(directions, -side) end
+                for _, chosenSide in ipairs(directions) do
+                    local plan = fitShot(sample, point, goal, family, speed, chosenSide, back, if preview then 1 else 3)
+                    if plan then
+                        local score = clearanceScore(plan, bodies)
+                        if not bestScore or score > bestScore then best, bestScore = plan, score end
+                    end
+                end
+            end
+
+            if not preview and not best and options.curve == "Automatic" and (options.style == "Power" or options.style == "Laced" or options.style == "Knuckleball (low spin)") then
+                local amounts = if options.style == "Knuckleball (low spin)" then {8} else {12, 30}
+                for _, amount in ipairs(amounts) do
+                    for _, point in ipairs(points) do
+                        local family, speed, _, back = profile(options.style, sample.from, point, options)
+                        for _, side in ipairs({amount, -amount}) do
+                            local plan = fitShot(sample, point, goal, family, speed, side, back)
+                            if plan then
+                                local score = clearanceScore(plan, bodies)
+                                if not bestScore or score > bestScore then best, bestScore = plan, score end
+                            end
+                        end
+                    end
+                    if best then break end
+                end
+            end
+            if best and not preview and not configuration then previewChoice = {target = best.target, key = key, out = goal.out, side = best.side} end
+            return best, if best then nil else "No clear route through the goal at this power; move closer or change technique"
+        end
+        return calculate(sample, false, options)
+    end
+    V.calculate = calculateVisual
+    local function workerBudget(cancelled)
+        local slice = os.clock()
+        return function()
+            if cancelled() then error("Preview superseded", 0) end
+            if os.clock() - slice > 0.0015 then task.wait(); slice = os.clock() end
+        end
+    end
+    function V.request()
+        if not life.alive() or not cfg.trajectory or S.busy or V.planning or os.clock() < V.nextAt then return end
+        local sample = ballSample()
+        if not sample then return end
+        local generation, key = V.generation, choiceKey(cfg)
+        local character = player.Character
+        local options = table.clone(cfg)
+        V.planning = true
+        V.nextAt = os.clock() + 0.1
+        local function cancelled()
+            return not life.alive() or V.generation ~= generation or Ball.getBall() ~= sample.ball
+                or player.Character ~= character or currentPid() ~= sample.pid or choiceKey(cfg) ~= key or S.busy
+        end
+        task.defer(function()
+            local began = os.clock()
+            local ok, result = pcall(function()
+                local plan = calculateVisual(sample, options, cancelled, false)
+                if not plan then return nil end
+                local fresh = ballSample()
+                if fresh and fresh.ball == sample.ball and fresh.pid == sample.pid and (fresh.from - sample.from).Magnitude > 0.1 then
+                    if cancelled() then error("Preview superseded", 0) end
+                    local adjusted = fitShot(fresh, plan.target, plan.goal, plan.family, plan.speed, plan.side, plan.back)
+                    if adjusted then plan, sample = adjusted, fresh end
+                end
+                local velocity, spin = KickRules.checkStrike(plan.family, plan.velocity, plan.spin)
+                if not velocity then return nil end
+                local trace = V.trace(sample.from, velocity, spin, math.min(plan.flightTime + 0.1, 6), workerBudget(cancelled))
+                if not trace then return nil end
+                return {trace = trace, plan = plan, from = sample.from, at = now(), key = key, pid = sample.pid, ball = sample.ball}
+            end)
+            V.planning = false
+            if not life.alive() then return end
+            if ok and result and not cancelled() then
+                V.preview = result
+                V.forecastCount += 1
+                V.error = nil
+            elseif not ok and not tostring(result):find("Preview superseded", 1, true) then V.error = tostring(result); S.guideError = V.error end
+            S.previewCostMs = (os.clock() - began) * 1000
+        end)
+    end
+    local function vectorText(text)
+        if type(text) ~= "string" then return nil end
+        local x, y, z = text:match("^%s*([^,]+),%s*([^,]+),%s*([^,]+)%s*$")
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        if finite(x) and finite(y) and finite(z) then return Vector3.new(x, y, z) end
+        return nil
+    end
+    local lastReleasedKey
+    local function releaseForecast(ball, pid)
+        local shot = S.lastShot
+        if not shot or now() - shot.at > 12 or not finite(shot.pid) or not finite(shot.expectedTime)
+            or (pid ~= shot.pid and pid ~= shot.pid + 1) or not Ball.freeSim() then
+            if V.released or lastReleasedKey then V.releaseGeneration = (V.releaseGeneration or 0) + 1 end
+            V.released, lastReleasedKey = nil, nil
+            return
+        end
+        local event = Flight.decode(ball:GetAttribute("KickFlight"))
+        local server = event and event.pid == shot.pid + 1 and event.by == shot.characterId and event.family == shot.family
+            and math.abs(event.t - shot.expectedTime) < 1
+        local key = if server then ball:GetAttribute("KickFlight") else tostring(shot)
+        if key == lastReleasedKey then return end
+        local from = if server then event.pos else vectorText(shot.from)
+        local velocity = if server then event.vel else vectorText(shot.velocity)
+        local spin = if server then event.spin else vectorText(shot.spin)
+        if not from or not velocity or not spin then return end
+        lastReleasedKey = key
+        V.releaseGeneration = (V.releaseGeneration or 0) + 1
+        local generation = V.releaseGeneration
+        task.defer(function()
+            local ok, trace = pcall(V.trace, from, velocity, spin, 6, workerBudget(function()
+                return not life.alive() or generation ~= V.releaseGeneration or Ball.getBall() ~= ball
+            end))
+            if ok and trace and life.alive() and generation == V.releaseGeneration then
+                V.released = {trace = trace, from = from, time = if server then event.t else shot.expectedTime, wall = shot.at, pid = shot.pid,
+                    server = server == true, key = key}
+            end
+        end)
+    end
+    life.connect(Net:RemoteEvent("KickPlanRelay").OnClientEvent, function(sender, packet)
+        local motion = S.lastKickMotion
+        if sender ~= player or type(packet) ~= "table" or not motion or packet.id ~= motion.id
+            or not S.busy or not S.status:find("Planting foot", 1, true) then return end
+        if not validVector(packet.ball) or not validVector(packet.vel) or not validVector(packet.spin) then return end
+        task.defer(function()
+            local ok, trace = pcall(V.trace, packet.ball, packet.vel, packet.spin, 6, workerBudget(function() return not life.alive() end))
+            if ok and life.alive() and trace then V.windup = {trace = trace, from = packet.ball, id = motion.id, at = now()} end
+        end)
+    end)
+    local renderName = "PoopSoccerVisualPath"
+    Run:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 2, function(dt)
+        if not life.alive() then return end
+        local began = os.clock()
+        local ball, position = Ball.getBall(), Ball.getPosition()
+        ballMarker.Transparency = if cfg.marker and position then 0.2 else 1
+        if position then ballMarker.CFrame = CFrame.new(position + Vector3.new(0, 2.7, 0)) * CFrame.Angles(0, 0, math.pi / 2) end
+        if not cfg.trajectory or not ball or not validVector(position) then hide(); return end
+        V.request()
+        local state = ownState()
+        local pid = if state then state.pid else Ball.pendingPid() or possessionId()
+        releaseForecast(ball, pid)
+        local forecast, elapsed, released = V.preview, 0, false
+        if V.windup and S.busy and S.lastKickMotion and S.lastKickMotion.id == V.windup.id and now() - V.windup.at < 1 then forecast = V.windup end
+        local flight = V.released
+        if flight then
+            local clock = Ball.drawnTime()
+            if not finite(clock) or clock < flight.time - 0.05 then clock = now() end
+            elapsed = math.max(clock - flight.time, 0)
+            if elapsed < flight.trace.horizon then forecast, released = flight, true else V.released = nil end
+        end
+        local lifetime = math.clamp(0.5 + (S.previewCostMs or 0) * 0.002, 1.1, 3)
+        if not forecast or (not released and forecast ~= V.windup and (forecast.pid ~= currentPid() or now() - forecast.at > lifetime)) then hide(); return end
+        local trace = forecast.trace
+        local anchor = V.sample(trace, elapsed)
+        local offset = position - anchor
+        if offset.Magnitude > (if released then 8 else 20) then hide(); return end
+        local remaining = trace.horizon - elapsed
+        if remaining < 0.02 then hide(); return end
+        local previous = position
+        hidden = false
+        for i, part in ipairs(parts) do
+            local progress = i / #parts
+            local point = V.sample(trace, elapsed + remaining * progress) + offset * ((1 - progress) ^ 2)
+            if drawn[i] and not released then point, velocities[i] = V.smooth(drawn[i], velocities[i] or Vector3.zero, point, dt)
+            else velocities[i] = Vector3.zero end
+            point = Vector3.new(point.X, math.max(point.Y, trace.ground), point.Z)
+            drawn[i] = point
+            local length = (point - previous).Magnitude
+            if length > 0.004 then
+                if not shown[i] then part.Transparency = 0.35; shown[i] = true end
+                part.Size = Vector3.new(0.055, 0.055, length)
+                part.CFrame = CFrame.lookAt((previous + point) * 0.5, point)
+            elseif shown[i] then part.Transparency = 1; shown[i] = false end
+            previous = point
+        end
+        targetMarker.Position = previous
+        targetMarker.Transparency = 0.15
+        V.drawFrames += 1
+        V.drawMs = (os.clock() - began) * 1000
+        V.maxDrawMs = math.max(V.maxDrawMs or 0, V.drawMs)
+    end)
+    life.onCleanup(function() V.generation += 1; Run:UnbindFromRenderStep(renderName); hide() end)
+    return V
+end)()
+S.previewVisual = Visual
+local function hideTrajectory() Visual.hide() end
+local function updateGuides() Visual.request() end
+
+local Performance = (function()
+    local Lighting = game:GetService("Lighting")
+    local P: any = {changed = 0, fps = 0, frameMs = 0, enabled = false}
+    local snapshots = {}
+    local originalCap = getfpscap()
+    local appliedCap
+    local generation = 0
+    local function change(object, property, value)
+        local ok, previousValue = pcall(function() return object[property] end)
+        if not ok or previousValue == value then return end
+        local entry = snapshots[object]
+        if not entry then entry = {}; snapshots[object] = entry end
+        if not entry[property] then entry[property] = {original = previousValue, applied = value} end
+        local success, err = pcall(function() object[property] = value end)
+        if success then entry[property].applied = value; P.changed = P.changed + 1 else P.error = tostring(err) end
+    end
+    local function restore()
+        for object, properties in pairs(snapshots) do
+            for property, values in pairs(properties) do
+                pcall(function()
+                    if object[property] == values.applied then object[property] = values.original end
+                end)
+            end
+        end
+        snapshots = {}
+        P.changed = 0
+        if appliedCap and getfpscap() == appliedCap and originalCap > 0 then setfpscap(originalCap) end
+        appliedCap = nil
+    end
+    local function process(object)
+        if not cfg.performance then return end
+        local lobby = workspace:FindFirstChild("Lobby")
+        if lobby and object:IsDescendantOf(lobby) then
+            
+            if object:IsA("Beam") or object:IsA("ParticleEmitter") or object:IsA("Trail") then
+                change(object, "Enabled", false)
+            end
+        end
+        if cfg.reducePostEffects and (object:IsA("BloomEffect") or object:IsA("SunRaysEffect")
+            or object:IsA("DepthOfFieldEffect") or object:IsA("BlurEffect")) then
+            change(object, "Enabled", false)
+        end
+    end
+    function P.apply()
+        generation = generation + 1
+        local currentGeneration = generation
+        restore()
+        P.enabled = cfg.performance
+        if not cfg.performance then return end
+        if not cfg.keepShadows then change(Lighting, "GlobalShadows", false) end
+        appliedCap = math.clamp(cfg.fpsCap, 60, 360)
+        setfpscap(appliedCap)
+        local work = Lighting:GetDescendants()
+        local camera = workspace.CurrentCamera
+        if camera then for _, object in ipairs(camera:GetDescendants()) do table.insert(work, object) end end
+        local lobby = workspace:FindFirstChild("Lobby")
+        if lobby then for _, object in ipairs(lobby:GetDescendants()) do table.insert(work, object) end end
+        task.spawn(function()
+            for index, object in ipairs(work) do
+                if not life.alive() or generation ~= currentGeneration then return end
+                process(object)
+                if index % 150 == 0 then task.wait() end
+            end
+            P.ready = true
+        end)
+    end
+    life.connect(workspace.DescendantAdded, function(object)
+        if cfg.performance and (object:IsA("PostEffect") or object:IsA("Beam")
+            or object:IsA("ParticleEmitter") or object:IsA("Trail")) then process(object) end
+    end)
+    life.connect(Lighting.DescendantAdded, process)
+    local elapsed, frames, worst = 0, 0, 0
+    life.connect(Run.Heartbeat, function(dt)
+        elapsed = elapsed + dt
+        frames = frames + 1
+        worst = math.max(worst, dt)
+        if elapsed >= 1 then
+            P.fps, P.frameMs, P.worstMs = frames / elapsed, elapsed / frames * 1000, worst * 1000
+            elapsed, frames, worst = 0, 0, 0
+        end
+    end)
+    life.onCleanup(function()
+        generation = generation + 1
+        restore()
+        P.enabled = false
+    end)
+    P.apply()
+    return P
+end)()
+S.performance = Performance
+
+local AntiAFK = (function()
+    local Rules = module(gameModules, "Afk")
+    local afkRemote = Net:RemoteEvent(Rules.REMOTE)
+    local joinRemote = Net:RemoteEvent("LobbyChooseTeam")
+    local A: any = {pulses = 0, warnings = 0, lobbyEvents = 0, rejoinAttempts = 0,
+        lastPulse = -math.huge, lastJoin = -math.huge, status = "Starting keepalive"}
+    local existing = previous and previous.antiAFK
+    A.lastTeam = player.Character and player.Character:GetAttribute("Team") or existing and existing.lastTeam
+    A.lastRole = player.Character and player.Character:GetAttribute("Role") or existing and existing.lastRole
+    A.recoveryUntil = existing and existing.recoveryUntil
+    function A.rejoinAllowed(options, lastRole, recoveryUntil, at)
+        return options.antiAFK == true and options.autoGK == true and options.rejoinGK == true
+            and lastRole == "Goalkeeper" and type(recoveryUntil) == "number" and at <= recoveryUntil
+    end
+    local function pulse()
+        if not cfg.antiAFK or not life.alive() then return end
+        local ok, err = pcall(function() afkRemote:FireServer("active") end)
+        if ok then
+            A.lastPulse = os.clock()
+            A.pulses = A.pulses + 1
+            A.status = "Keepalive active"
+        else
+            A.error = tostring(err)
+        end
+    end
+    A.pulse = pulse
+    life.connect(afkRemote.OnClientEvent, function(event)
+        if event == "warn" then
+            A.warnings = A.warnings + 1
+            pulse()
+        elseif event == "sent" then
+            A.lobbyEvents = A.lobbyEvents + 1
+            A.recoveryUntil = if cfg.antiAFK and cfg.autoGK and cfg.rejoinGK and A.lastRole == "Goalkeeper" then now() + 60 else nil
+            A.status = "Returned to lobby"
+        end
+    end)
+    life.connect(player.Idled, function()
+        if not cfg.antiAFK then return end
+        pulse()
+        local ok, err = pcall(function()
+            local virtualUser = game:GetService("VirtualUser")
+            virtualUser:CaptureController()
+            virtualUser:ClickButton2(Vector2.new(0, 0))
+        end)
+        if not ok then A.idleError = tostring(err) end
+    end)
+    life.connect(Run.Heartbeat, function()
+        if not cfg.antiAFK then A.status = "Keepalive off"; return end
+        if not cfg.autoGK then A.recoveryUntil = nil end
+        if os.clock() - A.lastPulse >= math.max(8, Rules.ACTIVE_GAP) then pulse() end
+        local character = player.Character
+        local team = character and character:GetAttribute("Team")
+        if team == "Red" or team == "Blue" then
+            A.lastTeam = team
+            A.lastRole = character:GetAttribute("Role")
+            if character:GetAttribute("Role") == "Goalkeeper" then A.keeperVerifiedAt = now() end
+            if A.requestedTeam and team == A.requestedTeam and A.lastRole == "Goalkeeper" then
+                A.recoveryUntil, A.requestedTeam = nil, nil
+            end
+            return
+        end
+        if not A.rejoinAllowed(cfg, A.lastRole, A.recoveryUntil, now()) or not character or player:GetAttribute("InTutorial") == true
+            or os.clock() - A.lastJoin < 5 then return end
+        local available = {Blue = true, Red = true}
+        for _, other in ipairs(Players:GetPlayers()) do
+            local model = other.Character
+            if other ~= player and model and model:GetAttribute("Role") == "Goalkeeper" then
+                local occupiedTeam = model:GetAttribute("Team")
+                if occupiedTeam then available[occupiedTeam] = false end
+            end
+        end
+        local choice = if A.lastTeam and available[A.lastTeam] then A.lastTeam
+            elseif available.Blue then "Blue" elseif available.Red then "Red" else nil
+        if choice then
+            joinRemote:FireServer(choice, "Keeper")
+            A.lastJoin, A.requestedTeam = os.clock(), choice
+            A.rejoinAttempts = A.rejoinAttempts + 1
+            A.status = "Requesting " .. choice .. " goalkeeper slot"
+        else
+            A.status = "Waiting for an available goalkeeper slot"
+        end
+    end)
+    pulse()
+    return A
+end)()
+S.antiAFK = AntiAFK
+
+local Passing = (function()
+    local Sim = module(gameModules, "BallSim")
+    local World = module(gameModules.BallSim, "World")
+    local Bounds = module(gameModules, "PitchBounds")
+    local Rules = module(gameModules.Dribble, "Rules")
+    local Hands = module(gameModules, "KeeperHands")
+    local Animation = module(gameModules, "AIGoalie")
+    local NativeKick = module(client, "KickClient")
+    local KeeperRules = module(gameModules, "KeeperRules")
+    local M: any = {status = "Waiting for the ball", history = {}, ranked = {}, planning = false}
+    if previous and previous.passingEngine then M.history = previous.passingEngine.history or {} end
+    local observations = setmetatable({}, {__mode = "k"})
+    local function flat(v) return Vector3.new(v.X, 0, v.Z) end
+    local function unit(v) return if v.Magnitude > 0.0001 then v.Unit else Vector3.new(1, 0, 0) end
+    local function bounded(v, limit) return if v.Magnitude > limit then v.Unit * limit else v end
+    local function push(row)
+        table.insert(M.history, row)
+        if #M.history > 40 then table.remove(M.history, 1) end
+    end
+    local function stateObject() return game.ReplicatedStorage:FindFirstChild("ProState") end
+    function M.restart()
+        local state = stateObject()
+        if not state then return nil end
+        local phase = state:GetAttribute("Phase")
+        if phase ~= "Restart" and phase ~= "Dead" then return nil end
+        return {kind = state:GetAttribute("Restart"), team = state:GetAttribute("RestartTeam"),
+            taker = state:GetAttribute("Taker"), spot = state:GetAttribute("TakerSpot"),
+            ball = state:GetAttribute("RestartAt"), walkAt = state:GetAttribute("WalkUpAt"),
+            bannerAt = state:GetAttribute("BannerAt"), phase = phase}
+    end
+    local function actor(model, other, at)
+        local r = model:FindFirstChild("Root")
+        if not r or not r:IsA("BasePart") then return nil end
+        local id = model:GetAttribute("DribbleId")
+        if type(id) ~= "number" or id == 0 then return nil end
+        local cm = model:FindFirstChildOfClass("ControllerManager")
+        local ground = cm and cm:FindFirstChild("GroundController")
+        local speed = math.max(cm and cm.BaseMoveSpeed or 26, 1)
+        local velocity = bounded(flat(r.AssemblyLinearVelocity), math.max(speed * 1.25, 32))
+        local old = observations[model]
+        local acceleration = Vector3.zero
+        local uncertainty = 0.3
+        if old and at - old.at > 0.035 and at - old.at < 0.4 then
+            acceleration = bounded((velocity - old.velocity) / (at - old.at), 45)
+            uncertainty += math.min((velocity - old.velocity).Magnitude * 0.12, 1.8)
+        end
+        if not old or at - old.at >= 0.06 then observations[model] = {at = at, velocity = velocity} end
+        local animated = model:GetAttribute("BodyState") == "Animated"
+        return {id = id, player = other, model = model, pos = r.Position, vel = velocity,
+            acceleration = acceleration, uncertainty = uncertainty, speed = speed,
+            accel = speed / math.max(ground and ground.AccelerationTime or 0.18, 0.06),
+            available = animated, team = model:GetAttribute("Team"), role = model:GetAttribute("Role")}
+    end
+    local function predict(a, time)
+        local turnTime = math.min(time, 0.3)
+        return a.pos + a.vel * time + a.acceleration * (0.25 * turnTime * turnTime)
+    end
+    M.predictActor = predict
+    M.actor = actor
+    local function reachTime(a, point, reach, reaction)
+        local delta = flat(point - a.pos)
+        local distance = math.max(delta.Magnitude - reach, 0)
+        if distance <= 0 then return 0 end
+        local direction = unit(delta)
+        local closing = math.clamp(a.vel:Dot(direction), -a.speed, a.speed)
+        local delay = reaction or 0.1
+        distance = math.max(distance - math.max(closing, 0) * delay, 0)
+        if distance == 0 then return delay end
+        local acceleration = math.max(a.accel, 1)
+        local accelerateFor = math.max(a.speed - closing, 0) / acceleration
+        local accelerateDistance = closing * accelerateFor + 0.5 * acceleration * accelerateFor * accelerateFor
+        if distance <= accelerateDistance then
+            return delay + (-closing + math.sqrt(closing * closing + 2 * acceleration * distance)) / acceleration
+        end
+        return delay + accelerateFor + (distance - accelerateDistance) / a.speed
+    end
+    M.reachTime = reachTime
+    local function inPitch(point, bounds, margin)
+        if not bounds then return true end
+        local edge = bounds.edge or bounds.ball
+        return point.X >= edge.lo.X + margin and point.X <= edge.hi.X - margin
+            and point.Z >= edge.lo.Z + margin and point.Z <= edge.hi.Z - margin
+    end
+    M.inPitch = inPitch
+    function M.snapshot(allowRestart)
+        local character = player.Character
+        local ball = Ball.getBall()
+        local r = character and character:FindFirstChild("Root")
+        if not r or not ball then return nil, "Waiting to spawn" end
+        local team = character:GetAttribute("Team")
+        if team ~= "Red" and team ~= "Blue" then return nil, "Join a team first" end
+        local ownId = character:GetAttribute("DribbleId")
+        local state = Dribble.kickState()
+        local pid = if state then state.pid else ball:GetAttribute("PossessionId")
+        local possession = ball:GetAttribute("Possessor")
+        local restart = M.restart()
+        local restartMine = allowRestart and restart and restart.kind == "GoalKick" and restart.phase == "Restart"
+            and restart.team == team and restart.taker == player.UserId
+        if restart and not restartMine then return nil, "Waiting for the restart" end
+        if character:GetAttribute("BodyState") ~= "Animated" then return nil, "Recovering" end
+        if not state and possession ~= ownId and not restartMine then return nil, "Waiting for the ball" end
+        local held = not state and possession == ownId and ball:GetAttribute("DribblePath") == ""
+        if not held and not state and not restartMine then return nil, "Settling the ball" end
+        local at = now()
+        local world, params = World.get(), World.params()
+        local from = Ball.getPosition()
+        if state then from = Path.sample(state.seg, at, state.P) end
+        if not from then return nil, "Waiting for the ball" end
+        if restartMine and possession ~= ownId and flat(from - r.Position).Magnitude > 4.5 then return nil, "Moving to the ball" end
+        local ownArea = KeeperRules.area(team)
+        if not ownArea then return nil, "Waiting for the pitch" end
+        local scene = {character = character, ball = ball, ownId = ownId, pid = pid, team = team,
+            held = held, freeRestart = restartMine and possession ~= ownId, at = at, from = from,
+            root = r, attack = Vector3.new(-ownArea.side, 0, 0), floor = world.groundY - params.radius,
+            params = params, world = {groundY = world.groundY, frames = world.frames, bodies = {}},
+            bounds = Bounds.get(), teammates = {}, enemies = {}, restart = restart,
+            offside = workspace:GetAttribute("ProServer") == true and not restartMine}
+        for _, other in ipairs(Players:GetPlayers()) do
+            local model = other.Character
+            if model and model ~= character then
+                local a = actor(model, other, at)
+                if a and (a.team == "Red" or a.team == "Blue") then
+                    if a.team == team then
+                        if a.available then table.insert(scene.teammates, a) end
+                    else table.insert(scene.enemies, a) end
+                end
+            end
+        end
+        return scene
+    end
+    local modes = {
+        {name = "Ground", family = "SideFoot", pace = 72, ground = true},
+        {name = "Driven", family = "Power", pace = 111, ground = true},
+        {name = "Chip", family = "Chip", pace = 48, minimum = 0.65},
+        {name = "Lofted", family = "Lofted", pace = 82, minimum = 1.55},
+        {name = "Curve left", family = "Finesse", pace = 86, curve = 26},
+        {name = "Curve right", family = "Trivela", pace = 86, curve = -26},
+    }
+    local handModes = {
+        {name = "Roll", kind = "roll", pace = 65, ground = true},
+        {name = "Throw", kind = "throw", pace = 68, minimum = 0.65},
+        {name = "Punt", kind = "punt", pace = Hands.PUNT_PACE, minimum = Hands.PUNT_TIME[1]},
+    }
+    M.modes, M.handModes = modes, handModes
+    local function onside(scene, receiver, delay)
+        if not scene.offside or #scene.enemies < 2 or not scene.bounds then return true end
+        local edge = scene.bounds.edge or scene.bounds.ball
+        local centre = (edge.lo.X + edge.hi.X) * 0.5
+        local receiverX = (predict(receiver, delay or 0).X - centre) * scene.attack.X
+        if receiverX <= 0 then return true end
+        local first, second = -math.huge, -math.huge
+        for _, enemy in ipairs(scene.enemies) do
+            local x = (predict(enemy, delay or 0).X - centre) * scene.attack.X
+            if x > first then first, second = x, first elseif x > second then second = x end
+        end
+        return receiverX <= math.max(second, (scene.from.X - centre) * scene.attack.X) - 0.6
+    end
+    M.onside = onside
+    local function releasePoint(scene, mode, point)
+        local direction = unit(flat(point - scene.root.Position))
+        if not scene.held then return scene.from, 0, direction end
+        if mode.kind == "punt" then
+            local from, _, fall = Hands.punt(scene.root.CFrame, direction)
+            return from, Animation.PUNT_EXTEND + fall, direction
+        end
+        local move = if mode.kind == "roll" then Animation.ROLL else Animation.THROW
+        local at = scene.root.Position + direction * Animation.travel(move, move.release)
+        return Hands.moveBall(move, CFrame.new(at), direction, move.release), move.release, direction
+    end
+    local function simulate(scene, from, velocity, spin, duration, keepRows)
+        local current = Sim.fromEvent(World.FLIGHT, {t = 0, kind = "kick", n = 0, pos = from,
+            vel = velocity, spin = spin}, scene.world.groundY)
+        local rows = if keepRows then {{t = 0, p = current.pos, v = current.vel}} else nil
+        local step = Sim.STEP
+        local count = math.ceil(duration / step)
+        for index = 1, count do
+            current = Sim.step(World.FLIGHT, current, math.min(step, duration - current.t), scene.params, scene.world, false, 0, nil)
+            if rows and (index % 4 == 0 or index == count) then
+                table.insert(rows, {t = current.t, p = current.pos, v = current.vel})
+            end
+        end
+        return current, rows
+    end
+    M.simulate = simulate
+    local function accepted(mode, velocity, spin)
+        if mode.kind then return bounded(velocity, Hands.MAX_SPEED[mode.kind]), bounded(spin, KickRules.Server.MaxSpin) end
+        return KickRules.checkStrike(mode.family, velocity, spin)
+    end
+    local function solve(scene, receiver, mode, space, paceScale)
+        local initialDistance = flat(receiver.pos - scene.from).Magnitude
+        if initialDistance < 4 then return nil end
+        local family = mode.family and Families[mode.family]
+        local maximum = if mode.kind then Hands.MAX_SPEED[mode.kind] else math.max(family.speed[2], family.shotSpeed and family.shotSpeed[2] or 0) * KickRules.Server.SpeedSlack * KickRules.KickButton.FullPower
+        local pace = math.min(mode.pace * paceScale, maximum * 0.84)
+        local duration = math.clamp(initialDistance / pace, mode.minimum or 0.18, 5)
+        local receiveHeight = scene.floor + scene.params.radius + (if mode.ground then 0 else 1.2)
+        local point, from, windup, direction
+        for _ = 1, 2 do
+            point = predict(receiver, duration + (windup or 0)) + scene.attack * space
+            point = Vector3.new(point.X, receiveHeight, point.Z)
+            from, windup, direction = releasePoint(scene, mode, point)
+            duration = math.clamp(flat(point - from).Magnitude / pace, mode.minimum or 0.18, 5)
+        end
+        point = predict(receiver, duration + windup) + scene.attack * space
+        point = Vector3.new(point.X, receiveHeight, point.Z)
+        if not inPitch(point, scene.bounds, 2) then return nil, "Outside pitch" end
+        if not onside(scene, receiver, windup) then return nil, "Offside" end
+        if reachTime(receiver, point, Rules.Pickup.CushionReach, 0.14) > duration + windup then return nil, "Receiver cannot arrive" end
+        local delta = point - from
+        local velocity = delta / duration
+        if mode.ground then velocity = flat(velocity) + Vector3.new(0, if mode.kind == "roll" then Hands.ROLL_DOWN else 0, 0)
+        else velocity += Vector3.new(0, scene.params.gravity * duration * 0.5, 0) end
+        if not mode.ground and velocity.Magnitude > maximum * 1.12 then return nil, "Launch exceeds available speed" end
+        local spin
+        local best, bestError = nil, math.huge
+        for _ = 1, 6 do
+            spin = if mode.ground then Flight.rollingSpin(velocity) else Flight.spinFrom(unit(flat(velocity)), mode.curve or 0, 0)
+            velocity, spin = accepted(mode, velocity, spin)
+            if not velocity then return nil end
+            local endpoint = simulate(scene, from, velocity, spin, duration, false)
+            local errorVector = point - endpoint.pos
+            local error = errorVector.Magnitude
+            if error < bestError then best, bestError = {vel = velocity, spin = spin}, error end
+            if error < 0.12 then break end
+            local correction = errorVector / duration * 1.08
+            if mode.ground then correction = flat(correction) end
+            velocity += correction
+        end
+        if not best or bestError > 1.3 then return nil, {reason = "Trajectory miss", miss = bestError, time = duration, from = from, point = point, fit = best} end
+        local endpoint, rows = simulate(scene, from, best.vel, best.spin, duration, true)
+        if endpoint.pos.Y > scene.floor + scene.params.radius + Rules.Pickup.MaxHeight then return nil, "Arrival is too high" end
+        if not Rules.takeable(endpoint.vel, receiver.vel) then return nil, "Arrival cannot be controlled" end
+        return {receiver = receiver, mode = mode, space = space, from = from, velocity = best.vel,
+            spin = best.spin, time = duration, windup = windup, direction = direction,
+            point = point, rows = rows, error = bestError, arrivalVelocity = endpoint.vel}
+    end
+    M.solve = solve
+    local trajectoryCache = {}
+    local cacheKey
+    local function physicsKey(params)
+        return table.concat({params.radius, params.gravity, params.airDrag, params.curve, params.friction,
+            params.mass, params.roll, params.rollDrag, params.bounce}, ":")
+    end
+    local function coarseSolve(scene, receiver, mode, space, paceScale)
+        if scene.held or paceScale ~= 1 or math.abs(scene.from.Y - scene.world.groundY) > 0.2
+            or cacheKey ~= physicsKey(scene.params) then return solve(scene, receiver, mode, space, paceScale) end
+        local duration = math.max(flat(receiver.pos - scene.from).Magnitude / mode.pace, mode.minimum or 0.18)
+        local point
+        for _ = 1, 3 do
+            point = predict(receiver, duration) + scene.attack * space
+            duration = math.max(flat(point - scene.from).Magnitude / mode.pace, mode.minimum or 0.18)
+        end
+        point = predict(receiver, duration) + scene.attack * space
+        point = Vector3.new(point.X, scene.world.groundY + (if mode.ground then 0 else 1.2), point.Z)
+        local delta = flat(point - scene.from)
+        local distance = delta.Magnitude
+        local bucket = math.max(8, math.floor(distance / 8 + 0.5) * 8)
+        local template = trajectoryCache[mode.name .. ":" .. bucket]
+        if template == nil then return solve(scene, receiver, mode, space, paceScale) end
+        if template == false then return solve(scene, receiver, mode, space, paceScale) end
+        if distance < 4 or not inPitch(point, scene.bounds, 2) or not onside(scene, receiver, 0) then return nil end
+        if reachTime(receiver, point, Rules.Pickup.CushionReach, 0.14) > duration then return nil end
+        local scale = distance / bucket
+        local timeScale = duration / template.time
+        local direction = unit(delta)
+        local basis = CFrame.fromMatrix(Vector3.zero, direction, Vector3.yAxis, direction:Cross(Vector3.yAxis))
+        local function position(v)
+            local relative = v - template.from
+            return scene.from + basis:VectorToWorldSpace(Vector3.new(relative.X * scale, relative.Y * timeScale * timeScale, relative.Z * scale))
+        end
+        local function velocity(v)
+            return basis:VectorToWorldSpace(Vector3.new(v.X * scale / timeScale, v.Y * timeScale, v.Z * scale / timeScale))
+        end
+        local rows = {}
+        for _, row in ipairs(template.rows) do
+            table.insert(rows, {t = row.t * timeScale, p = position(row.p), v = velocity(row.v)})
+        end
+        local arrivalVelocity = velocity(template.arrivalVelocity)
+        if not Rules.takeable(arrivalVelocity, receiver.vel) then return nil end
+        return {receiver = receiver, mode = mode, space = space, from = scene.from,
+            velocity = velocity(template.velocity), spin = basis:VectorToWorldSpace(template.spin),
+            time = duration, windup = 0, direction = direction, point = point, rows = rows,
+            error = template.error * scale + 0.15, arrivalVelocity = arrivalVelocity, approximate = true}
+    end
+    M.coarseSolve = coarseSolve
+    task.spawn(function()
+        while life.alive() do
+            local params, world = World.params(), World.get()
+            local key = physicsKey(params)
+            if key ~= cacheKey then table.clear(trajectoryCache); cacheKey = key end
+            local origin = Vector3.new(0, world.groundY, 0)
+            local scene = {from = origin, root = {Position = origin + Vector3.new(0, 3.84, 0)}, held = false,
+                floor = world.groundY - params.radius, params = params,
+                world = {groundY = world.groundY, frames = {}, bodies = {}}, attack = Vector3.xAxis}
+            local complete = true
+            for bucket = 8, 240, 8 do
+                for _, mode in ipairs(modes) do
+                    if not life.alive() then return end
+                    local cacheId = mode.name .. ":" .. bucket
+                    if trajectoryCache[cacheId] ~= nil then continue end
+                    complete = false
+                    if M.planning or S.busy or Dribble.kickState() then task.wait(0.1); continue end
+                    local receiver = {pos = origin + Vector3.new(bucket, 3.84, 0), vel = Vector3.zero,
+                        acceleration = Vector3.zero, speed = 26, accel = 145}
+                    trajectoryCache[cacheId] = solve(scene, receiver, mode, 0, 1) or false
+                    M.cacheEntries = (M.cacheEntries or 0) + 1
+                    task.wait()
+                end
+            end
+            if complete then break end
+            task.wait(0.25)
+        end
+    end)
+    local function assess(scene, plan, look)
+        local margin, blocker = 4, nil
+        for _, row in ipairs(plan.rows) do
+            local time = row.t + plan.windup
+            if not inPitch(row.p, scene.bounds, 0.3) then return nil end
+            if row.t > 0.02 then
+                for _, enemy in ipairs(scene.enemies) do
+                    local height = scene.floor + 8.5 + (if time > 0.45 then 3.2 else 0)
+                    if row.p.Y <= height then
+                        local reach = 2.5 + scene.params.radius + math.min(time * 0.7 + enemy.uncertainty, 2)
+                        local travel = reachTime(enemy, row.p, reach, if enemy.available then 0.08 else 0.6)
+                        local difference = travel - time
+                        if difference < margin then margin, blocker = difference, enemy end
+                    end
+                end
+            end
+        end
+        local room = 35
+        local receivesAt = plan.time + plan.windup
+        for _, enemy in ipairs(scene.enemies) do
+            room = math.min(room, flat(predict(enemy, receivesAt) - plan.point).Magnitude)
+        end
+        local receiverUncertainty = plan.receiver.uncertainty * receivesAt + math.max(receivesAt - 1, 0) * 1.1
+        local probability = 1 / (1 + math.exp(-math.clamp(margin / 0.17, -20, 20)))
+        local progress = math.clamp((plan.point - scene.from):Dot(scene.attack), -100, 170)
+        local score = probability * 100 + progress * 0.065 + math.min(room, 25) * 0.35
+            - receivesAt * 1.8 - receiverUncertainty * 2 - plan.error * 4
+        if plan.mode.ground then score += 1.5 end
+        if cfg.passDecision == "Safe" then score -= math.max(progress, 0) * 0.035
+        elseif cfg.passDecision == "Attacking" then score += progress * 0.06 end
+        if look then score += math.max(unit(flat(plan.receiver.pos - scene.from)):Dot(look), -1) * 22 end
+        if plan.approximate then margin -= 0.06 end
+        plan.margin, plan.score, plan.blocker, plan.room = margin, score, blocker, room
+        plan.receiverUncertainty = receiverUncertainty
+        return plan
+    end
+    M.assess = assess
+    function M.plan(scene, options)
+        options = options or {}
+        local ranked = {}
+        local sliceAt = os.clock()
+        for _, receiver in ipairs(scene.teammates) do
+            if options.receiverId and receiver.id ~= options.receiverId then continue end
+            for _, mode in ipairs(if scene.held then handModes else modes) do
+                if options.type and options.type ~= "Automatic" and options.type ~= mode.name
+                    and not (options.type == "Curved" and mode.curve) then continue end
+                for _, space in ipairs({0, 5}) do
+                    local plan = if options.exact then solve(scene, receiver, mode, space, options.paceScale or 1)
+                        else coarseSolve(scene, receiver, mode, space, options.paceScale or 1)
+                    if plan then
+                        plan = assess(scene, plan, options.look)
+                        if plan then table.insert(ranked, plan) end
+                    end
+                    if options.yield and os.clock() - sliceAt > 0.003 then
+                        options.yield()
+                        if not life.alive() then return nil, {} end
+                        sliceAt = os.clock()
+                    end
+                end
+            end
+        end
+        table.sort(ranked, function(a, b) return a.score > b.score end)
+        return ranked[1], ranked
+    end
+    local function minimumMargin()
+        return if cfg.passDecision == "Safe" then 0.18 elseif cfg.passDecision == "Attacking" then -0.08 else 0.04
+    end
+    function M.safe(plan) return plan and plan.margin >= minimumMargin() end
+    local function stillOwn(scene)
+        if not life.alive() or player.Character ~= scene.character or Ball.getBall() ~= scene.ball then return false end
+        local state = Dribble.kickState()
+        if state and not scene.held and not scene.freeRestart then return state.pid == scene.pid end
+        if scene.ball:GetAttribute("PossessionId") ~= scene.pid then return false end
+        if scene.freeRestart then
+            local restart = M.restart()
+            return restart and restart.phase == "Restart" and restart.kind == "GoalKick" and restart.team == scene.team
+                and restart.taker == player.UserId and flat(scene.from - scene.root.Position).Magnitude <= 4.5
+        end
+        return scene.ball:GetAttribute("Possessor") == scene.ownId
+    end
+    M.stillOwn = stillOwn
+    local function release(scene, plan)
+        if not stillOwn(scene) or S.busy then return false end
+        local sent
+        S.busy = true
+        local ok, err = pcall(function()
+            if scene.held then
+                if not NativeKick.hands or not NativeKick.hands.release then return end
+                local restoreAim = life.override(Hands, "aimIn", function() return plan.direction end)
+                local distance = flat(plan.point - scene.root.Position).Magnitude
+                local restoreKind = life.override(Hands, "kindFor", function() return plan.mode.kind, distance end)
+                local original = Hands.launch
+                local restoreLaunch = life.override(Hands, "launch", function(kind, from, at, direction, amount, yielding)
+                    if kind == plan.mode.kind and (from - plan.from).Magnitude < 4 then return plan.velocity, plan.spin end
+                    return original(kind, from, at, direction, amount, yielding)
+                end)
+                local invoked, value = pcall(NativeKick.hands.release, if plan.mode.kind == "punt" then "Shoot" else "Pass", 0.5)
+                restoreAim(); restoreKind()
+                task.delay(0.12, restoreLaunch)
+                if not invoked then error(value) end
+                sent = value == true
+            else
+                local state = Dribble.kickState()
+                local from = if state and state.pid == scene.pid then Path.sample(state.seg, now(), state.P) else scene.from
+                if (from - plan.from).Magnitude > 1.4 then return end
+                if scene.freeRestart then sent = Dribble.strikeFree(from, plan.velocity, plan.spin, plan.mode.family, now())
+                elseif state and state.pid == scene.pid then sent = Dribble.strike(from, plan.velocity, plan.spin, plan.mode.family, now()) end
+            end
+        end)
+        task.delay((if sent then plan.windup else 0) + 0.12, function() if life.alive() then S.busy = false end end)
+        if not ok then M.error = tostring(err); return false end
+        if sent then
+            local record = {at = now(), pid = scene.pid, ball = scene.ball, ownId = scene.ownId,
+                receiverId = plan.receiver.id, receiver = plan.receiver.player.DisplayName, receiverModel = plan.receiver.model,
+                style = plan.mode.name, point = plan.point, margin = plan.margin, score = plan.score,
+                time = plan.time, windup = plan.windup, requestedVelocity = plan.velocity, state = "Sent"}
+            M.active = record
+            push(record)
+            M.status = "Passing to " .. record.receiver .. " | " .. record.style
+            return true
+        end
+        return false
+    end
+    M.release = release
+    function M.lookTarget(scene)
+        local camera = workspace.CurrentCamera
+        if not camera then return nil end
+        local origin, direction = camera.CFrame.Position, camera.CFrame.LookVector
+        local threshold = math.cos(math.rad(cfg.passCone))
+        local best, bestAlignment, bestDistance = nil, threshold, math.huge
+        for _, receiver in ipairs(scene.teammates) do
+            local delta = receiver.pos - origin
+            local distance = delta.Magnitude
+            if distance < 0.01 then continue end
+            local alignment = delta:Dot(direction) / distance
+            if alignment >= threshold and (alignment > bestAlignment + 0.0001 or (math.abs(alignment - bestAlignment) <= 0.0001 and distance < bestDistance)) then
+                best, bestAlignment, bestDistance = receiver, alignment, distance
+            end
+        end
+        return best
+    end
+    local nextAttempt = 0
+    local function observe()
+        local record = M.active
+        if not record then return end
+        local ball = record.ball
+        if not ball.Parent or Ball.getBall() ~= ball then record.state = "Ball changed"; M.active = nil; return end
+        local pid, possessor = ball:GetAttribute("PossessionId"), ball:GetAttribute("Possessor")
+        local flight = Flight.decode(ball:GetAttribute(KickRules.ATTR_FLIGHT))
+        if flight and flight.pid == record.pid + 1 and flight.by == record.ownId then
+            record.accepted = true
+            record.acceptedVelocity = flight.vel
+        end
+        if possessor and possessor ~= 0 and possessor ~= record.ownId then
+            record.resultPid, record.resultHolder = pid, possessor
+            for _, other in ipairs(Players:GetPlayers()) do
+                local model = other.Character
+                if model and model:GetAttribute("DribbleId") == possessor then
+                    record.resultPlayer, record.resultTeam = other.DisplayName, model:GetAttribute("Team")
+                    break
+                end
+            end
+            local received = record.accepted and pid == record.pid + 2 and possessor == record.receiverId
+                and record.receiverModel:GetAttribute("DribbleId") == record.receiverId
+            record.state = if received then "Received" else "Interrupted"
+            M.status = if received then "Received by " .. record.receiver else "Pass interrupted"
+            M.active = nil
+        elseif pid and pid > record.pid + 1 then record.state = "Interrupted"; record.resultPid, record.resultHolder = pid, possessor; M.active = nil
+        elseif now() - record.at > record.windup + record.time + 2 then
+            record.state = if record.accepted then "Not received" else "Release not confirmed"
+            M.active = nil
+        end
+    end
+    function M.request(source)
+        local fromRestart = source == "restart"
+        if M.planning or S.busy or now() < nextAttempt then return false end
+        nextAttempt = now() + 0.1
+        local scene, reason = M.snapshot(true)
+        if not scene then M.status = reason; M.choice = nil; return false end
+        if fromRestart and (not scene.restart or scene.restart.kind ~= "GoalKick" or scene.restart.taker ~= player.UserId) then return false end
+        local receiver = if fromRestart then nil else M.lookTarget(scene)
+        if not fromRestart and not receiver then M.status = "Look at a teammate"; return false end
+        local receiverId = receiver and receiver.id
+        if scene.held and M.heldPid ~= scene.pid then M.heldPid, M.heldSince = scene.pid, now() end
+        if M.active and M.active.pid == scene.pid then return false end
+        M.planning = true
+        nextAttempt = now() + 0.18
+        task.spawn(function()
+            local ok, err = pcall(function()
+                local began = os.clock()
+                local options: any = {yield = function() task.wait() end}
+                options.type = if fromRestart then "Automatic" else cfg.smartPassType
+                options.paceScale = if fromRestart then 1 else cfg.passStrength / 100
+                options.receiverId = receiverId
+                options.look = if fromRestart then nil else unit(flat(workspace.CurrentCamera.CFrame.LookVector))
+                local _, ranked = M.plan(scene, options)
+                M.planMs = (os.clock() - began) * 1000
+                if not stillOwn(scene) then return end
+                local fresh = M.snapshot(true)
+                if not fresh or fresh.pid ~= scene.pid then return end
+                local choice
+                for index = 1, math.min(#ranked, 3) do
+                    local prior = ranked[index]
+                    local receiver
+                    for _, a in ipairs(fresh.teammates) do if a.id == prior.receiver.id then receiver = a; break end end
+                    if receiver then
+                        local candidate = solve(fresh, receiver, prior.mode, prior.space, options.paceScale or 1)
+                        if candidate then candidate = assess(fresh, candidate, options.look) end
+                        if candidate and (not choice or candidate.score > choice.score) then choice = candidate end
+                    end
+                    task.wait()
+                    if not stillOwn(fresh) then return end
+                end
+                local finalScene = M.snapshot(true)
+                if not finalScene or finalScene.pid ~= scene.pid then return end
+                if choice then
+                    local receiver
+                    for _, a in ipairs(finalScene.teammates) do if a.id == choice.receiver.id then receiver = a; break end end
+                    choice = if receiver then solve(finalScene, receiver, choice.mode, choice.space, options.paceScale or 1) else nil
+                    if choice then choice = assess(finalScene, choice, options.look) end
+                end
+                M.ranked, M.choice = ranked, choice
+                if M.safe(choice) or (choice and scene.held and now() - M.heldSince > Hands.HOLD_MAX - 1.25) then release(finalScene, choice)
+                else M.status = if #fresh.teammates == 0 then "No teammate available" else "Waiting for an opening" end
+            end)
+            M.planning = false
+            if not ok then M.error = tostring(err); M.status = "Could not plan a pass" end
+        end)
+        return true
+    end
+    life.connect(Run.Heartbeat, function()
+        observe()
+    end)
+    life.onCleanup(function() table.clear(observations) end)
+    return M
+end)()
+S.passingEngine = Passing
+function S.passToLook() return Passing.request() end
+function S.findPassTarget()
+    local scene = Passing.snapshot(true)
+    return scene and Passing.lookTarget(scene)
+end
+
+local GK = (function()
+    local KeeperRules = module(gameModules, "KeeperRules")
+    local Hands = module(gameModules, "KeeperHands")
+    local Dives = module(gameModules, "KeeperDives")
+    local Sim = module(gameModules, "BallSim")
+    local World = module(gameModules.BallSim, "World")
+    local Motion = module(gameModules.Dribble, "Motion")
+    local M: any = {status = "Waiting for goalkeeper role", passStatus = "Waiting for possession",
+        saves = {}, decisions = {}, history = {}, samples = {}, enabledAt = now()}
+    if previous and type(previous.gk) == "table" then
+        for _, key in ipairs({"saves", "decisions", "history", "samples"}) do
+            if type(previous.gk[key]) == "table" then M[key] = previous.gk[key] end
+        end
+    end
+    local function flat(v) return v * Vector3.new(1, 0, 1) end
+    local function unit(v, fallback) return if v.Magnitude > 0.001 then v.Unit else fallback end
+    local function validVector(v)
+        return typeof(v) == "Vector3" and finite(v.X) and finite(v.Y) and finite(v.Z)
+    end
+    local function push(list, value, limit)
+        table.insert(list, value)
+        if #list > limit then table.remove(list, 1) end
+    end
+    local function geometry(character)
+        if not character then return nil end
+        local area = KeeperRules.area(character:GetAttribute("Team"))
+        if not area then return nil end
+        local lines = Contacts.goalLines()
+        for _, frame in ipairs(Tags:GetTagged("SoccerGoalFrame")) do
+            if frame:IsA("BasePart") and frame:IsDescendantOf(workspace)
+                and (frame.Position.X - area.centre.X) * area.side > 0 then
+                local scale = frame.Size.Y / 9.142857142857142
+                local floor = frame.Position.Y - frame.Size.Y / 2
+                return {side = area.side, out = Vector3.new(-area.side, 0, 0),
+                    x = if lines then lines[if area.side > 0 then 2 else 1] else area.centre.X + area.line * area.side,
+                    z = frame.Position.Z, half = 13.071428571428571 * scale,
+                    floor = floor, top = floor + 8.714285714285714 * scale, area = area}
+            end
+        end
+        return nil
+    end
+    M.geometry = geometry
+
+    local function forecast(state, startAt, duration, goal)
+        if not state or not validVector(state.pos) or not validVector(state.vel)
+            or not validVector(state.spin) or not finite(state.t) then return nil end
+        local world = World.get()
+        local params = World.params()
+        local predictionWorld = {groundY = world.groundY, frames = world.frames, bodies = {}}
+        local current = table.clone(state)
+        local step = Sim.STEP
+        local behind = startAt - state.t
+        if behind < -0.15 or behind > 0.55 then return nil end
+        for _ = 1, math.ceil(math.max(behind, 0) / step) do
+            current = Sim.step(World.FLIGHT, current, math.min(step, startAt - current.t), params, predictionWorld, false, 0, nil)
+        end
+        local output = {{t = 0, p = current.pos, v = current.vel}}
+        local previous = current.pos
+        local threat
+        for i = 1, math.ceil(duration / step) do
+            current = Sim.step(World.FLIGHT, current, step, params, predictionWorld, false, 0, nil)
+            local t = i * step
+            if goal and not threat then
+                local before = (previous.X - goal.x) * goal.side
+                local after = (current.pos.X - goal.x) * goal.side
+                if before < 0 and after >= 0 then
+                    local fraction = -before / math.max(after - before, 1e-8)
+                    local crossing = previous:Lerp(current.pos, fraction)
+                    if math.abs(crossing.Z - goal.z) <= goal.half + params.radius
+                        and crossing.Y >= goal.floor - params.radius and crossing.Y <= goal.top + params.radius then
+                        threat = {t = t - step + step * fraction, p = crossing}
+                    end
+                end
+            end
+            if i % 2 == 0 then table.insert(output, {t = t, p = current.pos, v = current.vel}) end
+            previous = current.pos
+            if Sim.resting(current, World.FLIGHT) then break end
+        end
+        return {rows = output, threat = threat, at = startAt, radius = params.radius}
+    end
+    M.forecast = forecast
+    local function samplePrediction(prediction, time)
+        local rows = prediction.rows
+        local index = math.clamp(math.floor(time * 60) + 1, 1, #rows)
+        local a, b = rows[index], rows[math.min(index + 1, #rows)]
+        local alpha = if b.t > a.t then math.clamp((time - a.t) / (b.t - a.t), 0, 1) else 0
+        return a.p:Lerp(b.p, alpha), a.v:Lerp(b.v, alpha)
+    end
+    M.samplePrediction = samplePrediction
+
+    local templateCharacter, templateSkeleton
+    local templates = {}
+    local partNames = {"LeftHand", "RightHand", "LeftForearm", "RightForearm", "Chest", "LeftFoot", "RightFoot"}
+    local function buildTemplates(character)
+        local animator = Mannequin.getAnimator(character)
+        local sk = animator and animator.skeleton
+        if not sk then return {} end
+        if character == templateCharacter and sk == templateSkeleton then return templates end
+        templates = {}
+        for _, kind in ipairs({"Low", "Mid", "High", "Block", "Smother"}) do
+            local track = Dives.track(kind)
+            if track then
+                for _, mirror in ipairs({false, true}) do
+                    local side = if mirror then track.left else track.right
+                    local initial = Dives.hips(side, 0)
+                    local rows = {}
+                    local maxTime = math.min(track.ragAt or track.touch + 0.18, 0.95)
+                    for _, time in ipairs({0, 0.06, 0.1, 0.15, 0.2, 0.26, 0.33, 0.42, 0.53, 0.67, 0.82, 0.95}) do
+                        if time <= maxTime then
+                            local pose = Dives.pose(sk, side, time, CFrame.identity)
+                            local solved = sk:solve(pose)
+                            local parts = {}
+                            for _, name in ipairs(partNames) do
+                                local actual = character:FindFirstChild(name)
+                                if actual and actual:IsA("BasePart") and solved[name] then
+                                    table.insert(parts, {name = name, cf = solved[name] - flat(initial), half = actual.Size / 2})
+                                end
+                            end
+                            table.insert(rows, {t = time, parts = parts})
+                        end
+                    end
+                    table.insert(templates, {kind = kind, mirror = mirror, rows = rows, takeoff = math.max(track.takeoff, 0.15)})
+                end
+            end
+        end
+        templateCharacter, templateSkeleton = character, sk
+        M.templates = templates
+        return templates
+    end
+    M.buildTemplates = buildTemplates
+    local function gapToBox(cf, half, point)
+        local localPoint = cf:PointToObjectSpace(point)
+        return Vector3.new(math.max(math.abs(localPoint.X) - half.X, 0),
+            math.max(math.abs(localPoint.Y) - half.Y, 0), math.max(math.abs(localPoint.Z) - half.Z, 0)).Magnitude
+    end
+    M.gapToBox = gapToBox
+    local function moveWish(position, velocity, target, speed, acceleration, deceleration)
+        local delta = flat(target - position)
+        if delta.Magnitude < 0.12 and velocity.Magnitude < 0.45 then return Vector3.zero end
+        local direction = unit(delta, Vector3.zero)
+        local closing = velocity:Dot(direction)
+        local brakeSpeed = math.sqrt(math.max(0, 2 * deceleration * math.max(delta.Magnitude - 0.12, 0)))
+        local desired = direction * math.min(speed, brakeSpeed)
+        local lateral = velocity - direction * closing
+        return unit(desired - lateral * math.min(1, acceleration / math.max(speed * 4, 1)), Vector3.zero)
+            * math.min(desired.Magnitude / math.max(speed, 1), 1)
+    end
+    local function movementPath(r, cm, target)
+        local ground = cm:FindFirstChild("GroundController")
+        local speed = math.max(cm.BaseMoveSpeed, 1)
+        local acceleration = speed / math.max(ground and ground.AccelerationTime or 0.15, 0.04)
+        local deceleration = speed / math.max(ground and ground.DecelerationTime or 0.12, 0.04)
+        local position, velocity = r.Position, flat(r.AssemblyLinearVelocity)
+        local rows = {{p = position, v = velocity}}
+        for _ = 1, 60 do
+            local wish = moveWish(position, velocity, target, speed, acceleration, deceleration)
+            velocity = Motion.stepVelocity(velocity, wish * speed, acceleration, deceleration, 1 / 60)
+            position = position + velocity / 60
+            table.insert(rows, {p = position, v = velocity})
+        end
+        return rows, moveWish(r.Position, flat(r.AssemblyLinearVelocity), target, speed, acceleration, deceleration)
+    end
+    local function currentMoveWish(r, cm, target)
+        local ground = cm:FindFirstChild("GroundController")
+        local speed = math.max(cm.BaseMoveSpeed, 1)
+        return moveWish(r.Position, flat(r.AssemblyLinearVelocity), target, speed,
+            speed / math.max(ground and ground.AccelerationTime or 0.15, 0.04),
+            speed / math.max(ground and ground.DecelerationTime or 0.12, 0.04))
+    end
+
+    local function sweepGap(cfA, cfB, half, ballA, ballB, radius)
+        local a, b = ballA - cfA.Position, ballB - cfB.Position
+        local delta = b - a
+        local squared = delta:Dot(delta)
+        local centreAlpha = if squared > 1e-8 then math.clamp(-a:Dot(delta) / squared, 0, 1) else 0.5
+        if (a + delta * centreAlpha).Magnitude > half.Magnitude + radius then return math.huge, nil end
+        local function at(alpha)
+            return gapToBox(cfA:Lerp(cfB, alpha), half, ballA:Lerp(ballB, alpha))
+        end
+        local low, high = 0, 1
+        for _ = 1, 4 do
+            local third = (high - low) / 3
+            local left, right = low + third, high - third
+            if at(left) < at(right) then high = right else low = left end
+        end
+        local alpha = (low + high) * 0.5
+        local gap = at(alpha)
+        local value = at(0)
+        if value < gap then gap, alpha = value, 0 end
+        value = at(1)
+        if value < gap then gap, alpha = value, 1 end
+        value = at(centreAlpha)
+        if value < gap then gap, alpha = value, centreAlpha end
+        if gap > 0 then
+            for _ = 1, 8 do
+                local third = (high - low) / 3
+                local left, right = low + third, high - third
+                local leftGap, rightGap = at(left), at(right)
+                if leftGap < gap then gap, alpha = leftGap, left end
+                if rightGap < gap then gap, alpha = rightGap, right end
+                if leftGap < rightGap then high = right else low = left end
+                if gap == 0 then break end
+            end
+        end
+        return gap, alpha
+    end
+    M.sweepGap = sweepGap
+
+    local function standbyTarget(position, goal, depth, y)
+        local plane = goal.x - goal.side * depth
+        local left = Vector3.new(goal.x, position.Y, goal.z - goal.half)
+        local right = Vector3.new(goal.x, position.Y, goal.z + goal.half)
+        local bisector = unit(flat(left - position), -goal.out) + unit(flat(right - position), -goal.out)
+        local z = goal.z
+        if math.abs(bisector.X) > 0.001 and (position.X - goal.x) * goal.side < -depth then
+            z = position.Z + bisector.Z * (plane - position.X) / bisector.X
+        end
+        return Vector3.new(plane, y, math.clamp(z, goal.z - goal.half + 1, goal.z + goal.half - 1))
+    end
+    M.standbyTarget = standbyTarget
+    local function lineIntercept(prediction, plane, side)
+        for i = 2, #prediction.rows do
+            local a, b = prediction.rows[i - 1], prediction.rows[i]
+            local da, db = (a.p.X - plane) * side, (b.p.X - plane) * side
+            if da < 0 and db >= 0 then
+                local alpha = -da / math.max(db - da, 1e-8)
+                return a.p:Lerp(b.p, alpha), a.t + (b.t - a.t) * alpha
+            end
+        end
+        return nil
+    end
+    M.lineIntercept = lineIntercept
+    local function orientedRows(template, goal, turn)
+        template.oriented = template.oriented or {}
+        local key = tostring(goal.side) .. ":" .. tostring(turn)
+        local cached = template.oriented[key]
+        if cached then return cached.rows, cached.orientation, cached.face end
+        local face = CFrame.Angles(0, turn, 0) * goal.out
+        local orientation = CFrame.lookAt(Vector3.zero, face)
+        local rows = {}
+        for _, row in ipairs(template.rows) do
+            local parts = {}
+            local reach = 0
+            for _, part in ipairs(row.parts) do
+                table.insert(parts, {name = part.name, half = part.half, cf = orientation * part.cf})
+                reach = math.max(reach, part.cf.Position.Magnitude + part.half.Magnitude)
+            end
+            table.insert(rows, {t = row.t, parts = parts, reach = reach})
+        end
+        template.oriented[key] = {rows = rows, orientation = orientation, face = face}
+        return rows, orientation, face
+    end
+    local function chooseSave(prediction, character, goal, moveTarget, dispatchLead)
+        local r = character:FindFirstChild("Root")
+        local cm = character:FindFirstChildOfClass("ControllerManager")
+        local animator = Mannequin.getAnimator(character)
+        if not r or not cm or not animator or not animator.body then return nil end
+        local motion = movementPath(r, cm, moveTarget)
+        local lead = dispatchLead or 0
+        local deadline = (if prediction.threat then prediction.threat.t else math.min(prediction.rows[#prediction.rows].t, 0.8)) - lead
+        local best, bestScore
+        local pelvis = animator.skeleton.parts[animator.skeleton.pelvisName]
+        local rootToPelvis = flat(pelvis.Position - r.Position)
+        for _, template in ipairs(buildTemplates(character)) do
+            for _, turn in ipairs({-0.4, 0, 0.4}) do
+                local rows, orientation, face = orientedRows(template, goal, turn)
+                for _, delay in ipairs({0, 0.05, 0.1, 0.17, 0.25, 0.35, 0.48, 0.62, 0.8, 1}) do
+                    if delay >= deadline then break end
+                    if bestScore and prediction.radius + Hands.MEET_SLACK - 0.4 - delay * 0.09 - 0.055 * 0.025 <= bestScore then break end
+                    local moving = motion[math.clamp(math.floor((delay + lead) * 60) + 1, 1, #motion)]
+                    local anchor = Vector3.new(moving.p.X, goal.floor, moving.p.Z) + rootToPelvis
+                    local carry = moving.v
+                    if carry.Magnitude > Dives.Tuning.CarryMax then carry = carry.Unit * Dives.Tuning.CarryMax end
+                    local function shiftAt(t)
+                        local carryAt = math.min(t, template.takeoff)
+                        return anchor + carry * (carryAt - carryAt * carryAt / (2 * template.takeoff))
+                    end
+                    for i = 2, #rows do
+                        local a, b = rows[i - 1], rows[i]
+                        local endTime = math.min(b.t, deadline + 0.012 - delay)
+                        if endTime <= a.t then break end
+                        if bestScore and prediction.radius + Hands.MEET_SLACK - 0.4 - delay * 0.09 - math.max(a.t, 0.055) * 0.025 <= bestScore then break end
+                        local duration = endTime - a.t
+                        local fraction = duration / (b.t - a.t)
+                        local ballA = samplePrediction(prediction, lead + delay + a.t)
+                        local ballB = samplePrediction(prediction, lead + delay + endTime)
+                        local shiftA, shiftB = shiftAt(a.t), shiftAt(endTime)
+                        local relativeA, relativeB = ballA - shiftA, ballB - shiftB
+                        local relativeDelta = relativeB - relativeA
+                        local relativeSquared = relativeDelta:Dot(relativeDelta)
+                        local closest = if relativeSquared > 1e-8 then math.clamp(-relativeA:Dot(relativeDelta) / relativeSquared, 0, 1) else 0
+                        if (relativeA + relativeDelta * closest).Magnitude > math.max(a.reach, b.reach) + prediction.radius + Hands.MEET_SLACK then continue end
+                        for index, partA in ipairs(a.parts) do
+                            local partB = b.parts[index]
+                            if partB and partB.name == partA.name then
+                                local uncertainty = if partA.name == "Chest" then 0.4 elseif string.find(partA.name, "Hand", 1, true) then 0.9 else 0.65
+                                local upperScore = prediction.radius + Hands.MEET_SLACK - uncertainty - delay * 0.09 - math.max(a.t, 0.055) * 0.025
+                                if bestScore and upperScore <= bestScore then continue end
+                                local maxGap = math.min(prediction.radius + Hands.MEET_SLACK, upperScore - (bestScore or -math.huge))
+                                local cfA = partA.cf + shiftA
+                                local cfB = partA.cf:Lerp(partB.cf, fraction) + shiftB
+                                local gap, alpha = sweepGap(cfA, cfB, partA.half, ballA, ballB, maxGap)
+                                if alpha ~= nil then
+                                    local elapsed = a.t + duration * alpha
+                                    local time = lead + delay + elapsed
+                                    local margin = prediction.radius + Hands.MEET_SLACK - gap
+                                    local score = margin - uncertainty - delay * 0.09 - elapsed * 0.025
+                                    if elapsed >= 0.055 and (not bestScore or score > bestScore) then
+                                        best, bestScore = {kind = template.kind, mirror = template.mirror, face = face,
+                                            direction = orientation.RightVector * (if template.mirror then -1 else 1),
+                                            delay = delay, contact = time, point = ballA:Lerp(ballB, alpha), margin = margin,
+                                            confidenceMargin = margin - uncertainty, actionAt = prediction.at + lead + delay,
+                                            contactAt = prediction.at + time, rootAtAction = moving.p, score = score,
+                                            part = partA.name, deadline = deadline + lead}, score
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return best
+    end
+    M.chooseSave = chooseSave
+
+    local function scheduleSave(candidate, prediction, pid, position)
+        local pending = M.pendingSave
+        local clock = now()
+        if pending and pending.pid == pid and pending.actionAt >= clock - 0.035 and pending.contactAt > clock
+            and prediction.threat and pending.contactAt <= prediction.at + prediction.threat.t + 0.02 then
+            local expected = samplePrediction(prediction, math.max(pending.contactAt - prediction.at, 0))
+            local ballStillMatches = (expected - pending.point).Magnitude < 1.2
+            local rootStillMatches = pending.actionAt - clock > 0.06 or flat(position - pending.rootAtAction).Magnitude < 1.75
+            if ballStillMatches and rootStillMatches then
+                local improves = candidate and ((candidate.actionAt < pending.actionAt - 0.025 and candidate.score >= pending.score - 0.1)
+                    or (candidate.score > pending.score + 0.3 and candidate.actionAt <= pending.actionAt + 0.015))
+                if not improves then return pending end
+            end
+        end
+        if candidate then candidate.pid = pid end
+        M.pendingSave = candidate
+        return candidate
+    end
+    M.scheduleSave = scheduleSave
+
+    local diveCharacter, diveBody, diveDispatcher
+    local function resolveDive(character)
+        local animator = Mannequin.getAnimator(character)
+        local body = animator and animator.body
+        if not body then return nil end
+        if diveCharacter ~= character or diveBody ~= body or not diveDispatcher then
+            diveCharacter, diveBody, diveDispatcher = character, body, nil
+            local seen, queue = {}, {Mannequin.keeperDiveTo}
+            for _ = 1, 32 do
+                local fn = table.remove(queue, 1)
+                if not fn then break end
+                if type(fn) == "function" and not seen[fn] then
+                    seen[fn] = true
+                    local source = debug.info(fn, "s")
+                    local upvalues = debug.getupvalues(fn)
+                    local ownsBody = false
+                    for _, value in pairs(upvalues) do if value == body then ownsBody = true; break end end
+                    if type(source) == "string" and string.find(source, "MannequinClient", 1, true) and ownsBody then
+                        diveDispatcher = fn
+                        break
+                    end
+                    for _, upvalue in pairs(upvalues) do
+                        if type(upvalue) == "function" and not seen[upvalue] then table.insert(queue, upvalue) end
+                    end
+                end
+            end
+        end
+        return diveDispatcher
+    end
+    function M.dispatcherReady() return resolveDive(player.Character) ~= nil end
+    local function nativeDive(character, plan)
+        if not life.alive() or player.Character ~= character or not KeeperRules.inGoal(character)
+            or not Mannequin.keeperReady() then return false, "Goalkeeper controls are not ready" end
+        resolveDive(character)
+        if not diveDispatcher then return false, "Native dive dispatcher unavailable" end
+        return diveDispatcher(plan.kind, plan.direction, plan.face)
+    end
+    M.nativeDive = nativeDive
+
+    local function restartDecision(restart, team, userId)
+        if not restart then return nil end
+        if restart.kind ~= "GoalKick" or restart.team ~= team then return "Yield" end
+        if type(restart.taker) == "number" and restart.taker > 0 then
+            return if restart.taker == userId then "Take" else "Retreat"
+        end
+        return "Available"
+    end
+    M.restartDecision = restartDecision
+    local function restartPolicy(character, r, goal, position)
+        local restart = Passing.restart()
+        local action = restartDecision(restart, character:GetAttribute("Team"), player.UserId)
+        if not action then return nil end
+        if action == "Yield" then return "Yield" end
+        if action == "Take" then
+            
+            if restart.phase == "Restart" then Passing.request("restart") end
+            return "Yield"
+        end
+        local home = standbyTarget(position, goal, 3.5, r.Position.Y)
+        if action == "Retreat" or restart.phase ~= "Restart" then return "Retreat", home end
+        local spot = if typeof(restart.spot) == "Vector3" then restart.spot else restart.ball
+        if typeof(spot) ~= "Vector3" then return "Retreat", home end
+        local distance = flat(spot - r.Position).Magnitude
+        for _, other in ipairs(Players:GetPlayers()) do
+            local model = other.Character
+            local otherRoot = model and model:FindFirstChild("Root")
+            if other ~= player and otherRoot and model:GetAttribute("Team") == character:GetAttribute("Team")
+                and model:GetAttribute("BodyState") == "Animated" then
+                local otherDistance = flat(otherRoot.Position - spot).Magnitude
+                if otherDistance <= math.max(distance - 1, 5) then return "Retreat", home end
+            end
+        end
+        return "Approach", Vector3.new(spot.X, r.Position.Y, spot.Z)
+    end
+    local function nearbyActors(character)
+        local allies, enemies = {}, {}
+        for _, other in ipairs(Players:GetPlayers()) do
+            local model = other.Character
+            if model and model ~= character then
+                local a = Passing.actor(model, other, now())
+                if a and (a.team == "Red" or a.team == "Blue") then
+                    table.insert(if a.team == character:GetAttribute("Team") then allies else enemies, a)
+                end
+            end
+        end
+        return allies, enemies
+    end
+    local function gatherDecision(scene)
+        if scene.possessor ~= 0 or not scene.free or not scene.grounded then return nil end
+        if scene.speed > 28 or scene.distance > 8.5 then return nil end
+        
+        for _, row in ipairs(scene.prediction.rows) do
+            if row.t > 0.42 then break end
+            if flat(row.p - scene.position).Magnitude < Hands.GATHER_REACH - 0.3
+                and row.p.Y <= scene.goal.floor + scene.prediction.radius + Hands.GATHER_HIGH then return nil end
+        end
+        for _, row in ipairs(scene.prediction.rows) do
+            if row.t < 0.06 then continue end
+            if row.t > 0.42 then break end
+            local depth = (scene.goal.x - row.p.X) * scene.goal.side
+            if depth < 0.8 or depth > 10 or math.abs(row.p.Z - scene.goal.z) > scene.goal.half - 1 then continue end
+            if row.v.Magnitude > 28 or row.p.Y > scene.goal.floor + scene.prediction.radius + Hands.GATHER_HIGH - 0.4 then continue end
+            if scene.prediction.threat and scene.prediction.threat.t <= row.t + 0.2 then continue end
+            local eta = scene.arrival(row.p, row.t)
+            if eta > row.t then continue end
+            local safe = true
+            for _, enemy in ipairs(scene.enemies) do
+                if Passing.reachTime(enemy, row.p, 4, 0.06) <= row.t + 0.18 then safe = false; break end
+            end
+            if not safe then continue end
+            for _, ally in ipairs(scene.allies) do
+                if flat(ally.pos - row.p).Magnitude < math.min(scene.distance - 1, 5) then safe = false; break end
+            end
+            if safe then return {point = row.p, time = row.t} end
+        end
+        return nil
+    end
+    M.gatherDecision = gatherDecision
+    local function safeGather(prediction, character, r, goal, ball)
+        if not prediction or not cfg.gkPosition then return nil end
+        local first = prediction.rows[1]
+        if ball:GetAttribute("Possessor") ~= 0 or Ball.getSource() ~= "free"
+            or first.v.Magnitude > 28 or flat(first.p - r.Position).Magnitude > 8.5 then return nil end
+        local cm = character:FindFirstChildOfClass("ControllerManager")
+        local sensor = cm and cm.GroundSensor
+        if not cm then return nil end
+        local allies, enemies = nearbyActors(character)
+        local decision = gatherDecision({prediction = prediction, goal = goal,
+            possessor = ball:GetAttribute("Possessor"), free = Ball.getSource() == "free",
+            grounded = sensor and sensor.SensedPart ~= nil, speed = first.v.Magnitude,
+            distance = flat(first.p - r.Position).Magnitude, position = r.Position, allies = allies, enemies = enemies,
+            arrival = function(point, time)
+                local path = movementPath(r, cm, point)
+                local position = path[math.clamp(math.floor(time * 60) + 1, 1, #path)].p
+                return if flat(position - point).Magnitude <= Hands.GATHER_REACH - 0.35 then time else math.huge
+            end})
+        if decision then
+            M.lastGather = {at = now(), pid = ball:GetAttribute("PossessionId"), point = decision.point, time = decision.time}
+            return Vector3.new(decision.point.X, r.Position.Y, decision.point.Z)
+        end
+        return nil
+    end
+    local lastJump = -10
+    local function aerialDecision(scene)
+        if scene.possessor ~= 0 or not scene.free or not scene.grounded then return nil end
+        local best
+        for _, row in ipairs(scene.prediction.rows) do
+            if row.t < 0.28 then continue end
+            if row.t > 1.1 then break end
+            local depth = (scene.goal.x - row.p.X) * scene.goal.side
+            local horizontal = flat(row.p - scene.position).Magnitude
+            if depth < 0.7 or depth > 9 or math.abs(row.p.Z - scene.goal.z) > scene.goal.half then continue end
+            if row.p.Y < scene.standingReach + 0.7 or row.p.Y > scene.standingReach + 3.8 then continue end
+            if row.v.Y > 12 or horizontal > math.min(7, scene.speed * math.max(row.t - 0.18, 0) + 1.5) then continue end
+            if scene.prediction.threat and scene.prediction.threat.t < row.t - 0.02 then continue end
+            local score = horizontal + math.abs(row.t - 0.43) * 3
+            if not best or score < best.score then
+                best = {point = row.p, contactAt = scene.prediction.at + row.t,
+                    jumpAt = scene.prediction.at + row.t - 0.43, score = score,
+                    target = Vector3.new(row.p.X, scene.position.Y, row.p.Z)}
+            end
+        end
+        return best
+    end
+    M.aerialDecision = aerialDecision
+    local function standingReach(character, r)
+        local head = character:FindFirstChild("Head")
+        return (if head then head.Position.Y + head.Size.Y / 2 else r.Position.Y + 3) + 1.4
+    end
+    local function aerialOpportunity(prediction, character, r, goal, ball)
+        if not prediction or not cfg.gkPosition or now() - lastJump < 1.1 then return nil end
+        local cm = character:FindFirstChildOfClass("ControllerManager")
+        local sensor = cm and cm.GroundSensor
+        if not cm then return nil end
+        local result = aerialDecision({prediction = prediction, goal = goal, possessor = ball:GetAttribute("Possessor"),
+            free = Ball.getSource() == "free", grounded = sensor and sensor.SensedPart ~= nil,
+            position = r.Position, standingReach = standingReach(character, r), speed = cm.BaseMoveSpeed})
+        if result then result.pid = ball:GetAttribute("PossessionId") end
+        return result
+    end
+    local function attemptJump(aerial, character, r, goal, ball)
+        if now() - lastJump < 1.1 or aerial.pid ~= ball:GetAttribute("PossessionId")
+            or S.busy or not Mannequin.keeperReady() or not KeeperRules.inGoal(character) then return false end
+        local remaining = aerial.contactAt - now()
+        if remaining < 0.26 or remaining > 0.49 or now() < aerial.jumpAt - 0.015 then return false end
+        if flat(aerial.point - r.Position).Magnitude > 2.2 then return false end
+        if aerial.point.Y > standingReach(character, r) + 3.8 then return false end
+        local depth = (goal.x - aerial.point.X) * goal.side
+        if depth < 0.7 or depth > 9 then return false end
+        Mannequin.keeperJump()
+        lastJump = now()
+        M.lastDive = {at = now(), pid = aerial.pid, kind = "Jump", predictedContact = aerial.point,
+            contactIn = remaining, characterId = character:GetAttribute("DribbleId")}
+        push(M.samples, M.lastDive, 40)
+        return true
+    end
+
+    local wished = Vector3.zero
+    local faceWish
+    local lastPlanning, lastDive = 0, -10
+    local activeCharacter
+    local nativeShape = Mannequin.shapeMove
+    life.override(Mannequin, "shapeMove", function(input)
+        local shaped = if nativeShape then nativeShape(input) else input
+        local character = player.Character
+        if not cfg.autoGK or not cfg.gkPosition or not character or character ~= activeCharacter
+            or M.yieldMovement or character:GetAttribute("Role") ~= "Goalkeeper" or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return shaped end
+        local team = character:GetAttribute("Team")
+        if team ~= "Red" and team ~= "Blue" then return shaped end
+        local camera = workspace.CurrentCamera
+        if not camera then return shaped end
+        local forward = unit(flat(camera.CFrame.LookVector), Vector3.new(0, 0, -1))
+        local right = unit(flat(camera.CFrame.RightVector), Vector3.xAxis)
+        local determinant = right.X * forward.Z - right.Z * forward.X
+        if math.abs(determinant) < 0.001 then return shaped end
+        local localMove = Vector2.new((wished.X * forward.Z - wished.Z * forward.X) / determinant,
+            (right.X * wished.Z - right.Z * wished.X) / determinant)
+        return if nativeShape then nativeShape(localMove) else localMove
+    end)
+    local function observeSave(ball, character)
+        local attempt = M.lastDive
+        if not attempt or now() - attempt.at > 1.3 then return end
+        local position = Ball.getPosition()
+        if not position then return end
+        local closest = math.huge
+        for _, name in ipairs(partNames) do
+            local part = character:FindFirstChild(name)
+            if part and part:IsA("BasePart") then
+                closest = math.min(closest, gapToBox(part.CFrame, part.Size / 2, position))
+            end
+        end
+        attempt.closestGap = math.min(attempt.closestGap or math.huge, closest)
+        if closest < ball.Size.X / 2 + Hands.MEET_SLACK then attempt.contactObserved = true end
+        local _, _, event = Ball.freeSim()
+        if event and event.pid == attempt.pid + 1 and event.by == attempt.characterId then
+            attempt.parryConfirmed = true
+        end
+    end
+    local function step()
+        wished, faceWish = Vector3.zero, nil
+        M.yieldMovement = false
+        local character = player.Character
+        local r = root()
+        if not character or not r then M.status = "Waiting to spawn"; return end
+        local team = character:GetAttribute("Team")
+        local ball = Ball.getBall()
+        if not ball or (team ~= "Red" and team ~= "Blue") then M.status = "Join a team to begin"; return end
+        activeCharacter = character
+        local goal = geometry(character)
+        if not goal then return end
+        observeSave(ball, character)
+        local pid = ball:GetAttribute("PossessionId")
+        local ownId = character:GetAttribute("DribbleId")
+        local mine = ownId and ownId ~= 0 and ball:GetAttribute("Possessor") == ownId
+        if mine then
+            local save = M.lastThreat
+            if save and not save.saveConfirmed and now() - save.at < 4 and pid == save.pid + 1
+                and save.characterId == ownId then
+                save.saveConfirmed = true
+                save.savedAt = now()
+                push(M.saves, save, 30)
+            end
+            M.status = "Ball secured"
+            return
+        end
+        if not cfg.autoGK then
+            M.plan, M.pendingSave, M.target, M.gatherTarget, M.aerial = nil, nil, nil, nil, nil
+            M.status = "Automatic goalkeeper off"
+            return
+        end
+        if character:GetAttribute("Role") ~= "Goalkeeper" then M.status = "Select goalkeeper to defend automatically"; return end
+        local bodyState = character:GetAttribute("BodyState")
+        local animator = Mannequin.getAnimator(character)
+        if not animator or not animator.body or bodyState ~= "Animated" or animator.body.active then
+            M.status = "Finishing save / recovering"
+            return
+        end
+        local position = Ball.getPosition()
+        if not position then return end
+        local restartAction, restartTarget = restartPolicy(character, r, goal, position)
+        if restartAction then
+            M.pendingSave, M.plan = nil, nil
+            if restartAction == "Yield" then M.yieldMovement = true
+            elseif restartTarget then
+                local cm = character:FindFirstChildOfClass("ControllerManager")
+                if cm and cfg.gkPosition then wished = currentMoveWish(r, cm, restartTarget) end
+            end
+            return
+        end
+        local plane = goal.x - goal.side * 3.5
+        local target = standbyTarget(position, goal, 3.5, r.Position.Y)
+        local state, _, event = Ball.freeSim()
+        if now() - lastPlanning >= math.max(1 / 30, (M.costMs or 0) / 1000 * 2) then
+            local began = os.clock()
+            lastPlanning = now()
+            local prediction = state and forecast(state, now(), 2.2, goal)
+            M.prediction = prediction
+            M.plan = nil
+            local gather = safeGather(prediction, character, r, goal, ball)
+            local aerial = aerialOpportunity(prediction, character, r, goal, ball)
+            M.gatherTarget, M.aerial = gather, aerial
+            if gather then target = gather end
+            if prediction and prediction.threat and not gather then
+                local intercept = lineIntercept(prediction, plane, goal.side) or prediction.threat.p
+                if not gather then target = Vector3.new(plane, r.Position.Y, math.clamp(intercept.Z, goal.z - goal.half + 0.8, goal.z + goal.half - 0.8)) end
+                local candidate = chooseSave(prediction, character, goal, target, math.clamp((M.saveCostMs or 16) / 1000, 0.005, 0.09))
+                M.plan = scheduleSave(candidate, prediction, event and event.pid or pid, r.Position)
+                if event and (not M.lastThreat or M.lastThreat.pid ~= event.pid) then
+                    M.lastThreat = {at = now(), pid = event.pid, by = event.by, characterId = ownId,
+                        position = prediction.threat.p, crossingIn = prediction.threat.t}
+                    push(M.history, M.lastThreat, 50)
+                end
+            end
+            if not prediction or not prediction.threat then M.pendingSave = nil end
+            if aerial and (not M.plan or M.plan.margin <= 0.08) then target = aerial.target end
+            M.target = target
+            M.costMs = (os.clock() - began) * 1000
+            if prediction and prediction.threat then
+                M.saveCostMs = (M.saveCostMs or M.costMs) * 0.6 + M.costMs * 0.4
+            end
+        else
+            target = M.target or target
+        end
+        local cm = character:FindFirstChildOfClass("ControllerManager")
+        if cm and cfg.gkPosition then
+            wished = currentMoveWish(r, cm, target)
+        end
+        faceWish = unit(flat(position - r.Position), goal.out)
+        local aerial = M.aerial
+        if aerial and (not M.plan or M.plan.margin <= 0.08) then attemptJump(aerial, character, r, goal, ball) end
+        local plan = M.plan
+        M.status = if plan then string.format("%s save | %.2fs | margin %.2f", plan.kind, plan.contact, plan.margin) else "Positioning | watching the ball"
+        if plan and plan.margin > 0.08 and plan.actionAt - now() <= 0.015 and now() - lastDive > 0.5
+            and Mannequin.keeperReady() and not S.busy then
+            local sent, reason = nativeDive(character, plan)
+            if sent then
+                lastDive = now()
+                M.pendingSave = nil
+                M.lastDive = {at = now(), pid = pid, kind = plan.kind, part = plan.part, margin = plan.margin,
+                    predictedContact = plan.point, contactIn = plan.contact, characterId = ownId}
+                push(M.samples, M.lastDive, 40)
+            elseif reason then M.error = reason end
+        end
+    end
+    local renderName = "PoopAutoGoalkeeper"
+    Run:BindToRenderStep(renderName, Enum.RenderPriority.Input.Value, function()
+        if not life.alive() then return end
+        local ok, err = pcall(step)
+        if not ok then M.error = tostring(err); wished, faceWish = Vector3.zero, nil end
+    end)
+    local faceRenderName = "PoopAutoGoalkeeperFace"
+    Run:BindToRenderStep(faceRenderName, Enum.RenderPriority.Input.Value + 2, function()
+        if not life.alive() or not faceWish or not cfg.autoGK or not cfg.gkPosition then return end
+        local character = player.Character
+        local cm = character and character:FindFirstChildOfClass("ControllerManager")
+        if cm and character:GetAttribute("BodyState") == "Animated" then cm.FacingDirection = faceWish end
+    end)
+    life.onCleanup(function()
+        wished, faceWish = Vector3.zero, nil
+        Run:UnbindFromRenderStep(renderName)
+        Run:UnbindFromRenderStep(faceRenderName)
+    end)
+    return M
+end)()
+S.gk = GK
+
+local PokeRecovery: any = {steps = 0, calls = 0, lateWindow = module(gameModules.Dribble, "Rules").Server.LateMax}
+function PokeRecovery.releaseMatches(record, release)
+    return record.contactAt ~= nil and finite(record.ownId) and record.ownId > 0 and finite(release.pid)
+        and release.pid > record.pid and release.by == record.ownId and not release.freshShot
+        and finite(release.at) and release.at >= record.at - PokeRecovery.lateWindow and release.at <= release.now + 0.1
+        and release.now <= record.at + 1.5
+end
+function PokeRecovery.applyCushion(record)
+    if PokeRecovery.restoreCushion then PokeRecovery.restoreCushion() end
+    local rules = module(gameModules.Dribble, "Rules").Poke
+    local restoreBoost = life.override(rules, "TackleBoost", {0.55, 0.55})
+    local restoreSpread = life.override(rules, "TackleSpread", 0)
+    local restored = false
+    local restore
+    restore = function()
+        if restored then return end
+        restored = true
+        restoreSpread()
+        restoreBoost()
+        if PokeRecovery.restoreCushion == restore then PokeRecovery.restoreCushion = nil end
+    end
+    PokeRecovery.restoreCushion = restore
+    record.cushionBoost, record.cushionUntil = 0.55, record.at + 0.35
+    return restore
+end
+function PokeRecovery.cushion(record)
+    local restore = PokeRecovery.applyCushion(record)
+    task.spawn(function()
+        while life.alive() and cfg.autoPoke and not S.busy and not ownState()
+            and player.Character and player.Character:GetAttribute("DribbleId") == record.ownId
+            and player.Character:GetAttribute("BodyState") == "Animated"
+            and Ball.getBall() == record.ball and now() < record.cushionUntil do task.wait() end
+        restore()
+    end)
+end
+function PokeRecovery.allowed(record, context)
+    return record and record.releaseConfirmed and record.recoveryUntil and context.at < record.recoveryUntil
+        and context.enabled and not context.busy and not context.owned and not context.keeper
+        and context.animated and context.sameBall and context.pid == record.recoveryPid and context.owner <= 0
+        and context.releasedBy == record.ownId and context.ownId == record.ownId and not context.freshShot
+        and (context.source == "free" or context.source == "released") and context.playing
+        and context.distance <= 14 and context.height <= 12
+end
+
+do
+    local original = Mannequin.shapeMove
+    life.override(Mannequin, "shapeMove", function(input)
+        PokeRecovery.calls += 1
+        local function native() return if original then original(input) else input end
+        local record = S.lastPoke
+        if not record or not record.recoveryUntil or now() >= record.recoveryUntil then return native() end
+        local ball, character, r = Ball.getBall(), player.Character, root()
+        local position, velocity = Ball.freeState()
+        if not ball or not r or not position then return native() end
+        local delta = (position - r.Position) * Vector3.new(1, 0, 1)
+        local state = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
+        local flight = Flight.decode(ball:GetAttribute("KickFlight"))
+        local context = {at = now(), releasedBy = ball:GetAttribute("ReleasedBy"), ownId = character:GetAttribute("DribbleId"),
+            freshShot = flight ~= nil and flight.by == record.ownId and flight.t >= record.at - 0.05, enabled = cfg.autoPoke, busy = S.busy or Input:GetFocusedTextBox() ~= nil or GuiService.MenuIsOpen,
+            owned = ownState() ~= nil, keeper = character:GetAttribute("Role") == "Goalkeeper", animated = character:GetAttribute("BodyState") == "Animated",
+            sameBall = ball == record.ball, pid = ball:GetAttribute("PossessionId"), owner = ball:GetAttribute("Possessor") or 0,
+            source = Ball.getSource(), playing = not state or state:GetAttribute("Phase") == "Play", distance = delta.Magnitude,
+            height = position.Y - (Ball.groundBallY(position) - 0.84)}
+        PokeRecovery.lastContext = context
+        if not PokeRecovery.allowed(record, context) then return native() end
+        local wished = Vector3.zero
+        if delta.Magnitude > 2 then
+            local lead = position + (velocity or Vector3.zero) * Vector3.new(1, 0, 1) * 0.08
+            local toward = (lead - r.Position) * Vector3.new(1, 0, 1)
+            if toward.Magnitude > 0.01 then wished = toward.Unit end
+        end
+        local camera = workspace.CurrentCamera
+        if not camera then return native() end
+        local forward = camera.CFrame.LookVector * Vector3.new(1, 0, 1)
+        local right = camera.CFrame.RightVector * Vector3.new(1, 0, 1)
+        if forward.Magnitude < 0.01 or right.Magnitude < 0.01 then return native() end
+        forward, right = forward.Unit, right.Unit
+        local determinant = right.X * forward.Z - right.Z * forward.X
+        if math.abs(determinant) < 0.001 then return native() end
+        local movement = Vector2.new((wished.X * forward.Z - wished.Z * forward.X) / determinant,
+            (right.X * wished.Z - right.Z * wished.X) / determinant)
+        PokeRecovery.steps += 1
+        record.recoverySteps = (record.recoverySteps or 0) + 1
+        return if original then original(movement) else movement
+    end)
+end
+S.pokeRecovery = PokeRecovery
+
+Reborn.NotificationsEnabled = cfg.notifications
+local okWindow, window = pcall(Reborn.CreateWindow, Reborn, {Title = "Ragdoll Soccer", Size = Vector2.new(620, 410), Parent = player:WaitForChild("PlayerGui")})
+if not okWindow then life.cleanup(); error(window) end
+window.ToggleKey = "Right Shift"
+S.window = window
+S.ui = {library = "Reborn", revision = "cb5d73f9b387c11ef16e4b887d7bf28fb38fb7a7", tabs = {}}
+life.connect(window.Gui.Destroying, function() life.cleanup() end)
+local aimGui = Instance.new("ScreenGui")
+aimGui.Name = "PoopAimDot"
+aimGui.IgnoreGuiInset = true
+aimGui.ResetOnSpawn = false
+aimGui.DisplayOrder = 150
+local aimDot = Instance.new("Frame")
+aimDot.Name = "Dot"
+aimDot.AnchorPoint = Vector2.new(0.5, 0.5)
+aimDot.Position = UDim2.fromScale(0.5, 0.5)
+aimDot.Size = UDim2.fromOffset(6, 6)
+aimDot.BorderSizePixel = 0
+aimDot.BackgroundColor3 = Color3.fromRGB(245, 247, 246)
+aimDot.Active = false
+aimDot.Parent = aimGui
+local roundDot = Instance.new("UICorner")
+roundDot.CornerRadius = UDim.new(1, 0)
+roundDot.Parent = aimDot
+local dotOutline = Instance.new("UIStroke")
+dotOutline.Color = Color3.fromRGB(12, 18, 16)
+dotOutline.Thickness = 1.5
+dotOutline.Parent = aimDot
+aimGui.Parent = player.PlayerGui
+life.onCleanup(function() aimGui:Destroy() end)
+notifySink = function(title, message) Reborn:Notify({Title = title, Description = message, Duration = 3}) end
+local function tab(name, icon)
+    local result = window:Tab(name, icon)
+    result:SetColumns(2)
+    S.ui.tabs[#S.ui.tabs + 1] = result
+    return result
+end
+local shootingTab = tab("Shooting", "crosshair")
+local passingTab = tab("Passing", "users")
+local keeperTab = tab("Keeper", "shield-check")
+local playerTab = tab("Player", "user")
+local visualsTab = tab("Visuals", "eye")
+local function changed(key, value)
+    cfg[key] = value
+    if key == "notifications" then Reborn.NotificationsEnabled = value end
+    save()
+end
+local function toggle(section, title, key, onChange)
+    local control = section:Toggle({Text = title, Flag = key, Value = cfg[key], Callback = function(value)
+        changed(key, value)
+        if onChange then onChange(value) end
+    end})
+    S.controls[key] = control
+    return control
+end
+local function dropdown(section, title, key, options)
+    local control = section:Dropdown({Text = title, Flag = key, Options = options, Value = cfg[key], Callback = function(value) changed(key, value) end})
+    S.controls[key] = control
+    return control
+end
+local function slider(section, title, key, minimum, maximum, step, onChange)
+    local control = section:Slider({Text = title, Flag = key, Min = minimum, Max = maximum, Step = step, Value = cfg[key], Callback = function(value)
+        changed(key, value)
+        if onChange then onChange(value) end
+    end})
+    S.controls[key] = control
+    return control
+end
+local shooting = shootingTab:Section("Shot")
+toggle(shooting, "Shooting (F)", "shooting")
+dropdown(shooting, "Shot type", "style", styles)
+slider(shooting, "Power (%)", "power", 50, 108, 1)
+local aiming = shootingTab:Section("Aim")
+dropdown(aiming, "Aim", "corner", corners)
+slider(aiming, "Spin", "spin", 0, 70, 1)
+toggle(aiming, "Reduce shot spread", "assist")
+
+local passing = passingTab:Section("Pass")
+dropdown(passing, "Pass type", "smartPassType", {"Automatic", "Ground", "Driven", "Chip", "Lofted", "Curved", "Roll", "Throw", "Punt"})
+slider(passing, "Power (%)", "passStrength", 25, 150, 1)
+local passTarget = passingTab:Section("Target")
+slider(passTarget, "Target range", "passCone", 5, 25, 1)
+
+local keeper = keeperTab:Section("Keeper")
+toggle(keeper, "Auto GK (H)", "autoGK")
+toggle(keeper, "Positioning", "gkPosition")
+local keeperSession = keeperTab:Section("Session")
+toggle(keeperSession, "Anti-AFK", "antiAFK")
+toggle(keeperSession, "Rejoin as GK", "rejoinGK")
+
+local movement = playerTab:Section("Movement")
+toggle(movement, "Speed boost", "speedEnabled", applySpeed)
+slider(movement, "Speed multiplier", "speed", 0.5, 4, 0.1, applySpeed)
+toggle(movement, "Always sprint", "sprint")
+movement:Button({Text = "Reset movement", Callback = function()
+    changed("speedEnabled", false)
+    changed("sprint", false)
+    applySpeed()
+    S.controls.speedEnabled:Set(false, false)
+    S.controls.sprint:Set(false, false)
+end})
+local ball = playerTab:Section("Ball")
+toggle(ball, "Auto poke", "autoPoke")
+ball:Button({Text = "Poke", Callback = function() S.pokeCarrier(false) end})
+local menu = playerTab:Section("Menu")
+toggle(menu, "Notifications", "notifications")
+menu:Button({Text = "Save settings", Callback = function()
+    local ok = save()
+    notify(if ok then "Saved" else "Could not save", if ok then "Settings saved." else "Your current settings are still active.")
+end})
+menu:Button({Text = "Unload", Callback = function() life.cleanup() end})
+
+local guidesSection = visualsTab:Section("Guides")
+toggle(guidesSection, "Shot path", "trajectory")
+toggle(guidesSection, "Ball marker", "marker")
+toggle(guidesSection, "Centre dot", "aimDot")
+local performance = visualsTab:Section("Performance")
+toggle(performance, "FPS mode", "performance", Performance.apply)
+toggle(performance, "Reduce effects", "reducePostEffects", Performance.apply)
+toggle(performance, "Shadows", "keepShadows", Performance.apply)
+slider(performance, "Frame limit", "fpsCap", 60, 360, 10, Performance.apply)
+if retainedClosed then window:SetVisible(false) end
+
+life.connect(Input.InputBegan, function(key, processed)
+    if processed or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
+    if key.KeyCode == Enum.KeyCode.RightShift then window:Toggle(); return end
+    if key.KeyCode == Enum.KeyCode.H then
+        changed("autoGK", not cfg.autoGK)
+        S.controls.autoGK:Set(cfg.autoGK, false)
+        return
+    end
+    if key.KeyCode == Enum.KeyCode.F and cfg.shooting then S.shoot(false) end
+    if key.KeyCode == Enum.KeyCode.B then S.passToLook() end
+end)
+
+local pokeElapsed = 0
+life.connect(Run.Heartbeat, function(dt)
+    pokeElapsed += dt
+    if pokeElapsed < 0.05 then return end
+    pokeElapsed = 0
+    if cfg.autoPoke then
+        local ok, err = pcall(S.pokeCarrier, true)
+        if not ok then S.pokeError = tostring(err) end
+    end
+end)
+local elapsed = 0
+life.connect(Run.Heartbeat, function(dt)
+    elapsed += dt
+    if elapsed < 0.1 then return end
+    elapsed = 0
+    local target = S.findPassTarget()
+    aimDot.Visible = cfg.aimDot
+    aimDot.BackgroundColor3 = if target then Color3.fromRGB(104, 211, 171) else Color3.fromRGB(245, 247, 246)
+end)
+save()
+notify("Ragdoll Soccer", "F: shoot | B: pass | H: keeper | Right Shift: menu")
+return S
