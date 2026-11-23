@@ -103,7 +103,7 @@ local defaults = {
     passDecision = "Balanced", smartPassType = "Automatic", 
     antiAFK = true, rejoinGK = true, performance = true, reducePostEffects = true, keepShadows = false, fpsCap = 240,
 }
-local S: any = {version = "0.30", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", passStatus = "B | Look at a teammate to pass", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
+local S: any = {version = "0.32", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", passStatus = "B | Look at a teammate to pass", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
 local settingsPath = "Poop/soccer.settings.json"
 pcall(function()
     if isfile(settingsPath) then
@@ -915,6 +915,97 @@ targetMarker.Shape = Enum.PartType.Ball
 local ballMarker = guidePart("Ball", Vector3.new(0.08, 2.2, 2.2), Color3.fromRGB(104, 211, 171))
 ballMarker.Shape = Enum.PartType.Cylinder
 
+local Magnet = {range = 7.5, cooldown = 0.35, lastAt = -math.huge, bindings = {}}
+local MagnetSim = module(gameModules, "BallSim")
+local magnetRemote = Net:RemoteEvent("DribbleKnock")
+function Magnet.allowed(context)
+    return context.alive and not context.busy and not context.owned and not context.typing and not context.menu
+        and context.animated and context.onPitch and context.playing and context.loose and context.free
+        and finite(context.distance) and context.distance > 1 and context.distance <= Magnet.range
+        and finite(context.height) and context.height <= 2.4 and finite(context.pid) and context.pid > 0
+        and context.sinceLast >= Magnet.cooldown and not context.justShot
+end
+function Magnet.velocity(position, target)
+    local offset = Vector3.new(target.X - position.X, 0, target.Z - position.Z)
+    if offset.Magnitude < 0.01 then return Vector3.zero end
+    return offset.Unit * math.clamp(offset.Magnitude * 5, 10, 24)
+end
+function Magnet.matches(record, event)
+    return event ~= nil and event.pid > record.pid and event.by == record.ownId and event.kind == "knock"
+        and math.abs(event.t - record.clock) < 0.1 and (event.pos - record.position).Magnitude < 0.15
+        and (event.vel - record.velocity).Magnitude < 0.1
+end
+function Magnet.pull(silent)
+    local character, r = player.Character, root()
+    local ball = Ball.getBall()
+    local position = Ball.getPosition()
+    if not character or not r or not ball or not position then return false end
+    local phase = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
+    local floor = Ball.groundBallY(position)
+    local own = character:GetAttribute("DribbleId")
+    local source = Ball.getSource()
+    local context = {
+        alive = life.alive(), busy = S.busy, owned = ownState() ~= nil,
+        typing = Input:GetFocusedTextBox() ~= nil, menu = GuiService.MenuIsOpen,
+        animated = character:GetAttribute("BodyState") == "Animated",
+        onPitch = character:GetAttribute("Team") == "Blue" or character:GetAttribute("Team") == "Red",
+        playing = not phase or phase:GetAttribute("Phase") == "Play",
+        loose = ball:GetAttribute("Possessor") == 0, free = source == "free" or source == "released" or source == "server",
+        distance = ((position - r.Position) * Vector3.new(1, 0, 1)).Magnitude,
+        height = math.abs(position.Y - floor), pid = ball:GetAttribute("PossessionId"),
+        sinceLast = os.clock() - Magnet.lastAt, justShot = S.lastShot and now() - S.lastShot.at < 0.8,
+    }
+    if not Magnet.allowed(context) or type(own) ~= "number" or own <= 0 then
+        if not silent then notify("Ball magnet", "No loose ball in reach.") end
+        return false
+    end
+    local target = r.Position + r.CFrame.LookVector * 0.9
+    local velocity = Magnet.velocity(position, target)
+    Magnet.lastAt = os.clock()
+    local record = {at = now(), clock = Ball.drawnTime(), position = position, velocity = velocity,
+        ownId = own, pid = context.pid, distance = context.distance, ball = ball, accepted = false, owned = false}
+    Magnet.last = record
+    magnetRemote:FireServer(record.pid, position, velocity, record.clock)
+    task.spawn(function()
+        local began = os.clock()
+        while life.alive() and Magnet.last == record and ball.Parent and os.clock() - began < 0.9 do
+            local event = MagnetSim.decode(ball:GetAttribute("BallSim"))
+            if Magnet.matches(record, event) then
+                record.accepted = true
+                record.receipt = {pid = event.pid, at = event.t, by = event.by, position = event.pos, velocity = event.vel,
+                    positionError = (event.pos - position).Magnitude, velocityError = (event.vel - velocity).Magnitude}
+            end
+            if player.Character == character and ball:GetAttribute("Possessor") == own then record.owned = true end
+            if record.accepted and record.owned then break end
+            task.wait(0.03)
+        end
+    end)
+    return true
+end
+local function reserveMagnetKey(binding)
+    if not binding:IsA("InputBinding") or Magnet.bindings[binding] then return end
+    local action = binding.Parent
+    if not action or not action:IsA("InputAction") or (action.Name ~= "SkillRight" and action.Name ~= "LowDiveRight" and action.Name ~= "SimpleLow") then return end
+    local record = {}
+    Magnet.bindings[binding] = record
+    local function update()
+        if binding.KeyCode == Enum.KeyCode.C then
+            record.original = Enum.KeyCode.C
+            binding.KeyCode = Enum.KeyCode.Unknown
+        end
+    end
+    life.connect(binding:GetPropertyChangedSignal("KeyCode"), update)
+    life.onCleanup(function()
+        if record.original and binding.Parent and binding.KeyCode == Enum.KeyCode.Unknown then binding.KeyCode = record.original end
+    end)
+    update()
+end
+for _, binding in ipairs(player.PlayerScripts:GetDescendants()) do reserveMagnetKey(binding) end
+life.connect(player.PlayerScripts.DescendantAdded, function(binding)
+    task.defer(function() if life.alive() and binding.Parent then reserveMagnetKey(binding) end end)
+end)
+S.magnet = Magnet
+
 local RestartAccess = {reads = 0, installed = false}
 function RestartAccess.allowed(phase, kind, taker)
     return (phase == "Dead" or phase == "Restart") and (kind == "FreeKick" or kind == "IndirectFreeKick" or kind == "ThrowIn" or kind == "Throw-in" or kind == "Throw" or kind == "Penalty" or kind == "GoalKick" or kind == "Corner" or kind == "KickOff")
@@ -1151,32 +1242,232 @@ local Visual = (function()
             + b.p * (-2 * u3 + 3 * u2) + b.v * (dt * (u3 - u2))
         return Vector3.new(point.X, math.max(point.Y, trace.ground), point.Z)
     end
-    local function calculateVisual(sample, options, cancelled, synchronous)
+    local nativeMissAt
+    for _, value in pairs(debug.getupvalues(Flight.solve)) do
+        if type(value) == "function" and debug.info(value, "n") == "missAt" then nativeMissAt = value; break end
+    end
+    assert(nativeMissAt, "Preview physics unavailable")
+    local warmSolutions, warmCount = {}, 0
+    local function visualFlight(cancelled, synchronous)
         local NativeFlight = Flight
-        local slice = os.clock()
+        local Flight = table.clone(NativeFlight)
+        local rollStep, airStep, bounceOff = NativeFlight.rollStep, NativeFlight.airStep, NativeFlight.bounce
+        local missAt = nativeMissAt
+        local slice, work = os.clock(), 0
         local function budget()
             if cancelled and cancelled() then error("Preview superseded", 0) end
             if synchronous then return end
-            local cost = (os.clock() - slice) * 1000
-            if cost >= 1.5 then
-                V.maxWorkSliceMs = math.max(V.maxWorkSliceMs or 0, cost)
-                task.wait(); slice = os.clock()
+            local at = os.clock()
+            local cost = at - slice
+            if cost >= 0.003 then
+                work += cost
+                V.planWorkMs = work * 1000
+                V.maxWorkSliceMs = math.max(V.maxWorkSliceMs or 0, cost * 1000)
+                Run.Heartbeat:Wait()
+                slice = os.clock()
                 if cancelled and cancelled() then error("Preview superseded", 0) end
             end
         end
-        local Flight = table.clone(NativeFlight)
-        Flight.solve = function(...)
-            budget()
-            local result = table.pack(NativeFlight.solve(...))
-            budget()
-            return table.unpack(result, 1, result.n)
+        function Flight.simulate(a1, a2, a3, a4, a5, a6, a7, a8)
+            local v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13
+            local v14 = math.min(a7 or 12, 12)
+            local v15 = {a1}
+            local v16 = {a2}
+            local v17 = {a3}
+            local v18 = a1
+            local v19 = a2
+            local v20 = a3
+            local v21 = nil
+            local v22 = nil
+            local v23 = nil
+            local v24 = 0
+            local v25 = 0
+            local v26 = false
+
+            if v18.Y <= a6 + 0.05 then
+                v26 = v19.Y <= 2
+            end
+
+            if v26 then
+                v22 = 0
+                v18 = Vector3.new(v18.X, a6, v18.Z)
+                v1, v2 = Flight.toGround(v19, v20)
+                v19 = v1
+                v20 = v2
+            end
+
+            v1 = 1
+            local v27, v28, v29, v30 = a5, a6, a8, a4
+
+            while v25 < v14 - 1e-09 do
+                if v1 % 8 == 1 then budget() end
+                if not v26 then
+                    v8 = Vector3.new(0, -v27.gravity, 0)
+                    v10 = v19 + (v8 + Flight.airAccel(v19, v20, v27)) * 0.004166666666666667
+                    v11 = v8 + Flight.airAccel(v10, v20 * 0.9993751952718163, v27)
+                    v2 = v18 + v10 * 0.008333333333333333
+                    v3 = v19 + v11 * 0.008333333333333333
+                    v4 = v20 * 0.9987507809245809
+
+                    if v2.Y < v28 and v3.Y < 0 then
+                        v5 = math.clamp((v18.Y - v28) / math.max(v18.Y - v2.Y, 1e-06), 0, 1)
+                        v6, v7, v8 = airStep(v18, v19, v20, v5 * 0.008333333333333333, v27)
+                        v21 = v21 or v25 + v5 * 0.008333333333333333
+                        v24 = v24 + 1
+                        v9, v10 = bounceOff(v7, v8, v27)
+                        v6 = Vector3.new(v6.X, v28, v6.Z)
+
+                        if v9.Y < 2 or v24 > 40 then
+                            v26 = true
+                            v22 = v25 + v5 * 0.008333333333333333
+                            v11, v12 = Flight.toGround(v9, v10)
+                            v9 = v11
+                            v10 = v12
+                        end
+
+                        v8 = (1 - v5) * 0.008333333333333333
+
+                        if not v26 then
+                            v11, v12, v13 = airStep(v6, v9, v10, v8, v27)
+                        else
+                            v11, v12, v13 = rollStep(v6, v9, v10, v8, v27)
+                        end
+
+                        v2 = v11
+                        v3 = v12
+                        v4 = v13
+                    end
+
+                    v18 = v2
+                    v19 = v3
+                    v20 = v4
+                elseif not Flight.atRest(v19, v20) then
+                    v2, v3, v4 = rollStep(v18, v19, v20, 0.008333333333333333, v27)
+                    v18 = v2
+                    v19 = v3
+                    v20 = v4
+                else
+                    v23 = v23 or v25
+                    v19 = Vector3.new(0, 0, 0)
+                    v20 = Vector3.new(0, 0, 0)
+                end
+
+                v25 = v25 + 0.008333333333333333
+                v1 = v1 + 1
+                v15[v1] = v18
+                v16[v1] = v19
+                v17[v1] = v20
+
+                if v23 then
+                    break
+                end
+
+                if v29 then
+                    v3 = v18 - v29.from
+
+                    if v29.dist <= ((Vector3.new(v3.X, 0, v3.Z)):Dot(v29.dir)) then
+                        break
+                    end
+                end
+            end
+
+            return {
+                t0 = v30,
+                n = v1,
+                pos = v15,
+                vel = v16,
+                spin = v17,
+                landT = v21,
+                rollAt = v22,
+                restAt = v23,
+                groundY = v28,
+            }
         end
-        Flight.simulate = function(...)
+        function Flight.solve(a1, a2, a3, a4, a5, a6, a7, a8, a9)
+            local v1, v2, v3, v4, v5, v6
+            local v7 = a2 - a1
+            local v8 = Vector3.new(v7.X, 0, v7.Z)
+            local Magnitude = v8.Magnitude
+            local u19 = if not (Magnitude > 0.001) then Vector3.new(0, 0, -1) else v8 / Magnitude
+            local u20 = {from = a1, dir = u19, dist = Magnitude}
+            local u29 = Magnitude / math.max(a3, 1)
+            local v9 = math.atan2(a2.Y - a1.Y + a6.gravity * 0.5 * u29 * u29, (math.max(Magnitude, 1)))
+            local v10 = 0
+            local v11 = a8 or 1.2217304763960306
+            local v12 = nil
+            local cacheKey = table.concat({a2.X, a2.Y, a2.Z, a3, a4, a5, a6.gravity, a6.airDrag, a6.curve,
+                a6.friction, a6.roll, a6.rollDrag, a6.bounce, a7, a8 or 0, a9 or 0}, ":")
+            local cached = not synchronous and warmSolutions[cacheKey]
+            local seeded = cached and (cached.from - a1).Magnitude < 12 and os.clock() - cached.at < 8
+            if seeded then
+                local velocity = cached.velocity
+                v9 = math.atan2(velocity.Y, (velocity * Vector3.new(1, 0, 1)).Magnitude)
+                local angle = math.atan2(u19.Z, u19.X) - math.atan2(velocity.Z, velocity.X)
+                v10 = math.atan2(math.sin(angle), math.cos(angle))
+                V.warmHits = (V.warmHits or 0) + 1
+            end
+
+            local function fly(a1_2, a2_2)
+                local v1 = (CFrame.Angles(0, a2_2, 0)) * u19
+                local v2 = (v1 * math.cos(a1_2) + Vector3.new(0, 1, 0) * math.sin(a1_2))
+                    * a3
+                local v3 = Flight.spinFrom(v1, a4, a5)
+                v1 = Flight.simulate(a1, v2, v3, 0, a6, a7, math.min(u29 * 3 + 0.5, 12), u20)
+                local v4, v5, v6 = missAt(v1, a1, a2)
+
+                return v4, v5, v6, v2, v3
+            end
+
+            for i = 1, 8 do
+                budget()
+                v9 = math.clamp(v9, a9 or -0.17453292519943295, v11)
+                v1, v2, v3, v4, v5 = fly(v9, v10)
+
+                if v1 then
+                    v6 = math.sqrt(v2 * v2 + v3 * v3)
+
+                    if not v12 or v6 < v12.miss then
+                        v12 = {vel = v4, spin = v5, t = v1, miss = v6}
+                    end
+
+                    if v6 < 0.05 then
+                        break
+                    end
+
+                    v6 = math.max(Magnitude, 1)
+                    v9 = v9 + v2 / v6 * 0.9
+                    v10 = v10 - v3 / v6 * 0.9
+                else
+                    if v12 == nil or v12.t ~= v12.t then
+                        v12 = {t = (1 / 0), miss = (1 / 0), vel = v4, spin = v5}
+                    end
+
+                    v9 = math.min(v9 + 0.13962634015954636, v11)
+                end
+            end
+
+            local v13 = v12
+            if seeded and v13.miss > 0.05 then
+                warmSolutions[cacheKey] = nil
+                return Flight.solve(a1, a2, a3, a4, a5, a6, a7, a8, a9)
+            end
+            if not synchronous and v13.miss <= 0.05 then
+                if not warmSolutions[cacheKey] then
+                    if warmCount >= 48 then table.clear(warmSolutions); warmCount = 0 end
+                    warmCount += 1
+                end
+                warmSolutions[cacheKey] = {from = a1, velocity = v13.vel, at = os.clock()}
+            end
             budget()
-            local result = NativeFlight.simulate(...)
-            budget()
-            return result
+
+            return v13.vel, v13.spin, v13.t, v13.miss
         end
+        return Flight, budget
+    end
+    V.physics = visualFlight
+    local function calculateVisual(sample, options, cancelled, synchronous)
+        local Flight, budget = visualFlight(cancelled, synchronous)
+        if not synchronous then V.planWorkMs = 0 end
         local function opponents(includeAllies)
             local char = player.Character
             local team = char and char:GetAttribute("Team")
@@ -1316,6 +1607,7 @@ local Visual = (function()
             local reachTime = S.passingEngine and S.passingEngine.reachTime
             local stride = math.max(1, math.floor(plan.simulation.n / 28))
             for i = 1, plan.simulation.n, stride do
+                budget()
                 local time = (i - 1) * Flight.STEP
                 if time > plan.flightTime then break end
                 local point = plan.simulation.pos[i]
@@ -1392,7 +1684,13 @@ local Visual = (function()
             if best and not preview and not configuration then previewChoice = {target = best.target, key = key, out = goal.out, side = best.side} end
             return best, if best then nil else "No clear route through the goal at this power; move closer or change technique"
         end
-        return calculate(sample, false, options)
+        local result, message = calculate(sample, false, options)
+        if result then
+            result.refit = function(fresh)
+                return fitShot(fresh, result.target, result.goal, result.family, result.speed, result.side, result.back)
+            end
+        end
+        return result, message
     end
     V.calculate = calculateVisual
     local function workerBudget(cancelled)
@@ -1423,7 +1721,7 @@ local Visual = (function()
                 local fresh = ballSample()
                 if fresh and fresh.ball == sample.ball and fresh.pid == sample.pid and (fresh.from - sample.from).Magnitude > 0.1 then
                     if cancelled() then error("Preview superseded", 0) end
-                    local adjusted = fitShot(fresh, plan.target, plan.goal, plan.family, plan.speed, plan.side, plan.back)
+                    local adjusted = plan.refit(fresh)
                     if adjusted then plan, sample = adjusted, fresh end
                 end
                 local velocity, spin = KickRules.checkStrike(plan.family, plan.velocity, plan.spin)
@@ -1440,6 +1738,7 @@ local Visual = (function()
                 V.error = nil
             elseif not ok and not tostring(result):find("Preview superseded", 1, true) then V.error = tostring(result); S.guideError = V.error end
             S.previewCostMs = (os.clock() - began) * 1000
+            V.nextAt = os.clock() + math.clamp((V.planWorkMs or 0) * 0.003, 0.2, 0.75)
         end)
     end
     local function vectorText(text)
@@ -3187,6 +3486,7 @@ end})
 local ball = playerTab:Section("Ball")
 toggle(ball, "Auto poke", "autoPoke")
 ball:Button({Text = "Poke", Callback = function() S.pokeCarrier(false) end})
+S.controls.ballMagnet = ball:Button({Text = "Ball magnet (C)", Callback = function() Magnet.pull(false) end})
 local menu = playerTab:Section("Menu")
 toggle(menu, "Notifications", "notifications")
 menu:Button({Text = "Save settings", Callback = function()
@@ -3206,9 +3506,10 @@ toggle(performance, "Shadows", "keepShadows", Performance.apply)
 slider(performance, "Frame limit", "fpsCap", 60, 360, 10, Performance.apply)
 if retainedClosed then window:SetVisible(false) end
 
-life.connect(Input.InputBegan, function(key, processed)
+local function onKeyInput(key, processed)
     if processed or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
     if key.KeyCode == Enum.KeyCode.RightShift then window:Toggle(); return end
+    if key.KeyCode == Enum.KeyCode.C then Magnet.pull(false); return end
     if key.KeyCode == Enum.KeyCode.H then
         changed("autoGK", not cfg.autoGK)
         S.controls.autoGK:Set(cfg.autoGK, false)
@@ -3216,7 +3517,9 @@ life.connect(Input.InputBegan, function(key, processed)
     end
     if key.KeyCode == Enum.KeyCode.F and cfg.shooting then S.shoot(false) end
     if key.KeyCode == Enum.KeyCode.B then S.passToLook() end
-end)
+end
+S.handleInput = onKeyInput
+life.connect(Input.InputBegan, onKeyInput)
 
 local pokeElapsed = 0
 life.connect(Run.Heartbeat, function(dt)
