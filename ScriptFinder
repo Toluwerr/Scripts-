@@ -3863,6 +3863,7 @@ do
         }, view)
         local sortButton = button(toolbar, "Sort", sorts[1], UDim2.fromOffset(0, 0), UDim2.new(0.52, -4, 1, 0))
         local fullButton = button(toolbar, "FullServers", "Hide full", UDim2.new(0.52, 4, 0, 0), UDim2.new(0.48, -4, 1, 0))
+        fullButton.Text = "Full: hidden"
         local status = label(view, "Status", "", UDim2.fromOffset(2, 74), UDim2.new(1, -4, 0, 20), true)
         local list = create("ScrollingFrame", {
             Name = "PublicServers", Position = UDim2.fromOffset(0, 99),
@@ -3873,7 +3874,7 @@ do
         }, view)
         create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6)}, list)
         local more = button(view, "More", "Load more", UDim2.new(0, 0, 1, -32), UDim2.new(1, 0, 0, 32))
-        local sortIndex, hideFull = 1, true
+        local sortIndex, hideFull, ascending = 1, true, false
         local entries, seen, cursor = {}, {}, ""
         local busy, sequence = false, 0
         local teleport = game:GetService("TeleportService")
@@ -3960,7 +3961,7 @@ do
         end
         local function fetch(reset)
             if not valid() or busy then return end
-            if not reset and cursor == "" then return end
+            if not reset and (cursor == "" or #entries >= 500) then return end
             busy = true
             sequence += 1
             local request = sequence
@@ -3976,7 +3977,7 @@ do
             task.spawn(function()
                 local ok, data = pcall(requestData, {
                     action = "publicServers", placeId = item.placeId, cursor = nextPage,
-                    ascending = sortIndex == 2, excludeFull = hideFull,
+                    ascending = ascending, excludeFull = hideFull,
                 })
                 if not valid() or request ~= sequence then return end
                 busy = false
@@ -4008,12 +4009,22 @@ do
             if busy then return end
             sortIndex = sortIndex % #sorts + 1
             sortButton.Text = sorts[sortIndex]
-            if sortIndex <= 2 then fetch(true) else renderRows() end
+            if sortIndex <= 2 then
+                ascending = sortIndex == 2
+                fetch(true)
+            else
+                renderRows()
+                if #entries > 0 then
+                    status.Text = tostring(#entries) .. " public servers loaded · Loaded results"
+                else
+                    fetch(true)
+                end
+            end
         end)
         fullButton.Activated:Connect(function()
             if busy then return end
             hideFull = not hideFull
-            fullButton.Text = hideFull and "Hide full" or "Show full"
+            fullButton.Text = hideFull and "Full: hidden" or "Full: shown"
             fetch(true)
         end)
         refresh.Activated:Connect(function() fetch(true) end)
