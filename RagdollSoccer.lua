@@ -97,13 +97,16 @@ local defaults = {
     trajectory = true, marker = true, notifications = true,
     passStrength = 100, passType = "Direct pass", passPower = 85, passCurve = "Automatic", passSpin = 25,
     passTargets = "Teammates", passCone = 14, passLead = true, aimDot = true,
-    autoPoke = true,
+    autoPoke = true, walkfling = false,
+    jumpEnabled = true, jumpHeight = 3, playerHitboxes = false, playerHitboxSize = 12, hitboxVisuals = true, ballExpander = true, ballHitboxRadius = 4, ballHitboxVisual = true,
+    freezeBall = false,
+    antiRagdoll = true, antiSlide = true,
     passHeightMode = "Automatic", passAngle = 37, passAdaptive = false,
     autoGK = false, gkPosition = false,
     passDecision = "Balanced", smartPassType = "Automatic", 
     antiAFK = true, rejoinGK = true, performance = true, reducePostEffects = true, keepShadows = false, fpsCap = 240,
 }
-local S: any = {version = "0.32", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", passStatus = "B | Look at a teammate to pass", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
+local S: any = {version = "0.42", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", passStatus = "B | Look at a teammate to pass", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
 local settingsPath = "Poop/soccer.settings.json"
 pcall(function()
     if isfile(settingsPath) then
@@ -3294,6 +3297,493 @@ local GK = (function()
 end)()
 S.gk = GK
 
+local Protection = (function()
+    local M: any = {blocked = {fall = 0, slide = 0, knock = 0, kick = 0, launch = 0}, recoveryRequests = 0, recoveryAcks = 0}
+    local animation = module(gameModules, "MannequinAnimation")
+    local bodyClass = module(gameModules.MannequinAnimation, "Body")
+    local airKnock = module(gameModules.MannequinAnimation, "AirKnock")
+    local replay = module(client, "InstantReplay")
+    local recovered = Net:RemoteEvent("MannequinRecovered")
+    local originalFall, originalKnock, originalKick = bodyClass.fall, bodyClass.knock, bodyClass.kickFall
+    local originalStep, originalLaunched = airKnock.step, animation.launched
+    local function ownBody(body)
+        return life.alive() and body.model == player.Character and not replay.playing()
+    end
+    local function incoming(kind)
+        M.blocked[kind] += 1
+        M.lastBlock = {kind = kind, at = os.clock()}
+    end
+    life.override(bodyClass, "fall", function(body, impulse, point, part, swept)
+        if ownBody(body) and (cfg.antiRagdoll or (cfg.antiSlide and swept == true)) then
+            incoming(if swept == true then "slide" else "fall")
+            M.recoverCharacter = player.Character
+            M.recoverUntil = os.clock() + 0.8
+            return
+        end
+        return originalFall(body, impulse, point, part, swept)
+    end)
+    life.override(bodyClass, "knock", function(body, ...)
+        if ownBody(body) and cfg.antiRagdoll then incoming("knock"); return end
+        return originalKnock(body, ...)
+    end)
+    life.override(bodyClass, "kickFall", function(body, ...)
+        if ownBody(body) and cfg.antiRagdoll then incoming("kick"); return false end
+        return originalKick(body, ...)
+    end)
+    life.override(airKnock, "step", function(detector)
+        local contact = originalStep(detector)
+        if contact and ownBody(detector) and cfg.antiRagdoll then incoming("knock"); return nil end
+        return contact
+    end)
+    life.override(animation, "launched", function(velocity, scale)
+        local r = root()
+        if cfg.antiRagdoll and life.alive() and r and not replay.playing()
+            and (velocity - r.AssemblyLinearVelocity).Magnitude < 0.001 then
+            if originalLaunched(velocity, scale) then incoming("launch") end
+            return false
+        end
+        return originalLaunched(velocity, scale)
+    end)
+    life.connect(recovered.OnClientEvent, function(reason)
+        M.recoveryAcks += 1
+        M.lastRecoveryAck = {at = os.clock(), reason = tostring(reason)}
+    end)
+    function M.recover()
+        local c = player.Character
+        local animator = c and Mannequin.getAnimator(c)
+        local body = animator and animator.body
+        if not c or not body or not (cfg.antiRagdoll or cfg.antiSlide) or replay.playing() then return end
+        local mode = body.mode
+        if mode == "Slide" or mode == "Dive" or mode == "KeyDive" or mode == "Block" then return end
+        local state = c:GetAttribute("BodyState")
+        if cfg.antiRagdoll and (state == "Ragdoll" or body.active) then
+            M.recoverCharacter, M.recoverUntil = c, os.clock() + 0.8
+        end
+        if M.recoverCharacter ~= c or os.clock() > (M.recoverUntil or 0) then return end
+        if os.clock() < (M.nextRecovery or 0) then return end
+        if not body.active and state == "Ragdoll" then originalFall(body) end
+        if body.active then body:standNow(); animator:standNow() end
+        recovered:FireServer()
+        M.recoveryRequests += 1
+        M.nextRecovery = os.clock() + 0.15
+        if state == "Animated" and not body.active then M.recoverUntil = os.clock() + 0.15 end
+    end
+    life.connect(Run.Heartbeat, function()
+        local ok, err = pcall(M.recover)
+        if not ok then M.error = tostring(err) end
+    end)
+    return M
+end)()
+S.protection = Protection
+
+
+local Walkfling = (function()
+    local M: any = {enabled = false, pulses = 0, connections = {}, scale = 10000, lift = 10000, contacts = {}, corrections = 0, blocked = {}}
+    local viewName = "PoopWalkflingView"
+    local replay = module(client, "InstantReplay")
+    local pending
+    function M.restore()
+        local saved = pending
+        pending = nil
+        if saved and saved.root.Parent == saved.character then
+            saved.root.AssemblyLinearVelocity = saved.velocity
+            return saved.root, saved.velocity
+        end
+        return nil, nil
+    end
+    local function clearContacts()
+        if M.folder then M.folder:Destroy(); M.folder = nil end
+        table.clear(M.contacts)
+        M.contactCharacter = nil
+    end
+    function M.syncContacts()
+        local character = player.Character
+        local collider = character and character:FindFirstChild("Collider")
+        if not character or not collider or not collider:IsA("BasePart") then clearContacts(); return end
+        if M.contactCharacter ~= character or not M.folder or not M.folder.Parent then
+            clearContacts()
+            M.folder = Instance.new("Folder")
+            M.folder.Name = "PoopWalkflingContacts"
+            M.folder.Parent = character
+            M.contactCharacter = character
+        end
+        local seen = {}
+        for _, other in ipairs(Players:GetPlayers()) do
+            local model = other ~= player and other.Character
+            if model then
+                for _, part in ipairs(model:GetChildren()) do
+                    if part:IsA("BasePart") and part.CanCollide then
+                        seen[part] = true
+                        if not M.contacts[part] then
+                            local constraint = Instance.new("NoCollisionConstraint")
+                            constraint.Name = "WalkflingContact"
+                            constraint.Part0, constraint.Part1 = collider, part
+                            constraint.Parent = M.folder
+                            M.contacts[part] = constraint
+                        end
+                    end
+                end
+            end
+        end
+        for part, constraint in pairs(M.contacts) do
+            if not seen[part] then constraint:Destroy(); M.contacts[part] = nil end
+        end
+        M.nextContacts = os.clock() + 0.5
+    end
+    function M.stop()
+        M.enabled = false
+        if M.renderBound then
+            Run:UnbindFromRenderStep(viewName)
+            M.renderBound = false
+        end
+        for _, connection in ipairs(M.connections) do connection:Disconnect() end
+        table.clear(M.connections)
+        local restoredRoot, velocity = M.restore()
+        clearContacts()
+        return restoredRoot, velocity
+    end
+    local function guarded(fn)
+        return function(...)
+            local ok, err = pcall(fn, ...)
+            if not ok then M.error = tostring(err); M.stop() end
+        end
+    end
+    local function blocked(reason)
+        M.lastReason = reason
+        M.blocked[reason] = (M.blocked[reason] or 0) + 1
+    end
+    function M.step()
+        M.restore()
+        if not M.enabled or not life.alive() then return end
+        local at = os.clock()
+        if os.clock() >= (M.nextContacts or 0) or player.Character ~= M.contactCharacter then M.syncContacts() end
+        if replay.playing() then blocked("Replay"); return end
+        if S.busy or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then blocked("Input"); return end
+        local character = player.Character
+        local r = character and character:FindFirstChild("Root")
+        if not r or not r:IsA("BasePart") or character:GetAttribute("BodyState") ~= "Animated"
+            or r.Anchored or not isnetworkowner(r) then blocked("Own rig"); return end
+        local velocity = r.AssemblyLinearVelocity
+        local previous = M.previous
+        M.previous = {character = character, position = r.Position, at = at}
+        if previous and previous.character == character and at - previous.at < 0.3
+            and (r.Position - previous.position).Magnitude > math.max(16, velocity.Magnitude * (at - previous.at) * 3 + 3) then
+            M.corrections += 1
+            M.lastCorrection = {from = previous.position, to = r.Position, at = at}
+        end
+        if at < (M.pauseUntil or 0) then blocked("Jump"); return end
+        local motion = velocity * Vector3.new(1, 0, 1)
+        local manager = character:FindFirstChildOfClass("ControllerManager")
+        local wish = manager and manager.MovingDirection or Vector3.zero
+        if motion.Magnitude < 2 and wish.Magnitude >= 0.01 then
+            motion = wish.Unit * math.max(manager and manager.BaseMoveSpeed or 16, 16)
+        end
+        local closest, distance = nil, 8
+        for _, other in ipairs(Players:GetPlayers()) do
+            local model = other ~= player and other.Character
+            local otherRoot = model and model:FindFirstChild("Root")
+            if otherRoot and otherRoot:IsA("BasePart") and not otherRoot.Anchored then
+                local d = (otherRoot.Position - r.Position).Magnitude
+                if d < distance then closest, distance = otherRoot, d end
+            end
+        end
+        if not closest then blocked("No contact"); return end
+        local pulse = motion * M.scale + Vector3.new(0, M.lift, 0)
+        pending = {root = r, character = character, velocity = velocity}
+        r.AssemblyLinearVelocity = pulse
+        M.pulses += 1
+        M.lastReason = "Pulse"
+        M.lastInterval = M.lastPulseAt and at - M.lastPulseAt
+        M.lastPulseAt = at
+        M.lastTargetState = closest.Parent and closest.Parent:GetAttribute("BodyState")
+        M.lastIdle = motion.Magnitude < 2 and wish.Magnitude < 0.01
+        M.lastTarget = closest.Parent and closest.Parent.Name
+        M.lastDistance = (closest.Position - r.Position).Magnitude
+    end
+    function M.setEnabled(enabled)
+        M.stop()
+        if not enabled or not life.alive() then return end
+        M.error = nil
+        M.previous = nil
+        M.enabled = true
+        M.syncContacts()
+        Run:BindToRenderStep(viewName, Enum.RenderPriority.First.Value - 1, guarded(M.restore))
+        M.renderBound = true
+        M.connections[1] = Run.PreAnimation:Connect(guarded(M.restore))
+        M.connections[2] = Run.PreSimulation:Connect(guarded(M.restore))
+        M.connections[3] = Run.Heartbeat:Connect(guarded(M.step))
+    end
+    function M.pending() return pending ~= nil end
+    life.onCleanup(M.stop)
+    M.setEnabled(cfg.walkfling)
+    return M
+end)()
+S.walkfling = Walkfling
+
+
+local Jump = (function()
+    local M: any = {queued = false, airborne = false, nextAt = 0}
+    local replay = module(client, "InstantReplay")
+    local state = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
+    function M.fire()
+        if not life.alive() or S.busy or os.clock() < M.nextAt or M.queued or replay.playing()
+            or (state and state:GetAttribute("Phase") ~= "Play") then return false end
+        local character = player.Character
+        local r = character and character:FindFirstChild("Root")
+        local manager = character and character:FindFirstChildOfClass("ControllerManager")
+        local sensor = manager and manager.GroundSensor
+        if not r or not r:IsA("BasePart") or not manager or not sensor or not sensor.SensedPart
+            or character:GetAttribute("BodyState") ~= "Animated" or not isnetworkowner(r) then return false end
+        if character:GetAttribute("Role") == "Goalkeeper" and Mannequin.keeperJump then
+            Mannequin.keeperJump()
+            M.nextAt = os.clock() + 0.5
+            return true
+        end
+        Walkfling.restore()
+        M.queued, M.character = true, character
+        M.nextAt = os.clock() + 0.45
+        return true
+    end
+    life.connect(Run.PreSimulation, function()
+        if M.airborne and player.Character == M.character then
+            local currentRoot = M.character:FindFirstChild("Root")
+            if currentRoot and currentRoot:IsA("BasePart") then
+                local current = currentRoot.AssemblyLinearVelocity
+                local flat = current * Vector3.new(1, 0, 1)
+                local maximum = Tuning.Launch.Speed * math.sqrt(math.max(0.05, 0.9 - (math.max(current.Y, 0) / Tuning.Launch.Rise) ^ 2))
+                if flat.Magnitude > maximum then
+                    flat = flat.Unit * maximum
+                    currentRoot.AssemblyLinearVelocity = flat + Vector3.new(0, current.Y, 0)
+                end
+            end
+        end
+        if not M.queued then return end
+        M.queued = false
+        local character = player.Character
+        local r = character and character:FindFirstChild("Root")
+        local manager = character and character:FindFirstChildOfClass("ControllerManager")
+        local air = manager and manager:FindFirstChild("AirController")
+        local sensor = manager and manager.GroundSensor
+        if character ~= M.character or not r or not r:IsA("BasePart") or not manager or not air
+            or not sensor or not sensor.SensedPart or character:GetAttribute("BodyState") ~= "Animated" then return end
+        Walkfling.restore()
+        local height = math.clamp(tonumber(cfg.jumpHeight) or 3, 1, 6)
+        local speed = math.sqrt(2 * workspace.Gravity * height)
+        local horizontal = r.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+        local maximum = Tuning.Launch.Speed * math.sqrt(math.max(0.05, 0.9 - (speed / Tuning.Launch.Rise) ^ 2))
+        if horizontal.Magnitude > maximum then horizontal = horizontal.Unit * maximum end
+        manager.ActiveController = air
+        r.AssemblyLinearVelocity = horizontal + Vector3.new(0, speed, 0)
+        M.airborne, M.takeoffAt = true, os.clock()
+        Walkfling.pauseUntil = os.clock() + 0.1
+    end)
+    life.connect(Run.Heartbeat, function()
+        if not M.airborne then return end
+        local character = player.Character
+        local manager = character and character:FindFirstChildOfClass("ControllerManager")
+        if character ~= M.character or os.clock() - M.takeoffAt > 2
+            or (os.clock() - M.takeoffAt > 0.15 and manager and manager.GroundSensor and manager.GroundSensor.SensedPart
+                and manager.ActiveController == manager:FindFirstChild("GroundController")) then M.airborne = false end
+    end)
+    life.onCleanup(function() M.queued, M.airborne = false, false end)
+    return M
+end)()
+S.jump = Jump
+
+
+local Hitboxes = (function()
+    local M: any = {entries = {}, ballRequests = 0, ballAccepted = 0}
+    local replay = module(client, "InstantReplay")
+    local nativeRadius = module(gameModules.Dribble, "Rules").BALL_RADIUS
+    local folder = Instance.new("Folder")
+    folder.Name = "PoopHitboxVisuals"
+    folder.Parent = workspace
+    local function release(part, entry)
+        if entry.bounds then entry.bounds:Destroy() end
+        if entry.visual then entry.visual:Destroy() end
+        M.entries[part] = nil
+    end
+    function M.clearPlayers()
+        for part, entry in pairs(M.entries) do release(part, entry) end
+    end
+    function M.ballContact()
+        if not cfg.ballExpander or cfg.freezeBall or replay.playing() then return end
+        if M.ballRecord and M.ballRecord.accepted and not M.ballRecord.counted then
+            M.ballRecord.counted = true
+            M.ballAccepted += 1
+        end
+        local ball, position = Ball.getBall(), Ball.getPosition()
+        local character, r = player.Character, root()
+        if not ball or not position or not character or not r then return end
+        local ownId = character:GetAttribute("DribbleId")
+        if ball:GetAttribute("Possessor") ~= 0 or ball:GetAttribute("ReleasedBy") == ownId then return end
+        local radius = math.clamp(tonumber(cfg.ballHitboxRadius) or 4, 1, Magnet.range)
+        local gap = math.huge
+        for _, name in ipairs({"LeftFoot", "RightFoot", "LeftShin", "RightShin"}) do
+            local part = character:FindFirstChild(name)
+            if part and part:IsA("BasePart") then
+                gap = math.min(gap, (Contacts.closestOnBox(part.CFrame, part.Size, position) - position).Magnitude)
+            end
+        end
+        if gap > radius then return end
+        if Magnet.pull(true) then
+            M.ballRequests += 1
+            M.ballRecord = Magnet.last
+        end
+    end
+    function M.apply()
+        if not life.alive() then return end
+        local showingReplay = replay.playing()
+        local seen = {}
+        if cfg.playerHitboxes and not showingReplay then
+            local width = math.clamp(tonumber(cfg.playerHitboxSize) or 12, 4, 50)
+            local size = Vector3.one * width
+            for _, other in ipairs(Players:GetPlayers()) do
+                local character = other ~= player and other.Character
+                local part = character and character:FindFirstChild("Root")
+                if part and part:IsA("BasePart") then
+                    seen[part] = true
+                    local entry = M.entries[part]
+                    if not entry then
+                        local bounds = Instance.new("Part")
+                        bounds.Name = "PlayerBounds"
+                        bounds.Anchored = true
+                        bounds.CanCollide, bounds.CanTouch, bounds.CanQuery = false, false, false
+                        bounds.Transparency = 1
+                        bounds.CFrame = part.CFrame
+                        bounds.Parent = folder
+                        local visual = Instance.new("SelectionBox")
+                        visual.Name = "PlayerBox"
+                        visual.Adornee = bounds
+                        visual.Color3 = Color3.fromRGB(255, 112, 88)
+                        visual.SurfaceColor3 = visual.Color3
+                        visual.SurfaceTransparency = 0.94
+                        visual.LineThickness = 0.04
+                        visual.Parent = folder
+                        entry = {bounds = bounds, visual = visual}
+                        M.entries[part] = entry
+                    end
+                    if entry.bounds.Size ~= size then entry.bounds.Size = size end
+                    entry.bounds.CFrame = part.CFrame
+                    entry.visual.Visible = cfg.hitboxVisuals
+                end
+            end
+        end
+        for part, entry in pairs(M.entries) do if not seen[part] then release(part, entry) end end
+        local ball = workspace:FindFirstChild("BallView")
+        if cfg.ballHitboxVisual and not showingReplay and ball and ball:IsA("BasePart") then
+            if not M.ballVisual then
+                M.ballVisual = Instance.new("SphereHandleAdornment")
+                M.ballVisual.Name = "CollectionRange"
+                M.ballVisual.Color3 = Color3.fromRGB(255, 215, 90)
+                M.ballVisual.Transparency = 0.75
+                M.ballVisual.AlwaysOnTop = false
+                M.ballVisual.ZIndex = 2
+                M.ballVisual.Parent = folder
+            end
+            M.ballVisual.Adornee = ball
+            M.ballVisual.Radius = if cfg.ballExpander then math.clamp(tonumber(cfg.ballHitboxRadius) or 4, 1, Magnet.range) else nativeRadius
+            M.ballVisual.Visible = true
+        elseif M.ballVisual then M.ballVisual.Visible = false end
+    end
+    life.connect(Run.PreRender, function()
+        for part, entry in pairs(M.entries) do
+            if part.Parent and entry.bounds.Parent then entry.bounds.CFrame = part.CFrame end
+        end
+    end)
+    local geometryAt, contactAt = 0, 0
+    life.connect(Run.Heartbeat, function(dt)
+        geometryAt += dt
+        contactAt += dt
+        if geometryAt >= 0.1 then
+            geometryAt = 0
+            local ok, err = pcall(M.apply)
+            if not ok then M.error = tostring(err); M.clearPlayers() end
+        end
+        if contactAt >= 0.05 then
+            contactAt = 0
+            local ok, err = pcall(M.ballContact)
+            if not ok then M.ballError = tostring(err) end
+        end
+    end)
+    life.onCleanup(function() M.clearPlayers(); folder:Destroy(); M.ballVisual = nil end)
+    M.apply()
+    return M
+end)()
+S.hitboxes = Hitboxes
+
+
+local Freeze = (function()
+    local M: any = {enabled = false, sent = 0, accepted = 0, refused = 0, nextAt = 0}
+    local replay = module(client, "InstantReplay")
+    local sim = module(gameModules, "BallSim")
+    local remote = Net:RemoteEvent("DribbleKnock")
+    local state = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
+    local interval = 0.075
+    function M.setEnabled(enabled)
+        M.enabled = enabled == true
+        M.anchor, M.pending, M.ball = nil, nil, nil
+        M.nextAt = 0
+    end
+    life.connect(Net:RemoteEvent("DribbleKnockRefused").OnClientEvent, function(pid)
+        if M.pending and pid == M.pending.pid then
+            M.refused += 1
+            M.pending = nil
+            M.anchor = nil
+            M.nextAt = os.clock() + 0.25
+        end
+    end)
+    function M.step()
+        if not M.enabled or not life.alive() then return end
+        if replay.playing() or (state and state:GetAttribute("Phase") ~= "Play") then
+            M.anchor, M.pending = nil, nil
+            return
+        end
+        local ball = Ball.getBall()
+        local character = player.Character
+        local position, velocity = Ball.freeState()
+        local at = os.clock()
+        local event = ball and sim.decode(ball:GetAttribute("BallSim"))
+        local pending = M.pending
+        if pending and event and event.pid > pending.pid and event.by == pending.ownId
+            and math.abs(event.t - pending.clock) < 0.12 and (event.pos - pending.position).Magnitude < 0.2
+            and (event.vel - pending.velocity).Magnitude < 0.2 then
+            M.accepted += 1
+            M.lastAccepted = {pid = event.pid, position = event.pos, velocity = event.vel, at = at}
+            M.pending = nil
+        end
+        if not ball or not character or not position or not velocity or ball:GetAttribute("Possessor") ~= 0 then
+            M.anchor, M.pending = nil, nil
+            return
+        end
+        local ownId = character:GetAttribute("DribbleId")
+        if type(ownId) ~= "number" or ownId <= 0 then return end
+        if at < M.nextAt then return end
+        if M.pending and ball:GetAttribute("PossessionId") == M.pending.pid and at - M.pending.sentAt < 0.2 then return end
+        if M.ball ~= ball then M.ball, M.anchor = ball, nil end
+        if not M.anchor or (position - M.anchor).Magnitude > 2.5 then M.anchor = position end
+        local floor = Ball.groundBallY(M.anchor)
+        local lift = if M.anchor.Y > floor + 0.15 then math.max(0, ball:GetAttribute("Gravity") or 46) * interval * 0.5 else 0
+        local wanted = Vector3.new(0, lift, 0)
+        local record = {pid = ball:GetAttribute("PossessionId"), clock = Ball.drawnTime(), position = M.anchor,
+            velocity = wanted, ownId = ownId, sentAt = at}
+        if type(record.pid) ~= "number" or record.pid <= 0 then return end
+        M.pending = record
+        remote:FireServer(record.pid, record.position, record.velocity, record.clock)
+        M.sent += 1
+        M.nextAt = at + interval
+    end
+    life.connect(Run.Heartbeat, function()
+        local ok, err = pcall(M.step)
+        if not ok then M.error = tostring(err); M.setEnabled(false) end
+    end)
+    life.onCleanup(function() M.setEnabled(false) end)
+    M.setEnabled(cfg.freezeBall)
+    return M
+end)()
+S.freezeBall = Freeze
+
+
 local PokeRecovery: any = {steps = 0, calls = 0, lateWindow = module(gameModules.Dribble, "Rules").Server.LateMax}
 function PokeRecovery.releaseMatches(record, release)
     return record.contactAt ~= nil and finite(record.ownId) and record.ownId > 0 and finite(release.pid)
@@ -3487,6 +3977,22 @@ local ball = playerTab:Section("Ball")
 toggle(ball, "Auto poke", "autoPoke")
 ball:Button({Text = "Poke", Callback = function() S.pokeCarrier(false) end})
 S.controls.ballMagnet = ball:Button({Text = "Ball magnet (C)", Callback = function() Magnet.pull(false) end})
+toggle(ball, "Freeze loose ball", "freezeBall", Freeze.setEnabled)
+local tricks = playerTab:Section("Tricks")
+toggle(tricks, "Walkfling", "walkfling", Walkfling.setEnabled)
+local protectionSection = playerTab:Section("Protection")
+toggle(protectionSection, "Anti ragdoll", "antiRagdoll")
+toggle(protectionSection, "Anti slide", "antiSlide")
+local jumping = playerTab:Section("Jump")
+toggle(jumping, "Jump (Space)", "jumpEnabled")
+slider(jumping, "Jump height", "jumpHeight", 1, 6, 0.5)
+jumping:Button({Text = "Jump", Callback = function() Jump.fire() end})
+local hitboxesSection = playerTab:Section("Player boxes")
+toggle(hitboxesSection, "Player boxes", "playerHitboxes", function(value) cfg.hitboxVisuals = value; Hitboxes.apply() end)
+slider(hitboxesSection, "Box size", "playerHitboxSize", 4, 50, 1, Hitboxes.apply)
+toggle(ball, "Loose-ball assist", "ballExpander", Hitboxes.apply)
+slider(ball, "Collection radius", "ballHitboxRadius", 1, 7.5, 0.5, Hitboxes.apply)
+toggle(ball, "Show collection area", "ballHitboxVisual", Hitboxes.apply)
 local menu = playerTab:Section("Menu")
 toggle(menu, "Notifications", "notifications")
 menu:Button({Text = "Save settings", Callback = function()
@@ -3507,8 +4013,10 @@ slider(performance, "Frame limit", "fpsCap", 60, 360, 10, Performance.apply)
 if retainedClosed then window:SetVisible(false) end
 
 local function onKeyInput(key, processed)
+    Walkfling.restore()
     if processed or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
     if key.KeyCode == Enum.KeyCode.RightShift then window:Toggle(); return end
+    if key.KeyCode == Enum.KeyCode.Space and cfg.jumpEnabled then Jump.fire(); return end
     if key.KeyCode == Enum.KeyCode.C then Magnet.pull(false); return end
     if key.KeyCode == Enum.KeyCode.H then
         changed("autoGK", not cfg.autoGK)
@@ -3536,7 +4044,7 @@ life.connect(Run.Heartbeat, function(dt)
     elapsed += dt
     if elapsed < 0.1 then return end
     elapsed = 0
-    local target = S.findPassTarget()
+    local target = S.findPassTarget
     aimDot.Visible = cfg.aimDot
     aimDot.BackgroundColor3 = if target then Color3.fromRGB(104, 211, 171) else Color3.fromRGB(245, 247, 246)
 end)
