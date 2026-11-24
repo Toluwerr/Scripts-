@@ -100,13 +100,15 @@ local defaults = {
     autoPoke = true, walkfling = false,
     jumpEnabled = true, jumpHeight = 3, playerHitboxes = false, playerHitboxSize = 12, hitboxVisuals = true, ballExpander = true, ballHitboxRadius = 4, ballHitboxVisual = true,
     freezeBall = false,
+    hotPotato = false,
+    ballOrbit = false, ballGrabRange = 24, orbitRadius = 4, orbitSpeed = 32, autoDribble = false,
     antiRagdoll = true, antiSlide = true,
     passHeightMode = "Automatic", passAngle = 37, passAdaptive = false,
     autoGK = false, gkPosition = false,
     passDecision = "Balanced", smartPassType = "Automatic", 
     antiAFK = true, rejoinGK = true, performance = true, reducePostEffects = true, keepShadows = false, fpsCap = 240,
 }
-local S: any = {version = "0.42", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", passStatus = "B | Look at a teammate to pass", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
+local S: any = {version = "0.44", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", passStatus = "B | Look at a teammate to pass", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
 local settingsPath = "Poop/soccer.settings.json"
 pcall(function()
     if isfile(settingsPath) then
@@ -918,13 +920,92 @@ targetMarker.Shape = Enum.PartType.Ball
 local ballMarker = guidePart("Ball", Vector3.new(0.08, 2.2, 2.2), Color3.fromRGB(104, 211, 171))
 ballMarker.Shape = Enum.PartType.Cylinder
 
-local Magnet = {range = 7.5, cooldown = 0.35, lastAt = -math.huge, bindings = {}}
+local Grasp = (function()
+    local M: any = {maxRange = 32, sent = 0, accepted = 0, refused = 0, nextAt = 0}
+    local rules = module(gameModules:WaitForChild("Dribble"), "Rules")
+    local sim = module(gameModules, "BallSim")
+    local remote = Net:RemoteEvent("DribbleClaim")
+    function M.range()
+        return math.clamp(tonumber(cfg.ballGrabRange) or 24, 4, M.maxRange)
+    end
+    function M.availableRange()
+        local ball, r = Ball.getBall(), root()
+        local event = ball and sim.decode(ball:GetAttribute("BallSim"))
+        if not event or not r then return math.min(8, M.range()) end
+        local age = math.clamp(now() - event.t - 0.03, 0, 1.75)
+        local speed = math.max(r.AssemblyLinearVelocity.Magnitude, rules.Server.MinSpeed)
+        return math.min(M.range(), speed * (age + rules.Server.SeeLate) + 4.5, (rules.Touch.MaxLaunch + 1) * 0.9)
+    end
+    function M.request()
+        if os.clock() < M.nextAt or M.pending or S.busy or not life.alive() then return false end
+        local character, r, ball = player.Character, root(), Ball.getBall()
+        local pro = game.ReplicatedStorage:FindFirstChild("ProState")
+        if not character or not r or not ball or ball:GetAttribute("Possessor") ~= 0
+            or character:GetAttribute("BodyState") ~= "Animated" or r.Anchored
+            or Input:GetFocusedTextBox() or GuiService.MenuIsOpen or (pro and pro:GetAttribute("Phase") ~= "Play") then return false end
+        local ownId, pid = character:GetAttribute("DribbleId"), ball:GetAttribute("PossessionId")
+        local event = sim.decode(ball:GetAttribute("BallSim"))
+        local clock = now()
+        local current = Ball.freeSample(clock)
+        if type(ownId) ~= "number" or ownId <= 0 or type(pid) ~= "number" or not event or not current then return false end
+        local distance = ((current - r.Position) * Vector3.new(1, 0, 1)).Magnitude
+        if distance > M.range() or distance < 1 then return false end
+        for _, lag in ipairs({0, 0.35, 0.75, 1.2, 1.75}) do
+            local at = clock - lag
+            if at >= event.t + 0.01 then
+                local position = Ball.freeSample(at)
+                if position and math.abs(position.Y - Ball.groundBallY(position)) < 1.2 then
+                    local target = r.Position + r.CFrame.LookVector * 0.9
+                    local offset = (target - position) * Vector3.new(1, 0, 1)
+                    local meta = {pid = pid + 1, seq = 1, nleg = 0, leg = 1, part = "Sole", kind = "Glue",
+                        stride = 0, root = r.Position * Vector3.new(1, 0, 1), nt = at}
+                    local segment = Path.carry(meta, at, position, offset / 0.9, at + 0.9, target, Vector3.zero)
+                    if rules.checkTouch(nil, segment, clock, r.Position, r.AssemblyLinearVelocity.Magnitude, Path.params(ball)) then
+                        M.pending = {pid = pid, ownId = ownId, sentAt = os.clock(), distance = distance,
+                            clock = at, segment = segment, ball = ball, character = character}
+                        remote:FireServer(pid, Path.encode(segment))
+                        M.sent += 1
+                        M.nextAt = os.clock() + 0.35
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+    life.connect(Net:RemoteEvent("DribbleReject").OnClientEvent, function(pid)
+        if M.pending and (pid == M.pending.pid or pid == M.pending.pid + 1) then
+            M.refused += 1
+            M.pending = nil
+        end
+    end)
+    life.connect(Run.Heartbeat, function()
+        local record = M.pending
+        if not record then return end
+        local ball = record.ball
+        if not ball.Parent or player.Character ~= record.character or os.clock() - record.sentAt > 1.1 then M.pending = nil; return end
+        local path = Path.decode(ball:GetAttribute("DribblePath"))
+        if ball:GetAttribute("Possessor") == record.ownId and ball:GetAttribute("PossessionId") == record.pid + 1
+            and path and path.pid == record.pid + 1 then
+            record.accepted = true
+            record.receipt = path
+            M.lastAccepted, M.pending = record, nil
+            M.accepted += 1
+        end
+    end)
+    life.onCleanup(function() M.pending = nil end)
+    return M
+end)()
+S.grasp = Grasp
+
+
+local Magnet = {range = 32, cooldown = 0.35, lastAt = -math.huge, bindings = {}}
 local MagnetSim = module(gameModules, "BallSim")
 local magnetRemote = Net:RemoteEvent("DribbleKnock")
 function Magnet.allowed(context)
     return context.alive and not context.busy and not context.owned and not context.typing and not context.menu
         and context.animated and context.onPitch and context.playing and context.loose and context.free
-        and finite(context.distance) and context.distance > 1 and context.distance <= Magnet.range
+        and finite(context.distance) and context.distance > 1 and context.distance <= math.min(Magnet.range, tonumber(cfg.ballGrabRange) or Magnet.range)
         and finite(context.height) and context.height <= 2.4 and finite(context.pid) and context.pid > 0
         and context.sinceLast >= Magnet.cooldown and not context.justShot
 end
@@ -962,6 +1043,8 @@ function Magnet.pull(silent)
         if not silent then notify("Ball magnet", "No loose ball in reach.") end
         return false
     end
+    if Grasp.request() then Magnet.lastAt = os.clock(); Magnet.last = Grasp.pending; return true end
+    if context.distance > 8 then return false end
     local target = r.Position + r.CFrame.LookVector * 0.9
     local velocity = Magnet.velocity(position, target)
     Magnet.lastAt = os.clock()
@@ -3594,7 +3677,6 @@ S.jump = Jump
 local Hitboxes = (function()
     local M: any = {entries = {}, ballRequests = 0, ballAccepted = 0}
     local replay = module(client, "InstantReplay")
-    local nativeRadius = module(gameModules.Dribble, "Rules").BALL_RADIUS
     local folder = Instance.new("Folder")
     folder.Name = "PoopHitboxVisuals"
     folder.Parent = workspace
@@ -3607,7 +3689,7 @@ local Hitboxes = (function()
         for part, entry in pairs(M.entries) do release(part, entry) end
     end
     function M.ballContact()
-        if not cfg.ballExpander or cfg.freezeBall or replay.playing() then return end
+        if not cfg.ballExpander or cfg.freezeBall or cfg.hotPotato or cfg.ballOrbit or replay.playing() then return end
         if M.ballRecord and M.ballRecord.accepted and not M.ballRecord.counted then
             M.ballRecord.counted = true
             M.ballAccepted += 1
@@ -3670,21 +3752,6 @@ local Hitboxes = (function()
             end
         end
         for part, entry in pairs(M.entries) do if not seen[part] then release(part, entry) end end
-        local ball = workspace:FindFirstChild("BallView")
-        if cfg.ballHitboxVisual and not showingReplay and ball and ball:IsA("BasePart") then
-            if not M.ballVisual then
-                M.ballVisual = Instance.new("SphereHandleAdornment")
-                M.ballVisual.Name = "CollectionRange"
-                M.ballVisual.Color3 = Color3.fromRGB(255, 215, 90)
-                M.ballVisual.Transparency = 0.75
-                M.ballVisual.AlwaysOnTop = false
-                M.ballVisual.ZIndex = 2
-                M.ballVisual.Parent = folder
-            end
-            M.ballVisual.Adornee = ball
-            M.ballVisual.Radius = if cfg.ballExpander then math.clamp(tonumber(cfg.ballHitboxRadius) or 4, 1, Magnet.range) else nativeRadius
-            M.ballVisual.Visible = true
-        elseif M.ballVisual then M.ballVisual.Visible = false end
     end
     life.connect(Run.PreRender, function()
         for part, entry in pairs(M.entries) do
@@ -3713,6 +3780,449 @@ end)()
 S.hitboxes = Hitboxes
 
 
+local Orbit = (function()
+    local M: any = {sent = 0, accepted = 0, refused = 0, nextAt = 0, maxGrab = 32, interval = 0.075, inflight = {}, pipelined = 0}
+    local sim = module(gameModules, "BallSim")
+    local replay = module(client, "InstantReplay")
+    local remote = Net:RemoteEvent("DribbleKnock")
+    local releaseRemote = Net:RemoteEvent("DribbleRelease")
+    local pro = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
+    function M.grabRange()
+        return Grasp.range()
+    end
+    function M.radius()
+        local speed = tonumber(cfg.orbitSpeed) or 32
+        local maximum = math.clamp(M.grabRange() - 0.4, 2.5, 7)
+        local minimum = math.min(maximum, 6, math.max(2.5, speed / 15))
+        return math.clamp(tonumber(cfg.orbitRadius) or 4, minimum, maximum)
+    end
+    function M.velocity(position, center, centerVelocity, radius)
+        local delta = (position - center) * Vector3.new(1, 0, 1)
+        local distance = delta.Magnitude
+        local radial = if distance > 0.01 then delta / distance else Vector3.xAxis
+        local tangent = Vector3.new(-radial.Z, 0, radial.X)
+        local speed = math.clamp(tonumber(cfg.orbitSpeed) or 32, 4, 90)
+        local relative
+        if math.abs(radius - distance) > 1.5 then
+            local radialSpeed = math.clamp((radius - distance) * 5, -24, 24)
+            relative = radial * radialSpeed + tangent * 5
+            if relative.Magnitude > 24 then relative = relative.Unit * 24 end
+        else
+            local horizon = math.clamp(M.cadence or 0.09, 0.05, 0.18)
+            local phase = speed / radius * horizon
+            local target = radial * (radius * math.cos(phase)) + tangent * (radius * math.sin(phase))
+            relative = (target - delta) / horizon
+        end
+        local follow = math.clamp(1 - math.abs(radius - distance) / 3, 0, 1)
+        local wanted = centerVelocity * Vector3.new(1, 0, 1) * follow + relative
+        if wanted.Magnitude > 90 then wanted = wanted.Unit * 90 end
+        return wanted
+    end
+    function M.resetPrediction()
+        table.clear(M.inflight)
+        M.prediction, M.predictedPid, M.pipelineActive = nil, nil, false
+    end
+    local function matches(record, event)
+        return record and event and event.pid > record.pid and event.by == record.ownId
+            and math.abs(event.t - record.clock) < 0.12 and (event.pos - record.position).Magnitude < 0.2
+            and (event.vel - record.velocity).Magnitude < 0.2
+    end
+    local function forecast(record, clock, ball)
+        local elapsed = math.clamp(clock - record.clock, 0, 0.3)
+        local flat = record.velocity * Vector3.new(1, 0, 1)
+        local speed = flat.Magnitude
+        local resistance = math.max(0, ball:GetAttribute("RollingResistance") or 4.7)
+        local direction = if speed > 0.01 then flat.Unit else Vector3.zero
+        local distance = math.max(0, speed * elapsed - 0.5 * resistance * elapsed * elapsed)
+        local position = record.position + direction * distance
+        local floor = Ball.groundBallY(position)
+        local y = math.max(floor, record.position.Y - 0.5 * (ball:GetAttribute("Gravity") or 46) * elapsed * elapsed)
+        return Vector3.new(position.X, y, position.Z), direction * math.max(0, speed - resistance * elapsed)
+    end
+    function M.setEnabled(enabled)
+        M.pending, M.tracked = nil, nil
+        M.resetPrediction()
+        M.nextAt = 0
+        if enabled then
+            if S.controls.freezeBall then S.controls.freezeBall:Set(false, true) end
+            if S.controls.hotPotato then S.controls.hotPotato:Set(false, true) end
+        end
+    end
+    life.connect(Net:RemoteEvent("DribbleKnockRefused").OnClientEvent, function(pid)
+        local rejected = M.inflight[pid] or (M.pending and M.pending.pid == pid and M.pending)
+        if rejected then
+            M.refused += 1
+            M.lastRefused = {pid = pid, at = os.clock(), distance = rejected.distance}
+            for key in pairs(M.inflight) do if key >= pid then M.inflight[key] = nil end end
+            if M.pending and M.pending.pid >= pid then M.pending = nil end
+            M.prediction, M.predictedPid = nil, nil
+            M.nextAt = os.clock() + (if (cfg.orbitSpeed or 0) > 40 then 0.055 else 0.12)
+        end
+    end)
+    function M.step()
+        if not cfg.ballOrbit and not M.pending then return end
+        local at = os.clock()
+        local ball = Ball.getBall()
+        local event = ball and sim.decode(ball:GetAttribute("BallSim"))
+        local pending = M.pending
+        if not matches(pending, event) then
+            pending = nil
+            for _, record in pairs(M.inflight) do if matches(record, event) then pending = record; break end end
+        end
+        if pending and event then
+            M.accepted += 1
+            M.lastAccepted = {pid = event.pid, at = at, position = event.pos, velocity = event.vel,
+                distance = pending.distance, center = pending.center, centerSpeed = pending.centerSpeed,
+                positionError = (event.pos - pending.position).Magnitude,
+                velocityError = (event.vel - pending.velocity).Magnitude}
+            for key in pairs(M.inflight) do if key < event.pid then M.inflight[key] = nil end end
+            if M.pending and M.pending.pid < event.pid then M.pending = nil end
+        end
+        for key, record in pairs(M.inflight) do if at - record.sentAt > 0.5 then M.inflight[key] = nil end end
+        if not cfg.ballOrbit or not life.alive() or at < M.nextAt or at < (M.suspendUntil or 0) or replay.playing() or S.busy
+            or Input:GetFocusedTextBox() or Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+            or GuiService.MenuIsOpen or (pro and pro:GetAttribute("Phase") ~= "Play") then return end
+        local character, r = player.Character, root()
+        local clock = now()
+        local position, velocity = Ball.freeSample(clock)
+        if not position or position == Vector3.zero then position, velocity = Ball.freeState(); clock = Ball.drawnTime() end
+        if not ball or not character or not r or not position or not velocity or r.Anchored
+            or character:GetAttribute("BodyState") ~= "Animated" then
+            M.tracked = nil
+            M.resetPrediction()
+            return
+        end
+        local ownId = character:GetAttribute("DribbleId")
+        if type(ownId) ~= "number" or ownId <= 0 then return end
+        if S.lastShot and now() - S.lastShot.at < 0.9 then return end
+        local pass = S.passingEngine and S.passingEngine.active
+        if pass and now() - pass.at < 0.9 then return end
+        local pid = ball:GetAttribute("PossessionId")
+        if type(pid) ~= "number" or pid <= 0 then return end
+        local possessor = ball:GetAttribute("Possessor")
+        if possessor ~= 0 then
+            if possessor == ownId then
+                local segment = Path.decode(ball:GetAttribute("DribblePath"))
+                if segment and segment.pid == pid then
+                    local held = Path.sample(segment, clock, Path.params(ball))
+                    local distance = ((held - r.Position) * Vector3.new(1, 0, 1)).Magnitude
+                    if distance < 7.5 then
+                        local offset = (held - r.Position) * Vector3.new(1, 0, 1)
+                        local direction = if offset.Magnitude > 0.01 then offset.Unit else Vector3.xAxis
+                        local wanted = Vector3.new(-direction.Z, 0, direction.X) * 12
+                        M.pending = {pid = pid, ownId = ownId, clock = clock, position = held, velocity = wanted,
+                            sentAt = at, distance = distance, center = r.Position, centerSpeed = r.AssemblyLinearVelocity.Magnitude}
+                        Dribble.holdFree(clock + 0.4)
+                        releaseRemote:FireServer(pid, "down", held, wanted, clock)
+                        M.tracked, M.nextAt = ball, at + 0.2
+                        M.sent += 1
+                    end
+                end
+            end
+            M.resetPrediction()
+            return
+        end
+        local flight = Flight.decode(ball:GetAttribute("KickFlight"))
+        if flight and flight.by == ownId and flight.pid == pid then return end
+        if Grasp.pending then return end
+        if ((position - r.Position) * Vector3.new(1, 0, 1)).Magnitude > 7.8
+            and (M.tracked ~= ball or not M.lastAccepted or at - M.lastAccepted.at > 0.6) then
+            Grasp.request()
+            return
+        end
+        if event and event.by ~= ownId and M.lastAccepted and event.pid > M.lastAccepted.pid then M.resetPrediction() end
+        local pipeline = M.tracked == ball and M.lastAccepted ~= nil
+            and at - M.lastAccepted.at < 0.6
+        if pipeline and M.prediction and M.predictedPid and M.predictedPid >= pid and M.predictedPid - pid <= 3
+            and clock - M.prediction.clock < 0.25 then
+            position, velocity = forecast(M.prediction, clock, ball)
+            pid = M.predictedPid
+        end
+        local distance = ((position - r.Position) * Vector3.new(1, 0, 1)).Magnitude
+        if distance > M.grabRange() or math.abs(position.Y - Ball.groundBallY(position)) > 2.4 then
+            M.tracked = nil
+            return
+        end
+        pipeline = pipeline and distance < M.radius() + 2
+        if pipeline then
+            local count = 0
+            for _ in pairs(M.inflight) do count += 1 end
+            if count >= 3 then return end
+            if not M.pipelineActive then M.cadence = 0.06 end
+        elseif M.pending and M.pending.pid == pid and at - M.pending.sentAt < 0.2 then return end
+        M.pipelineActive = pipeline
+        local offset = (position - r.Position) * Vector3.new(1, 0, 1)
+        local wantedRadius = M.radius()
+        local correction = 0
+        if M.tracked == ball and M.lastAccepted and at - M.lastAccepted.at < 0.5 and offset.Magnitude > 0.1
+            and math.abs(offset.Magnitude - wantedRadius) < 1.25 then
+            local projected = r.Position + offset.Unit * wantedRadius
+            projected = Vector3.new(projected.X, position.Y, projected.Z)
+            correction = (projected - position).Magnitude
+            position = projected
+        end
+        local wanted = M.velocity(position, r.Position, r.AssemblyLinearVelocity, wantedRadius)
+        Dribble.holdFree(now() + 0.25)
+        local record = {pid = pid, ownId = ownId, clock = clock, position = position,
+            velocity = wanted, sentAt = at, distance = distance, center = r.Position, centerSpeed = r.AssemblyLinearVelocity.Magnitude, correction = correction}
+        M.pending, M.tracked = record, ball
+        if pipeline then
+            M.inflight[pid] = record
+            M.prediction, M.predictedPid = record, pid + 1
+            M.pipelined += 1
+        end
+        if M.lastSentAt and at - M.lastSentAt < 0.3 then
+            M.cadence = (M.cadence or M.interval) * 0.7 + (at - M.lastSentAt) * 0.3
+        end
+        M.lastSentAt = at
+        remote:FireServer(pid, position, wanted, record.clock)
+        M.sent += 1
+        M.nextAt = at + (if pipeline then 0.055 else M.interval)
+    end
+    life.connect(Run.Heartbeat, function()
+        local ok, err = pcall(M.step)
+        if not ok then M.error = tostring(err); M.pending, M.tracked = nil, nil end
+    end)
+    life.onCleanup(function() M.pending, M.tracked = nil, nil; M.resetPrediction() end)
+    return M
+end)()
+S.orbit = Orbit
+
+
+do
+    local model = Instance.new("Model")
+    model.Name = "BallControlRange"
+    model.WorldPivot = CFrame.identity
+    model.Parent = guides
+    local reach, path, units = {}, {}, {}
+    local count = 40
+    for i = 1, count do
+        local a, b = (i - 1) * math.pi * 2 / count, i * math.pi * 2 / count
+        units[i] = {Vector3.new(math.cos(a), 0, math.sin(a)), Vector3.new(math.cos(b), 0, math.sin(b))}
+        reach[i] = guidePart("GrabReach", Vector3.one * 0.05, Color3.fromRGB(81, 211, 255))
+        path[i] = guidePart("OrbitPath", Vector3.one * 0.05, Color3.fromRGB(255, 197, 97))
+        reach[i].Parent, path[i].Parent = model, model
+    end
+    local lastGrab, lastRadius, shown, pathShown
+    local floorAt, ground = 0, 0
+    local function visibility(visible, orbitVisible)
+        if shown ~= visible then
+            shown = visible
+            for _, part in ipairs(reach) do part.Transparency = if visible then 0.18 else 1 end
+        end
+        if pathShown ~= orbitVisible then
+            pathShown = orbitVisible
+            for _, part in ipairs(path) do part.Transparency = if orbitVisible then 0.3 else 1 end
+        end
+    end
+    function Orbit.applyVisual()
+        local pivot = model:GetPivot()
+        local grab, radius = math.min(Orbit.displayRange or 8, Grasp.range()), Orbit.radius()
+        if grab == lastGrab and radius == lastRadius then return end
+        for i, pair in ipairs(units) do
+            for _, row in ipairs({{reach[i], grab, 0.07}, {path[i], radius, 0.055}}) do
+                local a, b = pair[1] * row[2], pair[2] * row[2]
+                row[1].Size = Vector3.new(row[3], 0.045, (b - a).Magnitude + 0.015)
+                row[1].CFrame = pivot * CFrame.lookAt((a + b) * 0.5, b)
+            end
+        end
+        lastGrab, lastRadius = grab, radius
+        Orbit.visualRadius, Orbit.visualGrabRange = radius, grab
+    end
+    life.connect(Run.PreRender, function()
+        local character, r = player.Character, root()
+        local visible = cfg.ballHitboxVisual and character ~= nil and r ~= nil and r.Position.Y < 20
+            and (character:GetAttribute("Team") == "Blue" or character:GetAttribute("Team") == "Red")
+        local orbitVisible = visible and cfg.ballOrbit
+        visibility(visible, orbitVisible)
+        if not visible then return end
+        local at = os.clock()
+        if at >= floorAt then
+            ground = Ball.groundBallY(r.Position) - 0.84 + 0.065
+            Orbit.displayRange = math.floor(Grasp.availableRange() * 2) / 2
+            floorAt = at + 0.1
+        end
+        Orbit.applyVisual()
+        model:PivotTo(CFrame.new(r.Position.X, ground, r.Position.Z))
+        Orbit.visualCenter = Vector3.new(r.Position.X, ground, r.Position.Z)
+        Orbit.visualFrames = (Orbit.visualFrames or 0) + 1
+    end)
+    life.onCleanup(function() model:Destroy() end)
+    Orbit.visualModel = model
+    Orbit.applyVisual()
+end
+
+
+local AutoDribble = (function()
+    local M: any = {active = false, plans = 0}
+    local originalShape = Mannequin.shapeMove
+    local replay = module(client, "InstantReplay")
+    local pro = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
+    function M.allowed(context)
+        return context.enabled and context.forward and context.owned and context.animated
+            and context.playing and not context.replay and not context.busy and not context.typing and not context.menu
+    end
+    function M.choose(position, target, obstacles, previous)
+        local toward = (target - position) * Vector3.new(1, 0, 1)
+        if toward.Magnitude < 2 then return Vector3.zero end
+        local forward = toward.Unit
+        local best, bestScore = forward, -math.huge
+        for _, angle in ipairs({0, -22, 22, -42, 42, -65, 65}) do
+            local direction = CFrame.Angles(0, math.rad(angle), 0):VectorToWorldSpace(forward)
+            local score = direction:Dot(forward) * 6 - math.abs(angle) * 0.008
+            if previous then score += direction:Dot(previous) * 0.6 end
+            for _, obstacle in ipairs(obstacles) do
+                local predicted = obstacle.position + obstacle.velocity * 0.22
+                local offset = (predicted - position) * Vector3.new(1, 0, 1)
+                local along = math.clamp(offset:Dot(direction), 0, 11)
+                local clearance = (offset - direction * along).Magnitude
+                if along > 0 and offset.Magnitude < 16 then
+                    score -= math.exp(-clearance * clearance / 10) * 26 * (1 - along / 18)
+                end
+            end
+            if score > bestScore then best, bestScore = direction, score end
+        end
+        return best
+    end
+    function M.reset()
+        M.active, M.heading, M.desired = false, nil, nil
+        M.nextPlan = 0
+    end
+    function M.shape(input)
+        local base = if originalShape then originalShape(input) else input
+        if not cfg.autoDribble or not Input:IsKeyDown(Enum.KeyCode.W) then M.reset(); return base end
+        local c, r = player.Character, root()
+        local ball = Ball.getBall()
+        local ownId = c and c:GetAttribute("DribbleId")
+        local context = {enabled = cfg.autoDribble == true, forward = Input:IsKeyDown(Enum.KeyCode.W),
+            owned = type(ownId) == "number" and ownId > 0 and ball ~= nil and ball:GetAttribute("Possessor") == ownId,
+            animated = c ~= nil and c:GetAttribute("BodyState") == "Animated", replay = replay.playing(),
+            playing = not pro or pro:GetAttribute("Phase") == "Play", busy = S.busy,
+            typing = Input:GetFocusedTextBox() ~= nil, menu = GuiService.MenuIsOpen}
+        if not M.allowed(context) or not r or not workspace.CurrentCamera then M.reset(); return base end
+        local at = os.clock()
+        if at >= (M.nextPlan or 0) or not M.desired then
+            local goal = mouth()
+            if not goal then M.reset(); return base end
+            local obstacles = {}
+            for _, other in ipairs(Players:GetPlayers()) do
+                local model = other ~= player and other.Character
+                local otherRoot = model and model:FindFirstChild("Root")
+                if otherRoot and otherRoot:IsA("BasePart") and model:GetAttribute("Team") ~= c:GetAttribute("Team")
+                    and (otherRoot.Position - r.Position).Magnitude < 20 then
+                    obstacles[#obstacles + 1] = {position = otherRoot.Position, velocity = otherRoot.AssemblyLinearVelocity}
+                end
+            end
+            local target = Vector3.new(goal.x + goal.out * 2, r.Position.Y, goal.z)
+            M.desired = M.choose(r.Position, target, obstacles, M.heading)
+            M.target = target
+            M.nextPlan = at + 0.08
+            M.plans += 1
+        end
+        local elapsed = math.clamp(at - (M.lastAt or at), 0, 0.1)
+        M.lastAt = at
+        local desired = M.desired
+        if desired.Magnitude < 0.01 then M.active = true; return Vector2.zero end
+        M.heading = if M.heading then M.heading:Lerp(desired, 1 - math.exp(-elapsed * 14)) else desired
+        if M.heading.Magnitude < 0.01 then return base end
+        local camera = workspace.CurrentCamera
+        local look = camera.CFrame.LookVector * Vector3.new(1, 0, 1)
+        local right = camera.CFrame.RightVector * Vector3.new(1, 0, 1)
+        look = if look.Magnitude > 0.001 then look.Unit else Vector3.new(0, 0, -1)
+        right = if right.Magnitude > 0.001 then right.Unit else Vector3.xAxis
+        M.active = true
+        local direction = M.heading.Unit
+        local wish = Vector2.new(direction:Dot(right), direction:Dot(look))
+        if wish.Magnitude > 1 then wish = wish.Unit end
+        return wish * math.min(1, input.Magnitude)
+    end
+    life.override(Mannequin, "shapeMove", M.shape)
+    life.onCleanup(M.reset)
+    return M
+end)()
+S.autoDribble = AutoDribble
+
+
+local HotPotato = (function()
+    local M: any = {sent = 0, accepted = 0, refused = 0, nextAt = 0}
+    local sim = module(gameModules, "BallSim")
+    local replay = module(client, "InstantReplay")
+    local remote = Net:RemoteEvent("DribbleKnock")
+    local pro = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
+    life.connect(Net:RemoteEvent("DribbleKnockRefused").OnClientEvent, function(pid)
+        if M.pending and M.pending.pid == pid then
+            M.refused += 1
+            M.pending = nil
+            M.nextAt = os.clock() + 0.35
+        end
+    end)
+    function M.setEnabled(enabled)
+        M.pending = nil
+        M.nextAt = 0
+        if enabled then
+            if S.controls.freezeBall then S.controls.freezeBall:Set(false, true) end
+            if S.controls.ballOrbit then S.controls.ballOrbit:Set(false, true) end
+        end
+    end
+    function M.step()
+        if (not cfg.hotPotato or cfg.ballOrbit) and not M.pending then return end
+        local ball = Ball.getBall()
+        local event = ball and sim.decode(ball:GetAttribute("BallSim"))
+        local pending = M.pending
+        local at = os.clock()
+        if pending and event and event.pid > pending.pid and event.by == pending.ownId
+            and math.abs(event.t - pending.clock) < 0.12 and (event.pos - pending.position).Magnitude < 0.2
+            and (event.vel - pending.velocity).Magnitude < 0.2 then
+            M.accepted += 1
+            M.lastAccepted = {pid = event.pid, at = at, target = pending.target, velocity = event.vel,
+                position = event.pos, positionError = (event.pos - pending.position).Magnitude,
+                velocityError = (event.vel - pending.velocity).Magnitude}
+            M.pending = nil
+        end
+        if not cfg.hotPotato or not life.alive() or at < M.nextAt or replay.playing()
+            or (pro and pro:GetAttribute("Phase") ~= "Play") or S.busy or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
+        local character, r = player.Character, root()
+        local position, velocity = Ball.freeState()
+        if not ball or not character or not r or not position or not velocity or r.Anchored
+            or character:GetAttribute("BodyState") ~= "Animated" or ball:GetAttribute("Possessor") ~= 0 then return end
+        local ownId = character:GetAttribute("DribbleId")
+        if type(ownId) ~= "number" or ownId <= 0 or ball:GetAttribute("ReleasedBy") == ownId then return end
+        local distance = ((position - r.Position) * Vector3.new(1, 0, 1)).Magnitude
+        if distance <= 1 or distance > 7.5 or math.abs(position.Y - Ball.groundBallY(position)) > 2.4 then return end
+        local closest, gap = nil, 35
+        for _, other in ipairs(Players:GetPlayers()) do
+            local model = other ~= player and other.Character
+            local otherRoot = model and model:FindFirstChild("Root")
+            if otherRoot and otherRoot:IsA("BasePart") then
+                local d = ((otherRoot.Position - position) * Vector3.new(1, 0, 1)).Magnitude
+                if d < gap then closest, gap = otherRoot, d end
+            end
+        end
+        if not closest then return end
+        local delta = (position - closest.Position) * Vector3.new(1, 0, 1)
+        if delta.Magnitude < 0.1 then delta = (position - r.Position) * Vector3.new(1, 0, 1) end
+        if delta.Magnitude < 0.1 then return end
+        local wanted = delta.Unit * 24
+        if velocity:Dot(delta.Unit) > 20 then return end
+        local pid = ball:GetAttribute("PossessionId")
+        if type(pid) ~= "number" or pid <= 0 then return end
+        if M.pending and M.pending.pid == pid and at - M.pending.sentAt < 0.3 then return end
+        M.pending = {pid = pid, ownId = ownId, position = position, velocity = wanted,
+            clock = Ball.drawnTime(), sentAt = at, target = closest.Parent and closest.Parent.Name}
+        remote:FireServer(pid, position, wanted, M.pending.clock)
+        M.sent += 1
+        M.nextAt = at + 0.15
+    end
+    life.connect(Run.Heartbeat, function()
+        local ok, err = pcall(M.step)
+        if not ok then M.error = tostring(err); M.pending = nil end
+    end)
+    life.onCleanup(function() M.pending = nil end)
+    return M
+end)()
+S.hotPotato = HotPotato
+
+
 local Freeze = (function()
     local M: any = {enabled = false, sent = 0, accepted = 0, refused = 0, nextAt = 0}
     local replay = module(client, "InstantReplay")
@@ -3734,7 +4244,7 @@ local Freeze = (function()
         end
     end)
     function M.step()
-        if not M.enabled or not life.alive() then return end
+        if not M.enabled or not life.alive() or cfg.hotPotato or cfg.ballOrbit then return end
         if replay.playing() or (state and state:GetAttribute("Phase") ~= "Play") then
             M.anchor, M.pending = nil, nil
             return
@@ -3966,6 +4476,7 @@ local movement = playerTab:Section("Movement")
 toggle(movement, "Speed boost", "speedEnabled", applySpeed)
 slider(movement, "Speed multiplier", "speed", 0.5, 4, 0.1, applySpeed)
 toggle(movement, "Always sprint", "sprint")
+toggle(movement, "Auto dribble (W)", "autoDribble", AutoDribble.reset)
 movement:Button({Text = "Reset movement", Callback = function()
     changed("speedEnabled", false)
     changed("sprint", false)
@@ -3977,9 +4488,16 @@ local ball = playerTab:Section("Ball")
 toggle(ball, "Auto poke", "autoPoke")
 ball:Button({Text = "Poke", Callback = function() S.pokeCarrier(false) end})
 S.controls.ballMagnet = ball:Button({Text = "Ball magnet (C)", Callback = function() Magnet.pull(false) end})
-toggle(ball, "Freeze loose ball", "freezeBall", Freeze.setEnabled)
+toggle(ball, "Freeze loose ball", "freezeBall", function(enabled) if enabled then if S.controls.hotPotato then S.controls.hotPotato:Set(false, true) end; if S.controls.ballOrbit then S.controls.ballOrbit:Set(false, true) end end; Freeze.setEnabled(enabled) end)
 local tricks = playerTab:Section("Tricks")
 toggle(tricks, "Walkfling", "walkfling", Walkfling.setEnabled)
+toggle(tricks, "Hot potato", "hotPotato", HotPotato.setEnabled)
+local orbitSection = playerTab:Section("Ball control")
+toggle(orbitSection, "Ball orbit", "ballOrbit", Orbit.setEnabled)
+slider(orbitSection, "Grab range", "ballGrabRange", 4, 32, 0.5, Orbit.applyVisual)
+slider(orbitSection, "Orbit radius", "orbitRadius", 2.5, 7, 0.5, Orbit.applyVisual)
+slider(orbitSection, "Orbit speed", "orbitSpeed", 4, 90, 1)
+toggle(orbitSection, "Show reach", "ballHitboxVisual", Orbit.applyVisual)
 local protectionSection = playerTab:Section("Protection")
 toggle(protectionSection, "Anti ragdoll", "antiRagdoll")
 toggle(protectionSection, "Anti slide", "antiSlide")
@@ -3991,8 +4509,7 @@ local hitboxesSection = playerTab:Section("Player boxes")
 toggle(hitboxesSection, "Player boxes", "playerHitboxes", function(value) cfg.hitboxVisuals = value; Hitboxes.apply() end)
 slider(hitboxesSection, "Box size", "playerHitboxSize", 4, 50, 1, Hitboxes.apply)
 toggle(ball, "Loose-ball assist", "ballExpander", Hitboxes.apply)
-slider(ball, "Collection radius", "ballHitboxRadius", 1, 7.5, 0.5, Hitboxes.apply)
-toggle(ball, "Show collection area", "ballHitboxVisual", Hitboxes.apply)
+slider(ball, "Collection radius", "ballHitboxRadius", 1, 32, 0.5, Hitboxes.apply)
 local menu = playerTab:Section("Menu")
 toggle(menu, "Notifications", "notifications")
 menu:Button({Text = "Save settings", Callback = function()
@@ -4017,6 +4534,7 @@ local function onKeyInput(key, processed)
     if processed or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
     if key.KeyCode == Enum.KeyCode.RightShift then window:Toggle(); return end
     if key.KeyCode == Enum.KeyCode.Space and cfg.jumpEnabled then Jump.fire(); return end
+    if key.KeyCode == Enum.KeyCode.F or key.KeyCode == Enum.KeyCode.B or key.KeyCode == Enum.KeyCode.C then Orbit.suspendUntil = os.clock() + 0.9 end
     if key.KeyCode == Enum.KeyCode.C then Magnet.pull(false); return end
     if key.KeyCode == Enum.KeyCode.H then
         changed("autoGK", not cfg.autoGK)
@@ -4044,7 +4562,7 @@ life.connect(Run.Heartbeat, function(dt)
     elapsed += dt
     if elapsed < 0.1 then return end
     elapsed = 0
-    local target = S.findPassTarget
+    local target = S.findPassTarget()
     aimDot.Visible = cfg.aimDot
     aimDot.BackgroundColor3 = if target then Color3.fromRGB(104, 211, 171) else Color3.fromRGB(245, 247, 246)
 end)
