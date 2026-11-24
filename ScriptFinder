@@ -847,6 +847,39 @@ do
     end
 end
 
+local function fetchPublicServers(placeId, cursor, ascending, excludeFull)
+    local place = numericId(placeId)
+    if not place or type(cursor) ~= "string" or #cursor > 2048
+        or type(ascending) ~= "boolean" or type(excludeFull) ~= "boolean" then
+        error("Invalid public server request", 0)
+    end
+    local address = "https://games.roblox.com/v1/games/" .. place
+        .. "/servers/Public?limit=50&sortOrder=" .. (ascending and "Asc" or "Desc")
+        .. "&excludeFullGames=" .. tostring(excludeFull)
+    if cursor ~= "" then address ..= "&cursor=" .. HttpService:UrlEncode(cursor) end
+    local response = readResponse(address, true)
+    if type(response.data) ~= "table" then error("Invalid public server response", 0) end
+    local items = {}
+    for _, entry in ipairs(response.data) do
+        if #items >= 50 then break end
+        if type(entry) == "table" and type(entry.id) == "string"
+            and #entry.id == 36 and entry.id:match("^[%x%-]+$") then
+            local playing, capacity = counter(entry.playing), counter(entry.maxPlayers)
+            if playing and capacity and capacity > 0 and playing <= capacity then
+                local fps = tonumber(entry.fps)
+                table.insert(items, {
+                    id = entry.id, playing = playing, capacity = capacity,
+                    ping = counter(entry.ping),
+                    fps = fps and fps == fps and fps >= 0 and fps < 10000 and fps or nil,
+                })
+            end
+        end
+    end
+    local nextCursor = response.nextPageCursor
+    return {items = items, nextCursor = type(nextCursor) == "string"
+        and #nextCursor <= 2048 and nextCursor or ""}
+end
+
 if RunService:IsServer() then
     local remote = ReplicatedStorage:FindFirstChild(CatalogRemote)
     if not remote then
@@ -859,6 +892,7 @@ if RunService:IsServer() then
     local windowStart, requests = os.clock(), 0
     remote.OnServerInvoke = function(player, target)
         local isRobloxGames = type(target) == "table" and target.action == "robloxGames"
+        local isPublicServers = type(target) == "table" and target.action == "publicServers"
         local isComments = type(target) == "table" and target.action == "comments"
         local isCode = type(target) == "table" and target.action == "code"
         local isGame = type(target) == "table" and target.action == "game"
@@ -873,7 +907,12 @@ if RunService:IsServer() then
         local filters = isFiltered and Filters.normalize(target.filters) or nil
         local haxhellFilters = isHaxHell and Filters.normalize(target.filters) or nil
         local isDetail = type(target) == "string"
-        if isRobloxGames then
+        if isPublicServers then
+            if not numericId(target.placeId) or type(target.cursor) ~= "string" or #target.cursor > 2048
+                or type(target.ascending) ~= "boolean" or type(target.excludeFull) ~= "boolean" then
+                return {error = "Invalid public server request"}
+            end
+        elseif isRobloxGames then
             if type(target.page) ~= "number" or target.page < 1 or target.page > 5
                 or target.page ~= math.floor(target.page) or type(target.query) ~= "string"
                 or #target.query > 480 or normalizeSearch(target.query) ~= target.query then
@@ -941,7 +980,9 @@ if RunService:IsServer() then
         elseif type(target) ~= "number" or target ~= target or target < 1 or target > 1000000 or target ~= math.floor(target) then
             return {error = "Invalid page"}
         end
-        local key = (isRobloxGames and ("robloxGames:" .. target.page .. ":" .. target.query))
+        local key = (isPublicServers and ("publicServers:" .. numericId(target.placeId) .. ":"
+                .. tostring(target.ascending) .. ":" .. tostring(target.excludeFull) .. ":" .. target.cursor))
+            or (isRobloxGames and ("robloxGames:" .. target.page .. ":" .. target.query))
             or (isRScripts and ("rscripts:" .. tostring(target.page) .. ":"
                 .. tostring(target.gameOnly) .. ":" .. Filters.key(rsFilters) .. ":" .. target.query))
             or (isRScriptsDetail and ("rscriptsDetail:" .. target.slug))
@@ -959,7 +1000,7 @@ if RunService:IsServer() then
         local now = os.clock()
         local activity = recent[player] or {}
         recent[player] = activity
-        local kind = isRobloxGames and "robloxGames" or isRScripts and "rscripts" or (isRScriptsDetail and "rscriptsDetail")
+        local kind = isPublicServers and "publicServers" or isRobloxGames and "robloxGames" or isRScripts and "rscripts" or (isRScriptsDetail and "rscriptsDetail")
             or isHaxHell and "haxhell" or ((isHaxHellDetail or isHaxHellCode) and "haxhellDetail")
             or ((isSearch or isFiltered) and "search" or (isCode and "code" or (isComments and "comments" or (isDetail and "detail" or (isGame and "game" or "page")))))
         if now - (activity[kind] or -math.huge) < (isCode and 0.6 or (isDetail and 0.25 or 0.5)) then
@@ -982,7 +1023,9 @@ if RunService:IsServer() then
         requests += 1
         pending[key] = true
         local ok, data
-        if isRobloxGames then
+        if isPublicServers then
+            ok, data = pcall(fetchPublicServers, target.placeId, target.cursor, target.ascending, target.excludeFull)
+        elseif isRobloxGames then
             ok, data = pcall(fetchRobloxGames, target.page, target.query)
         elseif isRScripts then
             ok, data = pcall(fetchRScriptsCatalogue, target.page, target.query, rsFilters, target.gameOnly)
@@ -2809,7 +2852,7 @@ local function makeCard(scroller, item, index)
         applyImage(image, item.thumbnail, item.thumbnailSource, "thumbnail")
         local title = create("TextLabel", {
             Name = "Title", Position = UDim2.new(0, 10, 1, -44),
-            Size = UDim2.new(1, -56, 0, 40), BackgroundTransparency = 1,
+            Size = UDim2.new(1, -94, 0, 40), BackgroundTransparency = 1,
             Text = item.title, TextColor3 = Theme.Text, FontFace = Theme.Font, TextSize = 13,
             TextWrapped = true, TextTruncate = Enum.TextTruncate.AtEnd,
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
@@ -2823,39 +2866,44 @@ local function makeCard(scroller, item, index)
         round(join, 6)
         local icon = lucideIcon(join, "play", 16, Theme.Text, 6)
         local view = {card = card, image = image, title = title, counters = {}, item = item}
-        local teleport = game:GetService("TeleportService")
-        local joining = false
-        local function resetJoin()
-            if not alive or not join.Parent then return end
-            joining = false
-            join.Active = true
-            icon.ImageTransparency = 0
+        local statistics = create("TextButton", {
+            Name = "Statistics", AnchorPoint = Vector2.new(1, 1),
+            Position = UDim2.new(1, -46, 1, -9), Size = UDim2.fromOffset(32, 30),
+            BackgroundColor3 = Theme.Window, BorderSizePixel = 0, AutoButtonColor = true,
+            Text = "", ZIndex = 5,
+        }, card)
+        round(statistics, 6)
+        for i, height in ipairs({7, 12, 16}) do
+            local bar = create("Frame", {
+                AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromOffset(8 + (i - 1) * 6, 23),
+                Size = UDim2.fromOffset(3, height), BackgroundColor3 = Theme.Text,
+                BorderSizePixel = 0, ZIndex = 6,
+            }, statistics)
+            round(bar, 1)
         end
-        local failed = teleport.TeleportInitFailed:Connect(function(who, result, message, placeId)
-            if joining and who == player and placeId == tonumber(view.item.placeId) then
-                warn("Roblox teleport: " .. tostring(result) .. " " .. tostring(message))
-                resetJoin()
-            end
+        statistics.Activated:Connect(function()
+            if filterState.openServers then filterState.openServers(view.item) end
         end)
-        card.Destroying:Once(function() failed:Disconnect() end)
+        local joining = false
         join.Activated:Connect(function()
             if joining then return end
-            local place = tonumber(numericId(view.item.placeId))
-            if not place then return end
+            local universe = tonumber(numericId(view.item.universeId))
+            if not universe then return end
             joining = true
             join.Active = false
             icon.ImageTransparency = 0.5
             task.spawn(function()
-                local ok, message = pcall(function()
-                    teleport:Teleport(place, player)
+                local ok, result = pcall(function()
+                    return game:GetService("TeleportService"):PromptExperienceDetailsAsync(player, universe)
                 end)
                 if not ok then
-                    warn("Roblox teleport: " .. tostring(message))
-                    resetJoin()
-                    return
+                    warn("Roblox experience prompt: " .. tostring(result))
                 end
-                task.wait(10)
-                resetJoin()
+                if alive and join.Parent then
+                    joining = false
+                    join.Active = true
+                    icon.ImageTransparency = 0
+                end
             end)
         end)
         return view
@@ -3060,6 +3108,9 @@ local function requestData(target)
     end
     if type(target) == "table" and target.action == "robloxGames" then
         return fetchRobloxGames(target.page, target.query)
+    end
+    if type(target) == "table" and target.action == "publicServers" then
+        return fetchPublicServers(target.placeId, target.cursor, target.ascending, target.excludeFull)
     end
     if type(target) == "table" and target.action == "comments" then
         return fetchComments(target.id, target.page)
@@ -3760,6 +3811,215 @@ closeDetails = function()
     end
     if requestFreshCatalogue then
         task.defer(requestFreshCatalogue, catalogueScope == "favorites" and 0 or 2)
+    end
+end
+
+do
+    local sorts = {"Most players", "Fewest players", "Lowest ping", "Highest FPS"}
+    function filterState.openServers(item)
+        if not alive or detailView or not item or not numericId(item.placeId) then return end
+        clearPageMotion()
+        detailGeneration += 1
+        local token = detailGeneration
+        local view = create("Frame", {
+            Name = "ServerBrowser", Position = UDim2.fromOffset(14, 12),
+            Size = UDim2.new(1, -28, 1, -38), BackgroundColor3 = Theme.Window,
+            BorderSizePixel = 0, ClipsDescendants = true, ZIndex = 6,
+        }, content)
+        detailView = view
+        if filterState.close then filterState.close(false) end
+        local function valid()
+            return alive and detailView == view and detailGeneration == token
+        end
+        local function button(parent, name, text, position, size, background)
+            local object = create("TextButton", {
+                Name = name, Position = position, Size = size,
+                BackgroundColor3 = background or Theme.Raised, BorderSizePixel = 0,
+                Text = text, TextColor3 = Theme.Text, FontFace = Theme.Font,
+                TextSize = 12, TextTruncate = Enum.TextTruncate.AtEnd,
+                AutoButtonColor = true, ZIndex = 8,
+            }, parent)
+            round(object, 6)
+            return object
+        end
+        local function label(parent, name, text, position, size, muted)
+            return create("TextLabel", {
+                Name = name, Position = position, Size = size, BackgroundTransparency = 1,
+                Text = text, TextColor3 = muted and Theme.Text:Lerp(Theme.Window, 0.35) or Theme.Text,
+                FontFace = Theme.Font, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 8,
+            }, parent)
+        end
+        local back = button(view, "Back", "", UDim2.fromOffset(0, 0), UDim2.fromOffset(32, 32))
+        lucideIcon(back, "arrow-left", 18, Theme.Text, 9)
+        back.Activated:Connect(closeDetails)
+        local heading = label(view, "Title", item.title .. " · Servers", UDim2.fromOffset(42, 0), UDim2.new(1, -84, 0, 32))
+        heading.TextSize = 14
+        local refresh = button(view, "Refresh", "", UDim2.new(1, -32, 0, 0), UDim2.fromOffset(32, 32))
+        lucideIcon(refresh, "refresh-cw", 16, Theme.Text, 9)
+        local toolbar = create("Frame", {
+            Name = "Filters", Position = UDim2.fromOffset(0, 40), Size = UDim2.new(1, 0, 0, 30),
+            BackgroundTransparency = 1, ZIndex = 7,
+        }, view)
+        local sortButton = button(toolbar, "Sort", sorts[1], UDim2.fromOffset(0, 0), UDim2.new(0.52, -4, 1, 0))
+        local fullButton = button(toolbar, "FullServers", "Hide full", UDim2.new(0.52, 4, 0, 0), UDim2.new(0.48, -4, 1, 0))
+        local status = label(view, "Status", "", UDim2.fromOffset(2, 74), UDim2.new(1, -4, 0, 20), true)
+        local list = create("ScrollingFrame", {
+            Name = "PublicServers", Position = UDim2.fromOffset(0, 99),
+            Size = UDim2.new(1, 0, 1, -139), BackgroundTransparency = 1,
+            BorderSizePixel = 0, CanvasSize = UDim2.fromOffset(0, 0),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
+            ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Divider, ZIndex = 7,
+        }, view)
+        create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6)}, list)
+        local more = button(view, "More", "Load more", UDim2.new(0, 0, 1, -32), UDim2.new(1, 0, 0, 32))
+        local sortIndex, hideFull = 1, true
+        local entries, seen, cursor = {}, {}, ""
+        local busy, sequence = false, 0
+        local teleport = game:GetService("TeleportService")
+        local joiningId, joiningTicket = nil, 0
+        local place = tonumber(numericId(item.placeId))
+        local function finishJoin(message)
+            joiningTicket += 1
+            joiningId = nil
+            if valid() then status.Text = message end
+        end
+        local failed = teleport.TeleportInitFailed:Connect(function(who, result, message, targetPlace)
+            if joiningId and who == player and targetPlace == place then
+                finishJoin("Join failed: " .. tostring(result.Name))
+                warn("Roblox server join: " .. tostring(message))
+            end
+        end)
+        view.Destroying:Once(function() failed:Disconnect() end)
+        local function joinServer(server)
+            if not valid() or joiningId or server.playing >= server.capacity
+                or (place == game.PlaceId and server.id == game.JobId) then return end
+            joiningTicket += 1
+            local ticket = joiningTicket
+            joiningId = server.id
+            status.Text = "Joining server..."
+            task.spawn(function()
+                local ok, message = pcall(function()
+                    teleport:TeleportToPlaceInstance(place, server.id, player)
+                end)
+                if not valid() or ticket ~= joiningTicket then return end
+                if not ok then
+                    warn("Roblox server join: " .. tostring(message))
+                    finishJoin("Join failed")
+                    return
+                end
+                task.delay(12, function()
+                    if valid() and ticket == joiningTicket then finishJoin("Join not completed") end
+                end)
+            end)
+        end
+        local function renderRows()
+            for _, child in ipairs(list:GetChildren()) do
+                if child:IsA("Frame") then child:Destroy() end
+            end
+            table.sort(entries, function(a, b)
+                local av, bv
+                if sortIndex == 1 then av, bv = -a.playing, -b.playing
+                elseif sortIndex == 2 then av, bv = a.playing, b.playing
+                elseif sortIndex == 3 then
+                    av = a.ping and a.ping > 0 and a.ping or math.huge
+                    bv = b.ping and b.ping > 0 and b.ping or math.huge
+                else
+                    av = a.fps and a.fps > 0 and -a.fps or math.huge
+                    bv = b.fps and b.fps > 0 and -b.fps or math.huge
+                end
+                if av == bv then return a.id < b.id end
+                return av < bv
+            end)
+            for index, server in ipairs(entries) do
+                if not hideFull or server.playing < server.capacity then
+                    local current = place == game.PlaceId and server.id == game.JobId
+                    local full = server.playing >= server.capacity
+                    local row = create("Frame", {
+                        Name = "Server", LayoutOrder = index, Size = UDim2.new(1, -5, 0, 50),
+                        BackgroundColor3 = Theme.Raised, BorderSizePixel = 0, ZIndex = 7,
+                    }, list)
+                    round(row, 7)
+                    label(row, "Players", tostring(server.playing) .. "/" .. tostring(server.capacity) .. " players",
+                        UDim2.fromOffset(10, 3), UDim2.new(1, -58, 0, 21))
+                    local ping = server.ping and server.ping > 0 and tostring(server.ping) .. " ms" or "— ms"
+                    local fps = server.fps and server.fps > 0 and string.format("%.0f FPS", server.fps) or "— FPS"
+                    label(row, "Performance", ping .. "  ·  " .. fps, UDim2.fromOffset(10, 24),
+                        UDim2.new(1, -58, 0, 21), true)
+                    local play = button(row, "Join", "", UDim2.new(1, -38, 0, 10), UDim2.fromOffset(30, 30),
+                        (full or current) and Theme.Window or Theme.Accent)
+                    local glyph = lucideIcon(play, current and "check" or "play", 15, Theme.Text, 9)
+                    if full or current then
+                        play.Active = false
+                        glyph.ImageTransparency = 0.5
+                    else
+                        play.Activated:Connect(function() joinServer(server) end)
+                    end
+                end
+            end
+        end
+        local function fetch(reset)
+            if not valid() or busy then return end
+            if not reset and cursor == "" then return end
+            busy = true
+            sequence += 1
+            local request = sequence
+            local nextPage = reset and "" or cursor
+            if reset then
+                entries, seen, cursor = {}, {}, ""
+                renderRows()
+                list.CanvasPosition = Vector2.zero
+            end
+            status.Text = "Loading servers..."
+            more.Active = false
+            sortButton.Active, fullButton.Active, refresh.Active = false, false, false
+            task.spawn(function()
+                local ok, data = pcall(requestData, {
+                    action = "publicServers", placeId = item.placeId, cursor = nextPage,
+                    ascending = sortIndex == 2, excludeFull = hideFull,
+                })
+                if not valid() or request ~= sequence then return end
+                busy = false
+                sortButton.Active, fullButton.Active, refresh.Active = true, true, true
+                if not ok or type(data) ~= "table" or type(data.items) ~= "table" then
+                    status.Text = "Servers unavailable. Refresh to retry."
+                    more.Active = cursor ~= ""
+                    more.Text = "Load more"
+                    return
+                end
+                for _, entry in ipairs(data.items) do
+                    if type(entry) == "table" and not seen[entry.id] then
+                        seen[entry.id] = true
+                        table.insert(entries, entry)
+                    end
+                end
+                cursor = type(data.nextCursor) == "string" and data.nextCursor ~= nextPage and data.nextCursor or ""
+                renderRows()
+                local visible = 0
+                for _, entry in ipairs(entries) do
+                    if not hideFull or entry.playing < entry.capacity then visible += 1 end
+                end
+                status.Text = tostring(visible) .. " public servers loaded" .. (sortIndex >= 3 and " · Loaded results" or "")
+                more.Active = cursor ~= "" and #entries < 500
+                more.Text = more.Active and "Load more" or "No more servers"
+            end)
+        end
+        sortButton.Activated:Connect(function()
+            if busy then return end
+            sortIndex = sortIndex % #sorts + 1
+            sortButton.Text = sorts[sortIndex]
+            if sortIndex <= 2 then fetch(true) else renderRows() end
+        end)
+        fullButton.Activated:Connect(function()
+            if busy then return end
+            hideFull = not hideFull
+            fullButton.Text = hideFull and "Hide full" or "Show full"
+            fetch(true)
+        end)
+        refresh.Activated:Connect(function() fetch(true) end)
+        more.Activated:Connect(function() fetch(false) end)
+        updatePagination()
+        fetch(true)
     end
 end
 
