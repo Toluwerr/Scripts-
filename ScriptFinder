@@ -744,6 +744,63 @@ local function fetchDetails(slug)
     return info
 end
 
+local function fetchRobloxGames(target, query)
+    local session = HttpService:GenerateGUID(false)
+    local url = query == "" and ("https://apis.roblox.com/explore-api/v1/get-sort-content?sortId=top-playing-now&device=computer&country=all&sessionId=" .. session)
+        or ("https://apis.roblox.com/search-api/omni-search?pageType=all&sessionId=" .. session .. "&searchQuery=" .. HttpService:UrlEncode(query))
+    local response = readResponse(url, true)
+    local ids, seen = {}, {}
+    local function collect(value, depth)
+        if type(value) ~= "table" or depth > 12 or #ids >= 100 then return end
+        local id = numericId(value.universeId)
+        if id and not seen[id] then
+            seen[id] = true
+            table.insert(ids, id)
+        end
+        if #value > 0 then
+            for _, child in ipairs(value) do collect(child, depth + 1) end
+        else
+            for _, child in pairs(value) do
+                if type(child) == "table" then collect(child, depth + 1) end
+            end
+        end
+    end
+    collect(response, 0)
+    if #ids == 0 and not (response.searchResults or response.games or response.sorts or response.sortContent or response.content or response.data) then
+        error("Roblox returned an unexpected discovery response", 0)
+    end
+    local all = {}
+    for first = 1, #ids, 50 do
+        local batch = {}
+        for i = first, math.min(first + 49, #ids) do table.insert(batch, ids[i]) end
+        local details = readResponse("https://games.roblox.com/v1/games?universeIds=" .. table.concat(batch, ","), true)
+        if type(details.data) ~= "table" then error("Invalid Roblox game metadata", 0) end
+        for _, info in ipairs(details.data) do
+            if type(info) == "table" then
+                local universe = numericId(info.id)
+                local place = numericId(info.rootPlaceId)
+                local title = plainText(info.name, 180)
+                if universe and place and title then
+                    all[universe] = {
+                        id = "game_" .. universe, isGameCard = true, universeId = universe,
+                        placeId = place, title = title,
+                        thumbnail = "rbxthumb://type=GameThumbnail&id=" .. place .. "&w=384&h=216",
+                    }
+                end
+            end
+        end
+    end
+    local ordered = {}
+    for _, id in ipairs(ids) do
+        if all[id] then table.insert(ordered, all[id]) end
+    end
+    local items = {}
+    for i = (target - 1) * PageSize + 1, math.min(target * PageSize, #ordered) do
+        table.insert(items, ordered[i])
+    end
+    return {items = items, totalPages = math.max(1, math.ceil(#ordered / PageSize))}
+end
+
 if RunService:IsServer() then
     local remote = ReplicatedStorage:FindFirstChild(CatalogRemote)
     if not remote then
@@ -755,6 +812,7 @@ if RunService:IsServer() then
     local cache, order, recent, pending = {}, {}, {}, {}
     local windowStart, requests = os.clock(), 0
     remote.OnServerInvoke = function(player, target)
+        local isRobloxGames = type(target) == "table" and target.action == "robloxGames"
         local isComments = type(target) == "table" and target.action == "comments"
         local isCode = type(target) == "table" and target.action == "code"
         local isGame = type(target) == "table" and target.action == "game"
@@ -769,7 +827,13 @@ if RunService:IsServer() then
         local filters = isFiltered and Filters.normalize(target.filters) or nil
         local haxhellFilters = isHaxHell and Filters.normalize(target.filters) or nil
         local isDetail = type(target) == "string"
-        if isRScripts then
+        if isRobloxGames then
+            if type(target.page) ~= "number" or target.page < 1 or target.page > 5
+                or target.page ~= math.floor(target.page) or type(target.query) ~= "string"
+                or #target.query > 480 or normalizeSearch(target.query) ~= target.query then
+                return {error = "Invalid Roblox games request"}
+            end
+        elseif isRScripts then
             if not rsFilters or type(target.query) ~= "string" or #target.query > 480
                 or normalizeSearch(target.query) ~= target.query
                 or type(target.page) ~= "number" or target.page < 1 or target.page > 200
@@ -831,7 +895,8 @@ if RunService:IsServer() then
         elseif type(target) ~= "number" or target ~= target or target < 1 or target > 1000000 or target ~= math.floor(target) then
             return {error = "Invalid page"}
         end
-        local key = (isRScripts and ("rscripts:" .. tostring(target.page) .. ":"
+        local key = (isRobloxGames and ("robloxGames:" .. target.page .. ":" .. target.query))
+            or (isRScripts and ("rscripts:" .. tostring(target.page) .. ":"
                 .. tostring(target.gameOnly) .. ":" .. Filters.key(rsFilters) .. ":" .. target.query))
             or (isRScriptsDetail and ("rscriptsDetail:" .. target.slug))
             or isHaxHell and ("haxhell:" .. (target.gameOnly and tostring(game.PlaceId) or "all")
@@ -848,7 +913,7 @@ if RunService:IsServer() then
         local now = os.clock()
         local activity = recent[player] or {}
         recent[player] = activity
-        local kind = isRScripts and "rscripts" or (isRScriptsDetail and "rscriptsDetail")
+        local kind = isRobloxGames and "robloxGames" or isRScripts and "rscripts" or (isRScriptsDetail and "rscriptsDetail")
             or isHaxHell and "haxhell" or ((isHaxHellDetail or isHaxHellCode) and "haxhellDetail")
             or ((isSearch or isFiltered) and "search" or (isCode and "code" or (isComments and "comments" or (isDetail and "detail" or (isGame and "game" or "page")))))
         if now - (activity[kind] or -math.huge) < (isCode and 0.6 or (isDetail and 0.25 or 0.5)) then
@@ -871,7 +936,9 @@ if RunService:IsServer() then
         requests += 1
         pending[key] = true
         local ok, data
-        if isRScripts then
+        if isRobloxGames then
+            ok, data = pcall(fetchRobloxGames, target.page, target.query)
+        elseif isRScripts then
             ok, data = pcall(fetchRScriptsCatalogue, target.page, target.query, rsFilters, target.gameOnly)
         elseif isRScriptsDetail then
             ok, data = pcall(fetchRScriptsDetails, target.slug)
@@ -2118,14 +2185,14 @@ local function updatePagination()
     local enabled = selectedProvider >= 1 and not detailView
     scopeBack.Visible = enabled and (catalogueScope ~= "all" or searchState.query ~= "" or Filters.count(filterState.values) > 0)
     navigation.Visible = not detailView
-    selector.Visible = not detailView
+    selector.Visible = not detailView and catalogueScope ~= "games"
     if detailView then
         searchPill.Visible = false
         shortcuts.Visible = false
     end
     pageLabel.Visible = enabled
     attribution.Visible = true
-    attribution.Text = selectedProvider == 1 and "Powered by Rscripts.net"
+    attribution.Text = catalogueScope == "games" and "Roblox" or selectedProvider == 1 and "Powered by Rscripts.net"
         or (selectedProvider == 2 and "Powered by HaxHell.com" or "Powered by ScriptBlox.com")
     results.Visible = enabled
     pageLabel.Text = totalPages and (tostring(page) .. "/" .. tostring(totalPages)) or ""
@@ -2696,40 +2763,53 @@ local function makeCard(scroller, item, index)
         applyImage(image, item.thumbnail, item.thumbnailSource, "thumbnail")
         local title = create("TextLabel", {
             Name = "Title", Position = UDim2.new(0, 10, 1, -44),
-            Size = UDim2.new(1, -78, 0, 40), BackgroundTransparency = 1,
+            Size = UDim2.new(1, -56, 0, 40), BackgroundTransparency = 1,
             Text = item.title, TextColor3 = Theme.Text, FontFace = Theme.Font, TextSize = 13,
             TextWrapped = true, TextTruncate = Enum.TextTruncate.AtEnd,
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
         }, card)
         local join = create("TextButton", {
             Name = "Join", AnchorPoint = Vector2.new(1, 1),
-            Position = UDim2.new(1, -8, 1, -9), Size = UDim2.fromOffset(54, 30),
+            Position = UDim2.new(1, -8, 1, -9), Size = UDim2.fromOffset(32, 30),
             BackgroundColor3 = Theme.Accent, BorderSizePixel = 0, AutoButtonColor = true,
-            Text = "Join", TextColor3 = Theme.Text, FontFace = Theme.Font, TextSize = 12, ZIndex = 5,
+            Text = "", ZIndex = 5,
         }, card)
         round(join, 6)
+        local icon = lucideIcon(join, "play", 16, Theme.Text, 6)
         local view = {card = card, image = image, title = title, counters = {}, item = item}
+        local teleport = game:GetService("TeleportService")
         local joining = false
+        local function resetJoin()
+            if not alive or not join.Parent then return end
+            joining = false
+            join.Active = true
+            icon.ImageTransparency = 0
+        end
+        local failed = teleport.TeleportInitFailed:Connect(function(who, result, message, placeId)
+            if joining and who == player and placeId == tonumber(view.item.placeId) then
+                warn("Roblox teleport: " .. tostring(result) .. " " .. tostring(message))
+                resetJoin()
+            end
+        end)
+        card.Destroying:Once(function() failed:Disconnect() end)
         join.Activated:Connect(function()
             if joining then return end
             local place = tonumber(numericId(view.item.placeId))
             if not place then return end
             joining = true
             join.Active = false
-            join.Text = "Joining"
+            icon.ImageTransparency = 0.5
             task.spawn(function()
                 local ok, message = pcall(function()
-                    game:GetService("TeleportService"):Teleport(place, player)
+                    teleport:Teleport(place, player)
                 end)
-                if not ok then warn("ScriptFinder teleport: " .. tostring(message)) end
-                if not alive or not join.Parent then return end
-                if not ok then join.Text = "Retry" end
-                task.wait(ok and 6 or 1)
-                if alive and join.Parent then
-                    joining = false
-                    join.Active = true
-                    join.Text = "Join"
+                if not ok then
+                    warn("Roblox teleport: " .. tostring(message))
+                    resetJoin()
+                    return
                 end
+                task.wait(10)
+                resetJoin()
             end)
         end)
         return view
@@ -2931,6 +3011,9 @@ local function requestData(target)
     end
     if remote and remote:IsA("RemoteFunction") then
         return remote:InvokeServer(target)
+    end
+    if type(target) == "table" and target.action == "robloxGames" then
+        return fetchRobloxGames(target.page, target.query)
     end
     if type(target) == "table" and target.action == "comments" then
         return fetchComments(target.id, target.page)
@@ -3760,7 +3843,9 @@ local function loadCatalogue(target, direction, background)
     task.spawn(function()
         lastCatalogueRequest = os.clock()
         local ok, data
-        if scope == "favorites" then
+        if scope == "games" then
+            ok, data = pcall(requestData, {action = "robloxGames", page = target, query = query})
+        elseif scope == "favorites" then
             ok, data = pcall(favorites.page, target, query, filters, provider)
         elseif provider == 1 then
             ok, data = pcall(requestData, {action = "rscripts", page = target,
@@ -3778,9 +3863,10 @@ local function loadCatalogue(target, direction, background)
         else
             ok, data = pcall(requestData, target)
         end
-        if not alive or token ~= generation or selectedProvider ~= provider
+        if not alive or token ~= generation
+            or (scope ~= "games" and selectedProvider ~= provider)
             or scope ~= catalogueScope or query ~= searchState.query
-            or filterKey ~= Filters.key(filterState.values) then
+            or (scope ~= "games" and filterKey ~= Filters.key(filterState.values)) then
             return
         end
         loading = false
@@ -3789,7 +3875,7 @@ local function loadCatalogue(target, direction, background)
             local reason = not ok and tostring(data) or (type(data) == "table" and data.error or "Invalid catalogue response")
             reason = tostring(reason):gsub("[%c]", " ")
             warn("ScriptFinder catalogue: " .. reason)
-            feedback.Text = (scope == "favorites" and "Favorites: "
+            feedback.Text = (scope == "games" and "Roblox: " or scope == "favorites" and "Favorites: "
                 or (provider == 1 and "RScripts: " or (provider == 2 and "HaxHell: " or "ScriptBlox: ")))
                 .. string.sub(reason, 1, 180)
             feedback.Visible = not background or not activePageView
@@ -3809,24 +3895,9 @@ local function loadCatalogue(target, direction, background)
         hasLoaded = true
         gui:SetAttribute("Page", page)
         gui:SetAttribute("TotalPages", totalPages)
-        if scope == "games" then
-            local games, seen = {}, {}
-            for _, item in ipairs(data.items) do
-                local place = numericId(item.placeId)
-                if place and item.isUniversal ~= true and not seen[place] then
-                    seen[place] = true
-                    table.insert(games, {
-                        id = "game_" .. place, isGameCard = true, placeId = place,
-                        title = item.gameName or ("Game " .. place),
-                        thumbnail = "rbxthumb://type=GameThumbnail&id=" .. place .. "&w=384&h=216",
-                    })
-                end
-            end
-            data = {items = games, totalPages = data.totalPages, insufficientQuery = data.insufficientQuery}
-        end
         feedback.Visible = #data.items == 0
         local empty = data.insufficientQuery and "Enter at least two characters to search HaxHell."
-            or (scope == "games" and "No joinable games on this page.")
+            or (scope == "games" and "No games found.")
             or (query ~= "" and "No matching scripts.")
             or (scope == "favorites" and "No favorites yet.")
             or (scope == "game" and "No scripts found for this game." or "No scripts on this page.")
@@ -3989,7 +4060,8 @@ layoutSearchBar = function(animate)
     local inset = hasBack and 40 or 0
     local stacked = width < 558 + inset
     local available = math.max(0, width - (stacked and 28 or 286) - inset)
-    local expanded = filterState.expanded and selectedProvider >= 1 and not detailView
+    local games = catalogueScope == "games"
+    local expanded = not games and filterState.expanded and selectedProvider >= 1 and not detailView
     local filterWidth = expanded and math.clamp(available - 64 - 8 - 38, 94, 144) or 32
     local minSearch = available >= 250 and 108 or 64
     local visibleIcons = 2
@@ -3997,7 +4069,9 @@ layoutSearchBar = function(animate)
         if available < minSearch + 8 + filterWidth + 114 then visibleIcons = 1 end
         if available < minSearch + 8 + filterWidth + 76 then visibleIcons = 0 end
     end
-    local shortcutsWidth = visibleIcons * 38 + filterWidth + 38
+    if games then visibleIcons = 0 end
+    local shortcutsWidth = games and 32 or (visibleIcons * 38 + filterWidth + 38)
+    filterState.button.Visible = not games
     local searchWidth = math.max(0, math.min(280, available - 8 - shortcutsWidth))
     scopeBack.Visible = hasBack and not detailView
     searchPill.Visible = searchWidth >= 64 and not detailView
@@ -4037,14 +4111,14 @@ layoutSearchBar = function(animate)
         Size = UDim2.fromOffset(filterWidth, 38),
     }, animate)
     filterState.motion(filterState.gamesButton, {
-        Position = UDim2.fromOffset(visibleIcons * 38 + filterWidth + 6, 0),
+        Position = UDim2.fromOffset(games and 0 or (visibleIcons * 38 + filterWidth + 6), 0),
     }, animate)
     filterState.motion(filterState.label, {TextTransparency = expanded and 0 or 1}, animate)
     filterState.motion(filterState.chevron, {ImageTransparency = expanded and 0 or 1}, animate)
 
     local row = stacked and 60 or 12
     selector.Position = UDim2.new(1, -14, 0, row)
-    navigation.Position = UDim2.new(1, -148, 0, row)
+    navigation.Position = UDim2.new(1, games and -14 or -148, 0, row)
     local top = row + 50
     results.Position = UDim2.fromOffset(14, top)
     results.Size = UDim2.new(1, -28, 1, -top - 26)
@@ -4106,7 +4180,7 @@ function filterState.select(key, value)
 end
 
 bind(filterState.button.Activated, function()
-    if detailView then return end
+    if detailView or catalogueScope == "games" then return end
     if not filterState.expanded then
         filterState.expanded = true
     else
@@ -4167,7 +4241,7 @@ local function selectProvider(index, animated)
             filterState.values.sort = "all"
         end
         filterState.updateRows()
-        switchCatalogue(catalogueScope == "games" and "games" or nil)
+        if catalogueScope ~= "games" then switchCatalogue() end
     end
     stopSelectorTween()
     local target = UDim2.fromOffset(3 + (selectedProvider - 1) * 40, 3)
