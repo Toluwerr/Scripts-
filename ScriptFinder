@@ -744,61 +744,107 @@ local function fetchDetails(slug)
     return info
 end
 
-local function fetchRobloxGames(target, query)
-    local session = HttpService:GenerateGUID(false)
-    local url = query == "" and ("https://apis.roblox.com/explore-api/v1/get-sort-content?sortId=top-playing-now&device=computer&country=all&sessionId=" .. session)
-        or ("https://apis.roblox.com/search-api/omni-search?pageType=all&sessionId=" .. session .. "&searchQuery=" .. HttpService:UrlEncode(query))
-    local response = readResponse(url, true)
-    local ids, seen = {}, {}
-    local function collect(value, depth)
-        if type(value) ~= "table" or depth > 12 or #ids >= 100 then return end
+local fetchRobloxGames
+do
+    local snapshots = {}
+    local order = {}
+    local maxGames = 100
+
+    local function collectGames(value, ids, seen, depth)
+        if type(value) ~= "table" or depth > 12 or #ids >= maxGames then return end
         local id = numericId(value.universeId)
         if id and not seen[id] then
             seen[id] = true
             table.insert(ids, id)
         end
-        if #value > 0 then
-            for _, child in ipairs(value) do collect(child, depth + 1) end
-        else
-            for _, child in pairs(value) do
-                if type(child) == "table" then collect(child, depth + 1) end
+        for _, child in ipairs(value) do
+            collectGames(child, ids, seen, depth + 1)
+        end
+        for key, child in pairs(value) do
+            if type(key) ~= "number" and type(child) == "table" then
+                collectGames(child, ids, seen, depth + 1)
             end
         end
     end
-    collect(response, 0)
-    if #ids == 0 and not (response.searchResults or response.games or response.sorts or response.sortContent or response.content or response.data) then
-        error("Roblox returned an unexpected discovery response", 0)
-    end
-    local all = {}
-    for first = 1, #ids, 50 do
-        local batch = {}
-        for i = first, math.min(first + 49, #ids) do table.insert(batch, ids[i]) end
-        local details = readResponse("https://games.roblox.com/v1/games?universeIds=" .. table.concat(batch, ","), true)
-        if type(details.data) ~= "table" then error("Invalid Roblox game metadata", 0) end
-        for _, info in ipairs(details.data) do
-            if type(info) == "table" then
-                local universe = numericId(info.id)
-                local place = numericId(info.rootPlaceId)
-                local title = plainText(info.name, 180)
-                if universe and place and title then
-                    all[universe] = {
-                        id = "game_" .. universe, isGameCard = true, universeId = universe,
-                        placeId = place, title = title,
-                        thumbnail = "rbxthumb://type=GameThumbnail&id=" .. place .. "&w=384&h=216",
-                    }
+
+    local function discover(query)
+        local session = HttpService:GenerateGUID(false)
+        local url = query == "" and ("https://apis.roblox.com/explore-api/v1/get-sort-content?sortId=top-playing-now&device=computer&country=all&sessionId=" .. session)
+            or ("https://apis.roblox.com/search-api/omni-search?pageType=all&sessionId=" .. session .. "&searchQuery=" .. HttpService:UrlEncode(query))
+        local ids, seen, cursors = {}, {}, {}
+        local cursor
+        for _ = 1, (query == "" and 1 or 5) do
+            local address = url
+            if cursor then address ..= "&pageToken=" .. HttpService:UrlEncode(cursor) end
+            local ok, response = pcall(readResponse, address, true)
+            if not ok then
+                if #ids == 0 then error(response, 0) end
+                break
+            end
+            if query ~= "" then
+                if type(response.searchResults) ~= "table" then
+                    if #ids == 0 then error("Invalid Roblox search response", 0) end
+                    break
+                end
+                collectGames(response.searchResults, ids, seen, 0)
+            else
+                collectGames(response, ids, seen, 0)
+                if #ids == 0 and not (response.games or response.sorts or response.sortContent or response.content or response.data or response.gameSorts) then
+                    error("Invalid Roblox discovery response", 0)
+                end
+            end
+            cursor = response.nextPageToken
+            if query == "" or #ids >= maxGames or type(cursor) ~= "string" or cursor == "" or #cursor > 4096 or cursors[cursor] then break end
+            cursors[cursor] = true
+        end
+
+        local all = {}
+        for first = 1, #ids, 50 do
+            local batch = {}
+            for i = first, math.min(first + 49, #ids) do table.insert(batch, ids[i]) end
+            local details = readResponse("https://games.roblox.com/v1/games?universeIds=" .. table.concat(batch, ","), true)
+            if type(details.data) ~= "table" then error("Invalid Roblox game metadata", 0) end
+            for _, info in ipairs(details.data) do
+                if type(info) == "table" then
+                    local universe = numericId(info.id)
+                    local place = numericId(info.rootPlaceId)
+                    local title = plainText(info.name, 180)
+                    if universe and place and title and seen[universe] then
+                        all[universe] = {
+                            id = "game_" .. universe, isGameCard = true, universeId = universe,
+                            placeId = place, title = title,
+                            thumbnail = "rbxthumb://type=GameThumbnail&id=" .. place .. "&w=384&h=216",
+                        }
+                    end
                 end
             end
         end
+        local ordered = {}
+        for _, id in ipairs(ids) do
+            if all[id] then table.insert(ordered, all[id]) end
+        end
+        return ordered
     end
-    local ordered = {}
-    for _, id in ipairs(ids) do
-        if all[id] then table.insert(ordered, all[id]) end
+
+    fetchRobloxGames = function(target, query)
+        query = normalizeSearch(query)
+        local snapshot = snapshots[query]
+        if not snapshot or (target == 1 and os.clock() - snapshot.time >= 30)
+            or os.clock() - snapshot.time >= 180 then
+            local items = discover(query)
+            if not snapshots[query] then
+                table.insert(order, query)
+                if #order > 12 then snapshots[table.remove(order, 1)] = nil end
+            end
+            snapshot = {items = items, time = os.clock()}
+            snapshots[query] = snapshot
+        end
+        local items = {}
+        for i = (target - 1) * PageSize + 1, math.min(target * PageSize, #snapshot.items) do
+            table.insert(items, table.clone(snapshot.items[i]))
+        end
+        return {items = items, totalPages = math.max(1, math.ceil(#snapshot.items / PageSize))}
     end
-    local items = {}
-    for i = (target - 1) * PageSize + 1, math.min(target * PageSize, #ordered) do
-        table.insert(items, ordered[i])
-    end
-    return {items = items, totalPages = math.max(1, math.ceil(#ordered / PageSize))}
 end
 
 if RunService:IsServer() then
@@ -1784,7 +1830,7 @@ local function updateShortcuts()
             button.BackgroundTransparency = selected and 0 or 1
         end
     end
-    filterState.button.Active = selectedProvider >= 1
+    filterState.button.Active = selectedProvider >= 1 and catalogueScope ~= "games"
 end
 
 local results = create("Frame", {
@@ -4058,9 +4104,10 @@ layoutSearchBar = function(animate)
     local width = content.AbsoluteSize.X
     local hasBack = selectedProvider >= 1 and (catalogueScope ~= "all" or searchState.query ~= "" or Filters.count(filterState.values) > 0)
     local inset = hasBack and 40 or 0
-    local stacked = width < 558 + inset
-    local available = math.max(0, width - (stacked and 28 or 286) - inset)
     local games = catalogueScope == "games"
+    local stacked = width < (games and 330 or 558) + inset
+    local available = math.max(0, width - (stacked and 28 or (games and 152 or 286)) - inset)
+    searchInput.PlaceholderText = games and "Search games" or "Search"
     local expanded = not games and filterState.expanded and selectedProvider >= 1 and not detailView
     local filterWidth = expanded and math.clamp(available - 64 - 8 - 38, 94, 144) or 32
     local minSearch = available >= 250 and 108 or 64
