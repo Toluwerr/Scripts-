@@ -282,8 +282,11 @@ local function summaryFor(item)
         return nil
     end
     local stats = type(item.stats) == "table" and item.stats or {}
+    local experience = type(item.game) == "table" and item.game or {}
     local metadata = Filters.metadata(item)
     return {
+        placeId = numericId(experience.placeId or item.placeId or experience.gameId),
+        gameName = plainText(experience.name or experience.title or experience.gameName, 140),
         scriptType = metadata.scriptType,
         verified = metadata.verified,
         isUniversal = metadata.isUniversal,
@@ -296,7 +299,7 @@ local function summaryFor(item)
         thumbnailSource = remoteImageUrl(item.image) or remoteImageUrl(type(item.game) == "table" and item.game.imageUrl),
         views = counter(item.views, item.viewCount, stats.views),
         executions = counter(item.executeCount, item.executionCount, item.executions, item.executes, item.totalExecutions, stats.executions),
-        likes = counter(item.likeCount, item.likes, stats.likes),
+        likes = counter(item.likeCount, item.likesCount, item.likes, stats.likeCount, stats.likesCount, stats.likes),
     }
 end
 
@@ -394,12 +397,13 @@ local function haxhellSummary(item)
         avatarSource = remoteImageUrl(author.avatar),
         avatar = imageAsset(author.avatar),
         description = plainText(item.description, 8000),
-        gameName = plainText(experience.name or experience.gameName, 140),
+        placeId = placeId,
+        gameName = plainText(experience.name or experience.gameName or experience.title, 140),
         scriptType = flags.isPaid == true and "paid" or "free",
         isUniversal = item.type == "universal",
         verified = if type(flags.verified) == "boolean" then flags.verified
             else author.isScripterVerified == true,
-        views = counter(stats.views), likes = counter(stats.likes),
+        views = counter(stats.views), likes = counter(stats.likes, stats.likeCount, item.likeCount, item.likes),
         executions = nil, commentsCount = counter(stats.comments),
         favoritesCount = counter(stats.favorites),
         createdAt = plainText(item.createdAt, 64),
@@ -456,7 +460,7 @@ local function fetchHaxHellCatalogue(page, query, filters, gameOnly)
         if #items >= PageSize then break end
         local item = haxhellSummary(entry)
         if item then
-            item.missingMetrics = {}
+            item.missingMetrics = item.likes == nil and {likes = true} or {}
             table.insert(items, item)
         end
     end
@@ -562,9 +566,10 @@ local function rscriptsSummary(raw)
             or rscriptsImage(gameInfo.logoUrl),
         avatarSource = rscriptsImage(creator.avatarUrl),
         author = plainText(creator.username, 100),
-        gameName = plainText(gameInfo.title, 140),
+        placeId = place,
+        gameName = plainText(gameInfo.title or gameInfo.name, 140),
         description = plainText(raw.description, 8000),
-        views = counter(raw.views), likes = counter(raw.likes), executions = nil,
+        views = counter(raw.views), likes = counter(raw.likes, raw.likeCount, raw.likesCount, type(raw.stats) == "table" and raw.stats.likes or nil), executions = nil,
         scriptType = type(raw.isPaid) == "boolean" and (raw.isPaid and "paid" or "free") or nil,
         verified = type(creator.isVerified) == "boolean" and creator.isVerified or nil,
         createdAt = plainText(raw.createdAt, 64), updatedAt = plainText(raw.lastUpdatedAt, 64),
@@ -605,7 +610,7 @@ local function fetchRScriptsCatalogue(page, query, filters, gameOnly)
         if #items >= PageSize then break end
         local item = rscriptsSummary(raw)
         if item then
-            item.missingMetrics = {}
+            item.missingMetrics = item.likes == nil and {likes = true} or {}
             table.insert(items, item)
         end
     end
@@ -1140,7 +1145,8 @@ local function paintIcon(icon, name)
         elseif name == "Maximize" then "square"
         elseif name == "Restore" then "copy"
         else "x"
-    lucideIcon(icon, glyph, 18, Theme.Text, icon.ZIndex + 1)
+    local size = (name == "Maximize" or name == "Restore") and 16 or 18
+    lucideIcon(icon, glyph, size, Theme.Text, icon.ZIndex + 1)
 end
 
 local function hover(button, transparency)
@@ -1528,6 +1534,10 @@ end
 
 local favoriteShortcut, favoriteShortcutButton = shortcut("Favorites", "star")
 local gameShortcut, gameShortcutButton = shortcut("Game", "gamepad-2")
+do
+    local _, button = shortcut("Games", "play")
+    filterState.gamesButton = button
+end
 
 do
     local button = create("TextButton", {
@@ -1693,7 +1703,7 @@ bind(scopeBack.MouseEnter, function() hover(scopeBack, 0.24) end)
 bind(scopeBack.MouseLeave, function() hover(scopeBack, 0) end)
 
 local function updateShortcuts()
-    for _, entry in ipairs({{favoriteShortcutButton, "favorites"}, {gameShortcutButton, "game"}}) do
+    for _, entry in ipairs({{favoriteShortcutButton, "favorites"}, {gameShortcutButton, "game"}, {filterState.gamesButton, "games"}}) do
         local button, scope = entry[1], entry[2]
         local selected = selectedProvider >= 1 and catalogueScope == scope
         local color = selected and Theme.Accent or Theme.Text
@@ -2671,6 +2681,59 @@ local function makeMetrics(parent, item, layer)
 end
 
 local function makeCard(scroller, item, index)
+    if item.isGameCard then
+        local card = create("Frame", {
+            Name = "GameCard", LayoutOrder = index, BackgroundColor3 = Theme.Raised,
+            BorderSizePixel = 0, ClipsDescendants = true, ZIndex = 3,
+        }, scroller)
+        round(card, 8)
+        local image = create("ImageLabel", {
+            Name = "Thumbnail", Size = UDim2.new(1, 0, 1, -48),
+            BackgroundColor3 = Theme.Window, BorderSizePixel = 0, Image = item.thumbnail,
+            ScaleType = Enum.ScaleType.Crop, ZIndex = 4,
+        }, card)
+        round(image, 8)
+        applyImage(image, item.thumbnail, item.thumbnailSource, "thumbnail")
+        local title = create("TextLabel", {
+            Name = "Title", Position = UDim2.new(0, 10, 1, -44),
+            Size = UDim2.new(1, -78, 0, 40), BackgroundTransparency = 1,
+            Text = item.title, TextColor3 = Theme.Text, FontFace = Theme.Font, TextSize = 13,
+            TextWrapped = true, TextTruncate = Enum.TextTruncate.AtEnd,
+            TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
+        }, card)
+        local join = create("TextButton", {
+            Name = "Join", AnchorPoint = Vector2.new(1, 1),
+            Position = UDim2.new(1, -8, 1, -9), Size = UDim2.fromOffset(54, 30),
+            BackgroundColor3 = Theme.Accent, BorderSizePixel = 0, AutoButtonColor = true,
+            Text = "Join", TextColor3 = Theme.Text, FontFace = Theme.Font, TextSize = 12, ZIndex = 5,
+        }, card)
+        round(join, 6)
+        local view = {card = card, image = image, title = title, counters = {}, item = item}
+        local joining = false
+        join.Activated:Connect(function()
+            if joining then return end
+            local place = tonumber(numericId(view.item.placeId))
+            if not place then return end
+            joining = true
+            join.Active = false
+            join.Text = "Joining"
+            task.spawn(function()
+                local ok, message = pcall(function()
+                    game:GetService("TeleportService"):Teleport(place, player)
+                end)
+                if not ok then warn("ScriptFinder teleport: " .. tostring(message)) end
+                if not alive or not join.Parent then return end
+                if not ok then join.Text = "Retry" end
+                task.wait(ok and 6 or 1)
+                if alive and join.Parent then
+                    joining = false
+                    join.Active = true
+                    join.Text = "Join"
+                end
+            end)
+        end)
+        return view
+    end
     local card = create("Frame", {
         Name = "ScriptCard",
         LayoutOrder = index,
@@ -2994,19 +3057,40 @@ local function updateCard(item, data, missingOnly)
 end
 
 local function hydrateCards(items, token)
-    task.spawn(function()
-        for _, item in ipairs(items) do
-            if not alive or generation ~= token then
-                return
-            end
+    local queue = {}
+    for _, item in ipairs(items) do
+        if not item.isGameCard then
             local needsMetrics = item.missingMetrics and next(item.missingMetrics) ~= nil
             if needsMetrics or (item.thumbnail == "" and not item.thumbnailSource) then
-                local data = requestDetails(item)
-                if not alive or generation ~= token then
-                    return
-                end
-                updateCard(item, data, true)
-                task.wait(0.65)
+                table.insert(queue, item)
+            end
+        end
+    end
+    if #queue == 0 then return end
+    local prioritized = {}
+    for _, item in ipairs(queue) do
+        if item.likes == nil then table.insert(prioritized, item) end
+    end
+    for _, item in ipairs(queue) do
+        if item.likes ~= nil then table.insert(prioritized, item) end
+    end
+    task.spawn(function()
+        local remote = ReplicatedStorage:FindFirstChild(CatalogRemote)
+        local interval = (RunService:IsStudio() or (remote and remote:IsA("RemoteFunction"))) and 0.55 or 0.15
+        local nextIndex, inFlight = 1, 0
+        while alive and generation == token and nextIndex <= #prioritized do
+            if inFlight >= 3 then
+                task.wait(0.05)
+            else
+                local item = prioritized[nextIndex]
+                nextIndex += 1
+                inFlight += 1
+                task.spawn(function()
+                    local ok, data = pcall(requestDetails, item)
+                    inFlight -= 1
+                    if ok and alive and generation == token then updateCard(item, data, true) end
+                end)
+                if nextIndex <= #prioritized then task.wait(interval) end
             end
         end
     end)
@@ -3725,8 +3809,24 @@ local function loadCatalogue(target, direction, background)
         hasLoaded = true
         gui:SetAttribute("Page", page)
         gui:SetAttribute("TotalPages", totalPages)
+        if scope == "games" then
+            local games, seen = {}, {}
+            for _, item in ipairs(data.items) do
+                local place = numericId(item.placeId)
+                if place and item.isUniversal ~= true and not seen[place] then
+                    seen[place] = true
+                    table.insert(games, {
+                        id = "game_" .. place, isGameCard = true, placeId = place,
+                        title = item.gameName or ("Game " .. place),
+                        thumbnail = "rbxthumb://type=GameThumbnail&id=" .. place .. "&w=384&h=216",
+                    })
+                end
+            end
+            data = {items = games, totalPages = data.totalPages, insufficientQuery = data.insufficientQuery}
+        end
         feedback.Visible = #data.items == 0
         local empty = data.insufficientQuery and "Enter at least two characters to search HaxHell."
+            or (scope == "games" and "No joinable games on this page.")
             or (query ~= "" and "No matching scripts.")
             or (scope == "favorites" and "No favorites yet.")
             or (scope == "game" and "No scripts found for this game." or "No scripts on this page.")
@@ -3876,22 +3976,28 @@ bind(gameShortcutButton.Activated, function()
     end
 end)
 
+bind(filterState.gamesButton.Activated, function()
+    if selectedProvider >= 1 and not detailView then
+        switchCatalogue(catalogueScope == "games" and "all" or "games")
+    end
+end)
+
 layoutSearchBar = function(animate)
     animate = animate == true
     local width = content.AbsoluteSize.X
     local hasBack = selectedProvider >= 1 and (catalogueScope ~= "all" or searchState.query ~= "" or Filters.count(filterState.values) > 0)
     local inset = hasBack and 40 or 0
-    local stacked = width < 520 + inset
+    local stacked = width < 558 + inset
     local available = math.max(0, width - (stacked and 28 or 286) - inset)
     local expanded = filterState.expanded and selectedProvider >= 1 and not detailView
-    local filterWidth = expanded and math.clamp(available - 64 - 8, 94, 144) or 32
+    local filterWidth = expanded and math.clamp(available - 64 - 8 - 38, 94, 144) or 32
     local minSearch = available >= 250 and 108 or 64
     local visibleIcons = 2
     if expanded then
-        if available < minSearch + 8 + filterWidth + 76 then visibleIcons = 1 end
-        if available < minSearch + 8 + filterWidth + 38 then visibleIcons = 0 end
+        if available < minSearch + 8 + filterWidth + 114 then visibleIcons = 1 end
+        if available < minSearch + 8 + filterWidth + 76 then visibleIcons = 0 end
     end
-    local shortcutsWidth = visibleIcons * 38 + filterWidth
+    local shortcutsWidth = visibleIcons * 38 + filterWidth + 38
     local searchWidth = math.max(0, math.min(280, available - 8 - shortcutsWidth))
     scopeBack.Visible = hasBack and not detailView
     searchPill.Visible = searchWidth >= 64 and not detailView
@@ -3930,6 +4036,9 @@ layoutSearchBar = function(animate)
         Position = UDim2.fromOffset(visibleIcons * 38, 0),
         Size = UDim2.fromOffset(filterWidth, 38),
     }, animate)
+    filterState.motion(filterState.gamesButton, {
+        Position = UDim2.fromOffset(visibleIcons * 38 + filterWidth + 6, 0),
+    }, animate)
     filterState.motion(filterState.label, {TextTransparency = expanded and 0 or 1}, animate)
     filterState.motion(filterState.chevron, {ImageTransparency = expanded and 0 or 1}, animate)
 
@@ -3940,7 +4049,7 @@ layoutSearchBar = function(animate)
     results.Position = UDim2.fromOffset(14, top)
     results.Size = UDim2.new(1, -28, 1, -top - 26)
     local menuWidth = math.min(216, math.max(1, width - 28))
-    local menuX = math.clamp(14 + inset + searchWidth + 8 + shortcutsWidth - menuWidth, 14, math.max(14, width - menuWidth - 14))
+    local menuX = math.clamp(14 + inset + searchWidth + 8 + shortcutsWidth - 38 - menuWidth, 14, math.max(14, width - menuWidth - 14))
     local menuHeight = math.max(0, math.min(358, content.AbsoluteSize.Y - 70))
     local menuOpen = expanded and filterState.menuOpen and menuHeight >= 60 and content.Visible
     local menu = filterState.menu
@@ -4058,7 +4167,7 @@ local function selectProvider(index, animated)
             filterState.values.sort = "all"
         end
         filterState.updateRows()
-        switchCatalogue()
+        switchCatalogue(catalogueScope == "games" and "games" or nil)
     end
     stopSelectorTween()
     local target = UDim2.fromOffset(3 + (selectedProvider - 1) * 40, 3)
