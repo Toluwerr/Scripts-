@@ -98,17 +98,17 @@ local defaults = {
     passStrength = 100, passType = "Direct pass", passPower = 85, passCurve = "Automatic", passSpin = 25,
     passTargets = "Teammates", passCone = 14, passLead = true, aimDot = true,
     autoPoke = true, walkfling = false,
-    jumpEnabled = true, jumpHeight = 3, playerHitboxes = false, playerHitboxSize = 12, hitboxVisuals = true, ballExpander = true, ballHitboxRadius = 4, ballHitboxVisual = true,
+    jumpEnabled = true, infiniteJump = true, jumpHeight = 18, playerHitboxes = false, playerHitboxSize = 12, hitboxVisuals = true, ballExpander = true, ballHitboxRadius = 4, ballHitboxVisual = true,
     freezeBall = false,
     hotPotato = false,
-    ballOrbit = false, ballGrabRange = 24, orbitRadius = 4, orbitSpeed = 32, autoDribble = false,
+    ballGlue = true, ballOrbit = false, ballGrabRange = 24, orbitRadius = 4, orbitSpeed = 32, autoDribble = false,
     antiRagdoll = true, antiSlide = true,
     passHeightMode = "Automatic", passAngle = 37, passAdaptive = false,
     autoGK = false, gkPosition = false,
     passDecision = "Balanced", smartPassType = "Automatic", 
     antiAFK = true, rejoinGK = true, performance = true, reducePostEffects = true, keepShadows = false, fpsCap = 240,
 }
-local S: any = {version = "0.44", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", passStatus = "B | Look at a teammate to pass", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
+local S: any = {version = "0.45", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", passStatus = "B | Look at a teammate to pass", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
 local settingsPath = "Poop/soccer.settings.json"
 pcall(function()
     if isfile(settingsPath) then
@@ -936,7 +936,7 @@ local Grasp = (function()
         local speed = math.max(r.AssemblyLinearVelocity.Magnitude, rules.Server.MinSpeed)
         return math.min(M.range(), speed * (age + rules.Server.SeeLate) + 4.5, (rules.Touch.MaxLaunch + 1) * 0.9)
     end
-    function M.request()
+    function M.request(allowAir)
         if os.clock() < M.nextAt or M.pending or S.busy or not life.alive() then return false end
         local character, r, ball = player.Character, root(), Ball.getBall()
         local pro = game.ReplicatedStorage:FindFirstChild("ProState")
@@ -954,7 +954,7 @@ local Grasp = (function()
             local at = clock - lag
             if at >= event.t + 0.01 then
                 local position = Ball.freeSample(at)
-                if position and math.abs(position.Y - Ball.groundBallY(position)) < 1.2 then
+                if position and (allowAir or math.abs(position.Y - Ball.groundBallY(position)) < 1.2) then
                     local target = r.Position + r.CFrame.LookVector * 0.9
                     local offset = (target - position) * Vector3.new(1, 0, 1)
                     local meta = {pid = pid + 1, seq = 1, nleg = 0, leg = 1, part = "Sole", kind = "Glue",
@@ -3605,40 +3605,44 @@ S.walkfling = Walkfling
 
 
 local Jump = (function()
-    local M: any = {queued = false, airborne = false, nextAt = 0}
+    local M: any = {queued = false, airborne = false, boosting = false, nextAt = 0, maxHeight = 60}
     local replay = module(client, "InstantReplay")
-    local state = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
+    local state = game.ReplicatedStorage:FindFirstChild("ProState")
     function M.fire()
-        if not life.alive() or S.busy or os.clock() < M.nextAt or M.queued or replay.playing()
+        if not life.alive() or S.busy or os.clock() < M.nextAt or M.queued or (M.airborne and not cfg.infiniteJump) or replay.playing()
             or (state and state:GetAttribute("Phase") ~= "Play") then return false end
         local character = player.Character
         local r = character and character:FindFirstChild("Root")
         local manager = character and character:FindFirstChildOfClass("ControllerManager")
         local sensor = manager and manager.GroundSensor
-        if not r or not r:IsA("BasePart") or not manager or not sensor or not sensor.SensedPart
+        if not r or not r:IsA("BasePart") or not manager or not sensor or (not sensor.SensedPart and not cfg.infiniteJump)
             or character:GetAttribute("BodyState") ~= "Animated" or not isnetworkowner(r) then return false end
-        if character:GetAttribute("Role") == "Goalkeeper" and Mannequin.keeperJump then
+        if character:GetAttribute("Role") == "Goalkeeper" and not cfg.infiniteJump and (tonumber(cfg.jumpHeight) or 18) <= 6 and Mannequin.keeperJump then
             Mannequin.keeperJump()
             M.nextAt = os.clock() + 0.5
             return true
         end
         Walkfling.restore()
         M.queued, M.character = true, character
-        M.nextAt = os.clock() + 0.45
+        M.nextAt = os.clock() + (if cfg.infiniteJump then 0.12 else 0.45)
         return true
     end
     life.connect(Run.PreSimulation, function()
         if M.airborne and player.Character == M.character then
-            local currentRoot = M.character:FindFirstChild("Root")
-            if currentRoot and currentRoot:IsA("BasePart") then
-                local current = currentRoot.AssemblyLinearVelocity
+            local r = M.character:FindFirstChild("Root")
+            if r and r:IsA("BasePart") and M.character:GetAttribute("BodyState") == "Animated" then
+                local current = r.AssemblyLinearVelocity
+                if M.boosting then
+                    local remaining = M.targetY - r.Position.Y
+                    if remaining <= 0.15 or os.clock() > M.boostUntil then M.boosting = false
+                    else current = Vector3.new(current.X, math.min(M.riseSpeed, math.sqrt(2 * workspace.Gravity * remaining)), current.Z) end
+                end
                 local flat = current * Vector3.new(1, 0, 1)
                 local maximum = Tuning.Launch.Speed * math.sqrt(math.max(0.05, 0.9 - (math.max(current.Y, 0) / Tuning.Launch.Rise) ^ 2))
-                if flat.Magnitude > maximum then
-                    flat = flat.Unit * maximum
-                    currentRoot.AssemblyLinearVelocity = flat + Vector3.new(0, current.Y, 0)
-                end
-            end
+                if flat.Magnitude > maximum then flat = flat.Unit * maximum end
+                if M.boosting or flat ~= current * Vector3.new(1, 0, 1) then r.AssemblyLinearVelocity = flat + Vector3.new(0, current.Y, 0) end
+                Walkfling.pauseUntil = os.clock() + 0.08
+            else M.boosting = false end
         end
         if not M.queued then return end
         M.queued = false
@@ -3648,13 +3652,18 @@ local Jump = (function()
         local air = manager and manager:FindFirstChild("AirController")
         local sensor = manager and manager.GroundSensor
         if character ~= M.character or not r or not r:IsA("BasePart") or not manager or not air
-            or not sensor or not sensor.SensedPart or character:GetAttribute("BodyState") ~= "Animated" then return end
+            or not sensor or (not sensor.SensedPart and not cfg.infiniteJump) or character:GetAttribute("BodyState") ~= "Animated" then return end
         Walkfling.restore()
-        local height = math.clamp(tonumber(cfg.jumpHeight) or 3, 1, 6)
-        local speed = math.sqrt(2 * workspace.Gravity * height)
+        local height = math.clamp(tonumber(cfg.jumpHeight) or 18, 1, M.maxHeight)
+        M.riseSpeed = Tuning.Launch.Rise * 0.88
+        local speed = math.min(math.sqrt(2 * workspace.Gravity * height), M.riseSpeed)
         local horizontal = r.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
         local maximum = Tuning.Launch.Speed * math.sqrt(math.max(0.05, 0.9 - (speed / Tuning.Launch.Rise) ^ 2))
         if horizontal.Magnitude > maximum then horizontal = horizontal.Unit * maximum end
+        M.targetY = r.Position.Y + height
+        M.boosting = height > speed * speed / (2 * workspace.Gravity) + 0.1
+        M.boostUntil = os.clock() + height / M.riseSpeed + 1.5
+        M.deadline = M.boostUntil + math.sqrt(2 * height / workspace.Gravity) + 1
         manager.ActiveController = air
         r.AssemblyLinearVelocity = horizontal + Vector3.new(0, speed, 0)
         M.airborne, M.takeoffAt = true, os.clock()
@@ -3664,11 +3673,11 @@ local Jump = (function()
         if not M.airborne then return end
         local character = player.Character
         local manager = character and character:FindFirstChildOfClass("ControllerManager")
-        if character ~= M.character or os.clock() - M.takeoffAt > 2
+        if character ~= M.character or os.clock() > M.deadline
             or (os.clock() - M.takeoffAt > 0.15 and manager and manager.GroundSensor and manager.GroundSensor.SensedPart
-                and manager.ActiveController == manager:FindFirstChild("GroundController")) then M.airborne = false end
+                and manager.ActiveController == manager:FindFirstChild("GroundController")) then M.airborne, M.boosting = false, false end
     end)
-    life.onCleanup(function() M.queued, M.airborne = false, false end)
+    life.onCleanup(function() M.queued, M.airborne, M.boosting = false, false, false end)
     return M
 end)()
 S.jump = Jump
@@ -3689,7 +3698,7 @@ local Hitboxes = (function()
         for part, entry in pairs(M.entries) do release(part, entry) end
     end
     function M.ballContact()
-        if not cfg.ballExpander or cfg.freezeBall or cfg.hotPotato or cfg.ballOrbit or replay.playing() then return end
+        if not cfg.ballExpander or cfg.freezeBall or cfg.hotPotato or cfg.ballOrbit or cfg.ballGlue or replay.playing() then return end
         if M.ballRecord and M.ballRecord.accepted and not M.ballRecord.counted then
             M.ballRecord.counted = true
             M.ballAccepted += 1
@@ -3846,6 +3855,7 @@ local Orbit = (function()
         if enabled then
             if S.controls.freezeBall then S.controls.freezeBall:Set(false, true) end
             if S.controls.hotPotato then S.controls.hotPotato:Set(false, true) end
+            if S.controls.ballGlue then S.controls.ballGlue:Set(false, true) end
         end
     end
     life.connect(Net:RemoteEvent("DribbleKnockRefused").OnClientEvent, function(pid)
@@ -4143,6 +4153,151 @@ end)()
 S.autoDribble = AutoDribble
 
 
+local Glue = (function()
+    local M: any = {enabled = false, sent = 0, accepted = 0, refused = 0, nextAt = 0, inflight = {}}
+    local rules = module(gameModules:WaitForChild("Dribble"), "Rules")
+    local replay = module(client, "InstantReplay")
+    local remote = Net:RemoteEvent("DribbleTouch")
+    local pro = game.ReplicatedStorage:FindFirstChild("ProState")
+    local function reset()
+        M.planned, M.pid, M.ball = nil, nil, nil
+        table.clear(M.inflight)
+    end
+    local function syncPlanner(segment)
+        local state = Dribble.kickState()
+        local ball, character = Ball.getBall(), player.Character
+        if state and state.pid == segment.pid and ball and character
+            and ball:GetAttribute("PossessionId") == segment.pid and ball:GetAttribute("Possessor") == character:GetAttribute("DribbleId") then
+            state.planner.seg = segment
+            local r = root()
+            local canonical = Path.decode(ball:GetAttribute("DribblePath"))
+            local position = canonical and Path.sample(canonical, now(), Path.params(ball))
+            if M.enabled and r and position and M.lastAccepted and M.lastAccepted.pid == segment.pid and os.clock() - M.lastAccepted.at < 0.35
+                and ((position - r.Position) * Vector3.new(1, 0, 1)).Magnitude < 3 then
+                local display = table.clone(segment)
+                local height = math.max(Ball.groundBallY(r.Position), r.Position.Y - (character:GetAttribute("RootHeight") or 4.697) + rules.BALL_RADIUS)
+                local from = r.Position + r.CFrame.LookVector * 1.3
+                from = Vector3.new(from.X, height, from.Z)
+                local velocity = r.AssemblyLinearVelocity
+                display.t0, display.t1 = now(), now() + 0.08
+                display.p0, display.p1 = from, from + velocity * 0.08
+                display.v0, display.v1 = velocity, Vector3.zero
+                Ball.setLocal(display)
+            else Ball.setLocal(segment) end
+        end
+    end
+    function M.setEnabled(enabled)
+        local lastSequence = M.planned and M.planned.seq or 0
+        M.enabled = enabled == true
+        reset()
+        if M.enabled then
+            for _, key in ipairs({"ballOrbit", "freezeBall", "hotPotato"}) do
+                if S.controls[key] then S.controls[key]:Set(false, true) end
+            end
+        else
+            Dribble.holdTouches(now())
+            local ball, character, r = Ball.getBall(), player.Character, root()
+            local segment = ball and Path.decode(ball:GetAttribute("DribblePath"))
+            if not S.busy and ball and character and r and segment and ball:GetAttribute("Possessor") == character:GetAttribute("DribbleId") then
+                local clock = now()
+                local from = Path.sample(segment, clock, Path.params(ball))
+                from = Vector3.new(from.X, Ball.groundBallY(r.Position), from.Z)
+                local meta = table.clone(segment)
+                meta.seq = math.max(segment.seq, lastSequence) + 1
+                local normal = Path.carry(meta, clock, from, Vector3.zero, clock + 0.1, r.Position, Vector3.zero)
+                remote:FireServer(Path.encode(normal))
+                syncPlanner(normal)
+            end
+        end
+    end
+    life.connect(Net:RemoteEvent("DribbleReject").OnClientEvent, function(pid)
+        if not M.enabled or not M.pid or (pid ~= M.pid and pid ~= M.pid - 1) then return end
+        M.refused += 1
+        local ball = M.ball
+        reset()
+        local segment = ball and Path.decode(ball:GetAttribute("DribblePath"))
+        if segment then syncPlanner(segment) end
+        M.nextAt = os.clock() + 0.12
+    end)
+    function M.step()
+        if not M.enabled or not cfg.ballGlue then return end
+        local at, clock = os.clock(), now()
+        local character, r, ball = player.Character, root(), Ball.getBall()
+        if not character or not r or not ball then reset(); return end
+        local ownId, pid = character:GetAttribute("DribbleId"), ball:GetAttribute("PossessionId")
+        if type(ownId) ~= "number" or ownId <= 0 or type(pid) ~= "number" then return end
+        local possessor = ball:GetAttribute("Possessor")
+        local canonical = Path.decode(ball:GetAttribute("DribblePath"))
+        if M.pid and (M.pid ~= pid or M.ball ~= ball or possessor ~= ownId) then reset() end
+        if canonical and canonical.pid == pid then
+            local record = M.inflight[canonical.seq]
+            if record and (canonical.p0 - record.segment.p0).Magnitude < 0.02 and (canonical.p1 - record.segment.p1).Magnitude < 0.02 then
+                M.accepted += 1
+                M.lastAccepted = {at = at, pid = pid, seq = canonical.seq, position = canonical.p0,
+                    target = canonical.p1, rootPosition = record.rootPosition, height = record.height,
+                    error = (canonical.p0 - record.segment.p0).Magnitude}
+                for seq in pairs(M.inflight) do if seq <= canonical.seq then M.inflight[seq] = nil end end
+            end
+        end
+        if at < M.nextAt or at < (M.suspendUntil or 0) or S.busy or replay.playing()
+            or Input:GetFocusedTextBox() or Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+            or GuiService.MenuIsOpen or (pro and pro:GetAttribute("Phase") ~= "Play")
+            or character:GetAttribute("BodyState") ~= "Animated" or r.Anchored then return end
+        if S.lastShot and clock - S.lastShot.at < 0.9 then return end
+        local pass = S.passingEngine and S.passingEngine.active
+        if pass and clock - pass.at < 0.9 then return end
+        if possessor ~= ownId then
+            if possessor == 0 then
+                local flight = Flight.decode(ball:GetAttribute("KickFlight"))
+                if flight and flight.pid == pid and flight.by == ownId then return end
+                if ball:GetAttribute("ReleasedBy") == ownId and clock - (ball:GetAttribute("ReleasedAt") or 0) < 0.9 then return end
+                Grasp.request(true)
+            elseif M.lastOwnedAt and at - M.lastOwnedAt < 2 and at >= (M.nextPoke or 0) then
+                S.pokeCarrier(true)
+                M.nextPoke = at + 0.25
+            end
+            return
+        end
+        if not canonical or canonical.pid ~= pid then return end
+        M.lastOwnedAt = at
+        local base = canonical
+        if M.planned and M.planned.pid == pid and clock - M.planned.t0 < 0.35 and M.planned.seq >= canonical.seq then base = M.planned end
+        local outstanding = 0
+        for seq, record in pairs(M.inflight) do
+            if at - record.sentAt > 0.45 then M.inflight[seq] = nil else outstanding += 1 end
+        end
+        if outstanding >= 4 then return end
+        local from = Path.sample(base, clock, Path.params(ball))
+        local height = r.Position.Y - (tonumber(character:GetAttribute("RootHeight")) or 4.697) + rules.BALL_RADIUS
+        height = math.max(Ball.groundBallY(r.Position), height)
+        from = Vector3.new(from.X, height, from.Z)
+        local velocity = r.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+        if velocity.Magnitude > 40 then velocity = velocity.Unit * 40 end
+        local target = r.Position + r.CFrame.LookVector * 1.3 + velocity * 0.08
+        local meta = {pid = pid, seq = math.max(base.seq, canonical.seq) + 1, nleg = 0, leg = 1, part = "Sole", kind = "Glue",
+            stride = 0, root = r.Position * Vector3.new(1, 0, 1), nt = clock}
+        local segment = Path.carry(meta, clock, from, velocity, clock + 0.1, target, velocity)
+        if not rules.checkTouch(base, segment, clock, r.Position, r.AssemblyLinearVelocity.Magnitude, Path.params(ball)) then
+            reset(); M.nextAt = at + 0.05; return
+        end
+        M.pid, M.ball, M.planned = pid, ball, segment
+        M.inflight[segment.seq] = {segment = segment, sentAt = at, rootPosition = r.Position, height = height}
+        Dribble.holdTouches(clock + 0.22)
+        remote:FireServer(Path.encode(segment))
+        syncPlanner(segment)
+        M.sent += 1
+        M.nextAt = at + 1 / 30
+    end
+    life.connect(Run.Heartbeat, function()
+        local ok, err = pcall(M.step)
+        if not ok then M.error = tostring(err); reset() end
+    end)
+    life.onCleanup(function() M.setEnabled(false) end)
+    return M
+end)()
+S.ballGlue = Glue
+
+
 local HotPotato = (function()
     local M: any = {sent = 0, accepted = 0, refused = 0, nextAt = 0}
     local sim = module(gameModules, "BallSim")
@@ -4162,6 +4317,7 @@ local HotPotato = (function()
         if enabled then
             if S.controls.freezeBall then S.controls.freezeBall:Set(false, true) end
             if S.controls.ballOrbit then S.controls.ballOrbit:Set(false, true) end
+            if S.controls.ballGlue then S.controls.ballGlue:Set(false, true) end
         end
     end
     function M.step()
@@ -4244,7 +4400,7 @@ local Freeze = (function()
         end
     end)
     function M.step()
-        if not M.enabled or not life.alive() or cfg.hotPotato or cfg.ballOrbit then return end
+        if not M.enabled or not life.alive() or cfg.hotPotato or cfg.ballOrbit or cfg.ballGlue then return end
         if replay.playing() or (state and state:GetAttribute("Phase") ~= "Play") then
             M.anchor, M.pending = nil, nil
             return
@@ -4488,11 +4644,12 @@ local ball = playerTab:Section("Ball")
 toggle(ball, "Auto poke", "autoPoke")
 ball:Button({Text = "Poke", Callback = function() S.pokeCarrier(false) end})
 S.controls.ballMagnet = ball:Button({Text = "Ball magnet (C)", Callback = function() Magnet.pull(false) end})
-toggle(ball, "Freeze loose ball", "freezeBall", function(enabled) if enabled then if S.controls.hotPotato then S.controls.hotPotato:Set(false, true) end; if S.controls.ballOrbit then S.controls.ballOrbit:Set(false, true) end end; Freeze.setEnabled(enabled) end)
+toggle(ball, "Freeze loose ball", "freezeBall", function(enabled) if enabled then if S.controls.hotPotato then S.controls.hotPotato:Set(false, true) end; if S.controls.ballOrbit then S.controls.ballOrbit:Set(false, true) end; if S.controls.ballGlue then S.controls.ballGlue:Set(false, true) end end; Freeze.setEnabled(enabled) end)
 local tricks = playerTab:Section("Tricks")
 toggle(tricks, "Walkfling", "walkfling", Walkfling.setEnabled)
 toggle(tricks, "Hot potato", "hotPotato", HotPotato.setEnabled)
 local orbitSection = playerTab:Section("Ball control")
+toggle(orbitSection, "Ball glue", "ballGlue", Glue.setEnabled)
 toggle(orbitSection, "Ball orbit", "ballOrbit", Orbit.setEnabled)
 slider(orbitSection, "Grab range", "ballGrabRange", 4, 32, 0.5, Orbit.applyVisual)
 slider(orbitSection, "Orbit radius", "orbitRadius", 2.5, 7, 0.5, Orbit.applyVisual)
@@ -4503,7 +4660,8 @@ toggle(protectionSection, "Anti ragdoll", "antiRagdoll")
 toggle(protectionSection, "Anti slide", "antiSlide")
 local jumping = playerTab:Section("Jump")
 toggle(jumping, "Jump (Space)", "jumpEnabled")
-slider(jumping, "Jump height", "jumpHeight", 1, 6, 0.5)
+toggle(jumping, "Infinite jump", "infiniteJump")
+slider(jumping, "Jump height", "jumpHeight", 1, 60, 1)
 jumping:Button({Text = "Jump", Callback = function() Jump.fire() end})
 local hitboxesSection = playerTab:Section("Player boxes")
 toggle(hitboxesSection, "Player boxes", "playerHitboxes", function(value) cfg.hitboxVisuals = value; Hitboxes.apply() end)
@@ -4534,7 +4692,7 @@ local function onKeyInput(key, processed)
     if processed or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
     if key.KeyCode == Enum.KeyCode.RightShift then window:Toggle(); return end
     if key.KeyCode == Enum.KeyCode.Space and cfg.jumpEnabled then Jump.fire(); return end
-    if key.KeyCode == Enum.KeyCode.F or key.KeyCode == Enum.KeyCode.B or key.KeyCode == Enum.KeyCode.C then Orbit.suspendUntil = os.clock() + 0.9 end
+    if key.KeyCode == Enum.KeyCode.F or key.KeyCode == Enum.KeyCode.B or key.KeyCode == Enum.KeyCode.C then Orbit.suspendUntil = os.clock() + 0.9; Glue.suspendUntil = os.clock() + 0.9 end
     if key.KeyCode == Enum.KeyCode.C then Magnet.pull(false); return end
     if key.KeyCode == Enum.KeyCode.H then
         changed("autoGK", not cfg.autoGK)
@@ -4566,6 +4724,7 @@ life.connect(Run.Heartbeat, function(dt)
     aimDot.Visible = cfg.aimDot
     aimDot.BackgroundColor3 = if target then Color3.fromRGB(104, 211, 171) else Color3.fromRGB(245, 247, 246)
 end)
+Glue.setEnabled(cfg.ballGlue)
 save()
 notify("Ragdoll Soccer", "F: shoot | B: pass | H: keeper | Right Shift: menu")
 return S
