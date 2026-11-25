@@ -32,10 +32,10 @@ local CHANNELS = {
 
 local WS_URL = (SERVER:gsub("^http", "ws")) .. "/ws"
 local MAX_LEN = 200
-local WIN_W, WIN_H = 670, 450
-local MIN_W, MIN_H = 540, 320
-local TITLE_H = 42
-local SIDE_W = 158
+local WIN_W, WIN_H = 740, 488
+local MIN_W, MIN_H = 570, 365
+local TITLE_H = 44
+local SIDE_W = 184
 
 local req = request or http_request or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request)
 local hasWS = (WebSocket and WebSocket.connect) and true or false
@@ -158,71 +158,64 @@ local function api(method, path, body)
 	return res.StatusCode, dok and data or nil
 end
 
--- ---------- visual system ----------
+-- ---------- interface ----------
 local C = {
-    bg = Color3.fromRGB(23, 23, 23),
-    bar = Color3.fromRGB(27, 27, 27),
-    panel = Color3.fromRGB(29, 29, 29),
-    input = Color3.fromRGB(39, 39, 39),
+    bg = Color3.fromRGB(24, 24, 24),
+    bar = Color3.fromRGB(24, 24, 24),
+    panel = Color3.fromRGB(31, 31, 31),
+    input = Color3.fromRGB(36, 36, 36),
     accent = Color3.fromRGB(44, 103, 197),
-    accentHover = Color3.fromRGB(58, 119, 211),
-    accentSoft = Color3.fromRGB(43, 55, 75),
-    btn = Color3.fromRGB(38, 38, 38),
-    btnHover = Color3.fromRGB(49, 49, 49),
-    divider = Color3.fromRGB(46, 46, 46),
-    danger = Color3.fromRGB(215, 78, 79),
-    text = Color3.fromRGB(240, 240, 240),
-    mine = Color3.fromRGB(139, 180, 240),
-    sys = Color3.fromRGB(198, 175, 123),
+    accentHover = Color3.fromRGB(58, 117, 207),
+    accentSoft = Color3.fromRGB(34, 48, 70),
+    btn = Color3.fromRGB(37, 37, 37),
+    btnHover = Color3.fromRGB(45, 45, 45),
+    divider = Color3.fromRGB(49, 49, 49),
+    danger = Color3.fromRGB(213, 89, 89),
+    text = Color3.fromRGB(242, 242, 242),
+    mine = Color3.fromRGB(143, 185, 246),
+    sys = Color3.fromRGB(191, 183, 162),
     dim = Color3.fromRGB(145, 145, 145),
-    good = Color3.fromRGB(82, 188, 126),
-    warn = Color3.fromRGB(227, 174, 93),
-    bad = Color3.fromRGB(215, 78, 79),
+    good = Color3.fromRGB(112, 199, 142),
+    warn = Color3.fromRGB(229, 177, 101),
+    bad = Color3.fromRGB(213, 89, 89),
 }
 
 local function new(class, props, parent)
-    local o = Instance.new(class)
-    for key, value in pairs(props) do o[key] = value end
-    o.Parent = parent
-    return o
+    local object = Instance.new(class)
+    for key, value in pairs(props) do object[key] = value end
+    object.Parent = parent
+    return object
 end
 
-local function round(obj, radius)
-    return new("UICorner", {CornerRadius = UDim.new(0, radius or 8)}, obj)
+local function round(object, radius)
+    return new("UICorner", {CornerRadius = UDim.new(0, radius)}, object)
 end
 
-local function tween(obj, duration, props)
-    local motion = TweenService:Create(obj, TweenInfo.new(duration, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), props)
+local function tween(object, duration, props)
+    local motion = TweenService:Create(object,
+        TweenInfo.new(duration, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), props)
     motion:Play()
     return motion
 end
 
 local function esc(value)
-    return (tostring(value):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&apos;"))
+    return (tostring(value):gsub("&", "&amp;"):gsub("<", "&lt;")
+        :gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&apos;"))
 end
 
-local function nameColor(userId)
-    return Color3.fromHSV(((tonumber(userId) or 0) * 47 % 360) / 360, 0.34, 0.95)
+local function nameColor(id)
+    return Color3.fromHSV(((tonumber(id) or 0) * 47 % 360) / 360, 0.34, 0.95)
 end
 
--- Shared icon sprites are used only for controls, not for the application layout.
-local icons = {
-    minus = {"rbxassetid://16898613613", Vector2.new(771, 196)},
-    close = {"rbxassetid://16898613869", Vector2.new(869, 906)},
-    send = {"rbxassetid://16898612629", Vector2.new(453, 820)},
-}
-local function icon(parent, kind, size, tint, layer)
-    local asset = icons[kind]
-    return new("ImageLabel", {
-        Name = "Icon", AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(size, size),
-        BackgroundTransparency = 1, Image = asset[1], ImageRectOffset = asset[2],
-        ImageRectSize = Vector2.new(48, 48), ImageColor3 = tint or C.text,
-        ScaleType = Enum.ScaleType.Fit, ZIndex = layer or 5,
+local function line(parent, x, y, width, height, color, z, rotation)
+    return new("Frame", {
+        Position = UDim2.fromOffset(x, y),
+        Size = UDim2.fromOffset(width, height),
+        BackgroundColor3 = color, BorderSizePixel = 0,
+        Rotation = rotation or 0, ZIndex = z or 1,
     }, parent)
 end
 
--- ---------- window ----------
 local parentGui = (gethui and gethui()) or game:GetService("CoreGui")
 local gui = new("ScreenGui", {
     Name = HttpService:GenerateGUID(false), ResetOnSpawn = false,
@@ -231,341 +224,394 @@ local gui = new("ScreenGui", {
 }, parentGui)
 if syn and syn.protect_gui then pcall(syn.protect_gui, gui) end
 
-local cam = workspace.CurrentCamera
-local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
-local initialWidth = math.min(WIN_W, math.max(320, vp.X - 24))
-local initialHeight = math.min(WIN_H, math.max(230, vp.Y - 24))
+local camera = workspace.CurrentCamera
+local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+local initialWidth = math.min(WIN_W, math.max(320, viewport.X - 28))
+local initialHeight = math.min(WIN_H, math.max(245, viewport.Y - 28))
 local win = new("Frame", {
-    Name = "ChatWindow", Size = UDim2.fromOffset(initialWidth, initialHeight),
-    Position = UDim2.fromOffset(math.max(0, math.floor((vp.X - initialWidth) / 2)),
-        math.max(0, math.floor((vp.Y - initialHeight) / 2))),
-    BackgroundColor3 = C.bg, BorderSizePixel = 0, ClipsDescendants = true,
+    Name = "ChatWindow",
+    Size = UDim2.fromOffset(initialWidth, initialHeight),
+    Position = UDim2.fromOffset(
+        math.max(0, math.floor((viewport.X - initialWidth) / 2)),
+        math.max(0, math.floor((viewport.Y - initialHeight) / 2))),
+    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+    ClipsDescendants = true,
 }, gui)
-round(win, 11)
+-- The shell itself is rounded; all contrasting surfaces are inset from its edges.
+round(win, 14)
 
 local titleBar = new("Frame", {
-    Name = "TitleBar", Size = UDim2.new(1, 0, 0, TITLE_H),
-    BackgroundColor3 = C.bar, BorderSizePixel = 0, ZIndex = 3,
+    Name = "WindowBar", Size = UDim2.new(1, 0, 0, TITLE_H),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+    ZIndex = 3,
 }, win)
-new("Frame", {
-    Position = UDim2.new(0, 0, 1, -1), Size = UDim2.new(1, 0, 0, 1),
-    BackgroundColor3 = C.divider, BorderSizePixel = 0, ZIndex = 3,
+local titleDrag = new("Frame", {
+    Name = "DragArea", Position = UDim2.fromOffset(8, 0),
+    Size = UDim2.new(1, -98, 1, 0),
+    BackgroundTransparency = 1, Active = true, ZIndex = 3,
 }, titleBar)
 
-local titleDrag = new("Frame", {
-    Name = "DragRegion", Size = UDim2.new(1, -82, 1, 0),
-    BackgroundTransparency = 1, Active = true, ZIndex = 6,
-}, titleBar)
 local dot = new("Frame", {
-    Name = "ConnectionDot", Position = UDim2.fromOffset(16, math.floor((TITLE_H - 7) / 2)),
+    Name = "ConnectionDot", Position = UDim2.fromOffset(18, 18),
     Size = UDim2.fromOffset(7, 7), BackgroundColor3 = C.warn,
-    BorderSizePixel = 0, ZIndex = 5,
+    BorderSizePixel = 0, ZIndex = 4,
 }, titleBar)
 round(dot, 4)
 local status = new("TextLabel", {
-    Name = "ConnectionStatus", Position = UDim2.fromOffset(31, 0),
-    Size = UDim2.fromOffset(165, TITLE_H), BackgroundTransparency = 1,
+    Name = "Connection", Position = UDim2.fromOffset(33, 0),
+    Size = UDim2.new(1, -142, 1, 0), BackgroundTransparency = 1,
     Text = "Connecting", TextColor3 = C.dim, TextSize = 11,
-    Font = Enum.Font.Gotham, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+    Font = Enum.Font.GothamMedium, TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 4,
+}, titleBar)
+new("Frame", {
+    Position = UDim2.fromOffset(14, TITLE_H - 1),
+    Size = UDim2.new(1, -28, 0, 1), BackgroundColor3 = C.divider,
+    BackgroundTransparency = 0.24, BorderSizePixel = 0, ZIndex = 3,
 }, titleBar)
 
-local function titleButton(kind, right)
+local function control(name, offset)
     local button = new("TextButton", {
-        Name = kind, AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(1, right, 0.5, 0), Size = UDim2.fromOffset(29, 28),
+        Name = name, AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, offset, 0.5, 0),
+        Size = UDim2.fromOffset(30, 28),
         BackgroundColor3 = C.btnHover, BackgroundTransparency = 1,
-        BorderSizePixel = 0, AutoButtonColor = false, Text = "", ZIndex = 6,
+        BorderSizePixel = 0, AutoButtonColor = false,
+        Text = "", ZIndex = 5,
     }, titleBar)
     round(button, 8)
-    local glyph = icon(button, kind == "Close" and "close" or "minus", 15, C.text, 7)
-    bind(button.MouseEnter, function() tween(button, 0.16, {BackgroundTransparency = 0}) end)
-    bind(button.MouseLeave, function() tween(button, 0.16, {BackgroundTransparency = 1}) end)
-    return button, glyph
+    bind(button.MouseEnter, function()
+        tween(button, 0.15, {BackgroundTransparency = 0})
+    end)
+    bind(button.MouseLeave, function()
+        tween(button, 0.15, {BackgroundTransparency = 1})
+    end)
+    return button
 end
-local minBtn, minIcon = titleButton("Minimize", -42)
-local closeBtn = titleButton("Close", -10)
+
+local minBtn = control("Minimize", -47)
+local closeBtn = control("Close", -13)
+local minIcon = line(minBtn, 10, 13, 11, 1.6, C.text, 6)
+local restoreMark = line(minBtn, 15, 8, 1.6, 11, C.text, 6)
+restoreMark.Visible = false
+line(closeBtn, 9, 13, 13, 1.6, C.text, 6, 45)
+line(closeBtn, 9, 13, 13, 1.6, C.text, 6, -45)
 
 local body = new("Frame", {
-    Name = "Workspace", Position = UDim2.fromOffset(0, TITLE_H),
-    Size = UDim2.new(1, 0, 1, -TITLE_H), BackgroundTransparency = 1,
-    BorderSizePixel = 0,
+    Name = "ChatWorkspace", Position = UDim2.fromOffset(0, TITLE_H),
+    Size = UDim2.new(1, 0, 1, -TITLE_H),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
 }, win)
 
--- ---------- channel rail ----------
+-- The channel surface is a separate rounded panel, not a pasted-on sidebar.
 local side = new("Frame", {
-    Name = "Channels", Size = UDim2.new(0, SIDE_W, 1, 0),
+    Name = "Channels", Position = UDim2.fromOffset(10, 8),
+    Size = UDim2.new(0, SIDE_W - 19, 1, -19),
     BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    ZIndex = 7,
 }, body)
-new("Frame", {
-    Position = UDim2.new(1, -1, 0, 0), Size = UDim2.new(0, 1, 1, 0),
-    BackgroundColor3 = C.divider, BorderSizePixel = 0,
-}, side)
+round(side, 11)
 new("TextLabel", {
-    Name = "Heading", Position = UDim2.fromOffset(15, 17),
-    Size = UDim2.new(1, -25, 0, 18), BackgroundTransparency = 1,
-    Text = "CHANNELS", Font = Enum.Font.GothamBold, TextSize = 10,
+    Name = "Section", Position = UDim2.fromOffset(14, 16),
+    Size = UDim2.new(1, -28, 0, 16),
+    BackgroundTransparency = 1, Text = "CHANNELS",
+    Font = Enum.Font.GothamBold, TextSize = 10,
     TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 8,
 }, side)
 
 local current = "main"
-local drafts = {}
-local unread, chBtns, chanName = {}, {}, {}
-local lists = {}
-local CONTENT_X = SIDE_W
+local drafts, unread, chBtns, chanName, lists = {}, {}, {}, {}, {}
 
-for i, ch in ipairs(CHANNELS) do
-    chanName[ch.id] = ch.name
+for index, channel in ipairs(CHANNELS) do
+    chanName[channel.id] = channel.name
+    unread[channel.id] = 0
     local button = new("TextButton", {
-        Name = ch.id, Position = UDim2.fromOffset(10, 43 + (i - 1) * 37),
-        Size = UDim2.new(1, -20, 0, 33),
+        Name = channel.id, Position = UDim2.fromOffset(8, 45 + (index - 1) * 40),
+        Size = UDim2.new(1, -16, 0, 35),
         BackgroundColor3 = C.btnHover, BackgroundTransparency = 1,
-        BorderSizePixel = 0, AutoButtonColor = false, Text = "",
+        BorderSizePixel = 0, AutoButtonColor = false,
+        Text = "", ZIndex = 8,
     }, side)
-    round(button, 7)
-    local hashLabel = new("TextLabel", {
-        Name = "Hash", Position = UDim2.fromOffset(13, 0),
-        Size = UDim2.fromOffset(16, 33), BackgroundTransparency = 1,
-        Text = "#", Font = Enum.Font.GothamBold, TextSize = 16,
-        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Center,
+    round(button, 8)
+    local symbol = new("TextLabel", {
+        Name = "Symbol", Position = UDim2.fromOffset(11, 0),
+        Size = UDim2.fromOffset(18, 35), BackgroundTransparency = 1,
+        Text = "#", TextColor3 = C.dim, TextSize = 17,
+        Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Center,
+        ZIndex = 9,
     }, button)
-    local nameLabel = new("TextLabel", {
-        Name = "ChannelLabel", Position = UDim2.fromOffset(34, 0),
-        Size = UDim2.new(1, -62, 0, 33), BackgroundTransparency = 1,
-        Text = ch.name, Font = Enum.Font.GothamMedium, TextSize = 12,
-        TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd,
+    local name = new("TextLabel", {
+        Name = "Name", Position = UDim2.fromOffset(36, 0),
+        Size = UDim2.new(1, -64, 1, 0), BackgroundTransparency = 1,
+        Text = channel.name, Font = Enum.Font.GothamMedium, TextSize = 12,
+        TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 9,
     }, button)
     local badge = new("TextLabel", {
         Name = "Unread", AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(22, 17),
-        BackgroundColor3 = C.accent, BorderSizePixel = 0,
+        Position = UDim2.new(1, -7, 0.5, 0),
+        Size = UDim2.fromOffset(20, 17),
+        BackgroundColor3 = C.accent, BorderSizePixel = 0, Visible = false,
         Text = "0", Font = Enum.Font.GothamBold, TextSize = 10,
-        TextColor3 = C.text, Visible = false,
+        TextColor3 = C.text, ZIndex = 9,
     }, button)
     round(badge, 8)
-    chBtns[ch.id] = {btn = button, badge = badge, nameLabel = nameLabel, hashLabel = hashLabel}
-    unread[ch.id] = 0
+    chBtns[channel.id] = {btn = button, badge = badge, nameLabel = name, hashLabel = symbol}
 end
 
-local userChip = new("Frame", {
-    Name = "Identity", Position = UDim2.new(0, 10, 1, -53),
-    Size = UDim2.new(1, -20, 0, 43), BackgroundColor3 = C.bg,
-    BorderSizePixel = 0,
+local identity = new("Frame", {
+    Name = "Identity", Position = UDim2.new(0, 9, 1, -55),
+    Size = UDim2.new(1, -18, 0, 45), BackgroundColor3 = C.bg,
+    BorderSizePixel = 0, ZIndex = 8,
 }, side)
-round(userChip, 8)
-local userAvatar = new("ImageLabel", {
-    Name = "Avatar", Position = UDim2.fromOffset(8, 8), Size = UDim2.fromOffset(27, 27),
-    BackgroundColor3 = C.btn, BorderSizePixel = 0, ScaleType = Enum.ScaleType.Crop,
-    Image = "rbxthumb://type=AvatarHeadShot&id=" .. lp.UserId .. "&w=150&h=150",
-}, userChip)
-round(userAvatar, 14)
+round(identity, 9)
+local avatar = new("ImageLabel", {
+    Name = "SelfAvatar", Position = UDim2.fromOffset(8, 8),
+    Size = UDim2.fromOffset(29, 29),
+    BackgroundColor3 = C.btn, BorderSizePixel = 0,
+    ScaleType = Enum.ScaleType.Crop,
+    Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(lp.UserId) .. "&w=150&h=150",
+    ZIndex = 9,
+}, identity)
+round(avatar, 15)
 new("TextLabel", {
-    Name = "Username", Position = UDim2.fromOffset(42, 7),
-    Size = UDim2.new(1, -50, 0, 17), BackgroundTransparency = 1,
-    Text = lp.Name, Font = Enum.Font.GothamMedium, TextSize = 11,
-    TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
-    TextTruncate = Enum.TextTruncate.AtEnd,
-}, userChip)
+    Name = "Username", Position = UDim2.fromOffset(44, 6),
+    Size = UDim2.new(1, -53, 0, 18), BackgroundTransparency = 1,
+    Text = lp.Name, Font = Enum.Font.GothamMedium,
+    TextSize = 11, TextColor3 = C.text,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 9,
+}, identity)
 new("TextLabel", {
-    Name = "IdentityLabel", Position = UDim2.fromOffset(42, 23),
-    Size = UDim2.new(1, -50, 0, 13), BackgroundTransparency = 1,
-    Text = "Local player", Font = Enum.Font.Gotham, TextSize = 10,
-    TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-}, userChip)
+    Name = "Caption", Position = UDim2.fromOffset(44, 23),
+    Size = UDim2.new(1, -53, 0, 15), BackgroundTransparency = 1,
+    Text = "Your account", Font = Enum.Font.Gotham,
+    TextSize = 10, TextColor3 = C.dim,
+    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 9,
+}, identity)
 
--- ---------- conversation header ----------
+-- Conversation heading, presence and local search.
 local roomHead = new("Frame", {
-    Name = "RoomHeader", Position = UDim2.fromOffset(CONTENT_X, 0),
-    Size = UDim2.new(1, -CONTENT_X, 0, 54),
-    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+    Name = "ConversationHeader", Position = UDim2.fromOffset(SIDE_W, 0),
+    Size = UDim2.new(1, -SIDE_W, 0, 66),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+    ZIndex = 2,
 }, body)
-new("Frame", {
-    Position = UDim2.new(0, 0, 1, -1), Size = UDim2.new(1, 0, 0, 1),
-    BackgroundColor3 = C.divider, BorderSizePixel = 0,
+local sidebarButton = new("TextButton", {
+    Name = "ToggleChannels", Position = UDim2.fromOffset(12, 18),
+    Size = UDim2.fromOffset(31, 30),
+    BackgroundColor3 = C.btnHover, BackgroundTransparency = 1,
+    BorderSizePixel = 0, AutoButtonColor = false, Text = "", ZIndex = 3,
 }, roomHead)
+round(sidebarButton, 8)
+for _, y in ipairs({10, 15, 20}) do
+    line(sidebarButton, 9, y, 13, 1.5, C.text, 4)
+end
 local roomName = new("TextLabel", {
-    Name = "ChannelName", Position = UDim2.fromOffset(55, 8),
-    Size = UDim2.new(1, -255, 0, 23), BackgroundTransparency = 1,
-    Text = "# Main Chat", Font = Enum.Font.GothamBold, TextSize = 15,
-    TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
-    TextTruncate = Enum.TextTruncate.AtEnd,
+    Name = "ChannelName", Position = UDim2.fromOffset(54, 11),
+    Size = UDim2.new(1, -198, 0, 23), BackgroundTransparency = 1,
+    Text = "# Main Chat", Font = Enum.Font.GothamBold,
+    TextSize = 15, TextColor3 = C.text,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3,
 }, roomHead)
 local roomSubtitle = new("TextLabel", {
-    Name = "ChannelSubtitle", Position = UDim2.fromOffset(55, 30),
-    Size = UDim2.new(1, -255, 0, 15), BackgroundTransparency = 1,
-    Text = "Public conversation", Font = Enum.Font.Gotham, TextSize = 11,
-    TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-    TextTruncate = Enum.TextTruncate.AtEnd,
+    Name = "ChannelSubtitle", Position = UDim2.fromOffset(54, 34),
+    Size = UDim2.new(1, -198, 0, 18), BackgroundTransparency = 1,
+    Text = "General discussion", Font = Enum.Font.Gotham,
+    TextSize = 11, TextColor3 = C.dim,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3,
 }, roomHead)
 local presencePill = new("Frame", {
     Name = "OnlineCount", AnchorPoint = Vector2.new(1, 0.5),
-    Position = UDim2.new(1, -17, 0.5, 0),
-    Size = UDim2.fromOffset(91, 25), BackgroundColor3 = C.btn,
-    BorderSizePixel = 0,
+    Position = UDim2.new(1, -15, 0.5, 0),
+    Size = UDim2.fromOffset(94, 27),
+    BackgroundColor3 = C.btn, BorderSizePixel = 0,
+    ZIndex = 3,
 }, roomHead)
-round(presencePill, 12)
-local onlineDot = new("Frame", {
-    Position = UDim2.fromOffset(9, 9), Size = UDim2.fromOffset(7, 7),
-    BackgroundColor3 = C.good, BorderSizePixel = 0,
+round(presencePill, 13)
+local presenceDot = new("Frame", {
+    Position = UDim2.fromOffset(10, 10), Size = UDim2.fromOffset(7, 7),
+    BackgroundColor3 = C.good, BorderSizePixel = 0, ZIndex = 4,
 }, presencePill)
-round(onlineDot, 4)
+round(presenceDot, 4)
 local countLbl = new("TextLabel", {
-    Name = "Count", Position = UDim2.fromOffset(21, 0),
-    Size = UDim2.new(1, -27, 1, 0), BackgroundTransparency = 1,
-    Text = "-- online", Font = Enum.Font.GothamMedium, TextSize = 11,
-    TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
-    TextTruncate = Enum.TextTruncate.AtEnd,
+    Name = "Count", Position = UDim2.fromOffset(23, 0),
+    Size = UDim2.new(1, -28, 1, 0), BackgroundTransparency = 1,
+    Text = "-- online", Font = Enum.Font.GothamMedium,
+    TextSize = 11, TextColor3 = C.text,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4,
 }, presencePill)
-
-local sidebarButton = new("TextButton", {
-    Name = "ToggleChannels", Position = UDim2.fromOffset(15, 13),
-    Size = UDim2.fromOffset(29, 28),
-    BackgroundColor3 = C.btnHover, BackgroundTransparency = 1,
-    BorderSizePixel = 0, AutoButtonColor = false, Text = "",
-}, roomHead)
-round(sidebarButton, 7)
-for _, y in ipairs({8, 13, 18}) do
-    new("Frame", {
-        Position = UDim2.fromOffset(8, y), Size = UDim2.fromOffset(13, 1.4),
-        BackgroundColor3 = C.text, BorderSizePixel = 0,
-    }, sidebarButton)
-end
-
 local findButton = new("TextButton", {
     Name = "FindMessages", AnchorPoint = Vector2.new(1, 0.5),
-    Position = UDim2.new(1, -116, 0.5, 0), Size = UDim2.fromOffset(46, 25),
-    BackgroundColor3 = C.btn, BorderSizePixel = 0,
-    AutoButtonColor = false, Text = "Find", Font = Enum.Font.GothamMedium,
-    TextSize = 11, TextColor3 = C.dim,
+    Position = UDim2.new(1, -119, 0.5, 0),
+    Size = UDim2.fromOffset(30, 29), BackgroundColor3 = C.btnHover,
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+    AutoButtonColor = false, Text = "", ZIndex = 3,
 }, roomHead)
-round(findButton, 7)
+round(findButton, 8)
+local searchCircle = new("Frame", {
+    Position = UDim2.fromOffset(7, 7),
+    Size = UDim2.fromOffset(11, 11),
+    BackgroundTransparency = 1, ZIndex = 4,
+}, findButton)
+round(searchCircle, 6)
+new("UIStroke", {Color = C.text, Thickness = 1.6}, searchCircle)
+line(findButton, 19, 18, 8, 1.6, C.text, 4, 45)
+new("Frame", {
+    Name = "Divider", Position = UDim2.new(0, 15, 1, -1),
+    Size = UDim2.new(1, -30, 0, 1),
+    BackgroundColor3 = C.divider, BorderSizePixel = 0,
+    ZIndex = 2,
+}, roomHead)
+
 local findPanel = new("Frame", {
-    Name = "FindPanel", Position = UDim2.fromOffset(55, 8),
-    Size = UDim2.new(1, -70, 0, 38), BackgroundColor3 = C.input,
-    BorderSizePixel = 0, ZIndex = 4, Visible = false,
+    Name = "FindPanel", Position = UDim2.fromOffset(54, 12),
+    Size = UDim2.new(1, -69, 0, 41),
+    BackgroundColor3 = C.input, BorderSizePixel = 0,
+    ZIndex = 9, Visible = false,
 }, roomHead)
-round(findPanel, 8)
+round(findPanel, 9)
 local findInput = new("TextBox", {
-    Name = "FindInput", Position = UDim2.fromOffset(11, 0),
-    Size = UDim2.new(1, -103, 1, 0), BackgroundTransparency = 1,
-    ClearTextOnFocus = false, Text = "", PlaceholderText = "Find in #main",
+    Name = "FindInput", Position = UDim2.fromOffset(12, 0),
+    Size = UDim2.new(1, -122, 1, 0), BackgroundTransparency = 1,
+    ClearTextOnFocus = false, Text = "", PlaceholderText = "Find messages",
     PlaceholderColor3 = C.dim, TextColor3 = C.text,
-    Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
-    ZIndex = 5,
+    Font = Enum.Font.Gotham, TextSize = 12,
+    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 10,
 }, findPanel)
 local findResult = new("TextLabel", {
-    Name = "ResultCount", AnchorPoint = Vector2.new(1, 0.5),
-    Position = UDim2.new(1, -35, 0.5, 0), Size = UDim2.fromOffset(61, 20),
-    BackgroundTransparency = 1, Text = "", Font = Enum.Font.Gotham,
-    TextSize = 10, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Right,
-    ZIndex = 5,
+    Name = "Matches", AnchorPoint = Vector2.new(1, 0.5),
+    Position = UDim2.new(1, -39, 0.5, 0),
+    Size = UDim2.fromOffset(72, 20), BackgroundTransparency = 1,
+    Text = "", Font = Enum.Font.Gotham,
+    TextSize = 10, TextColor3 = C.dim,
+    TextXAlignment = Enum.TextXAlignment.Right, ZIndex = 10,
 }, findPanel)
 local exitFind = new("TextButton", {
     Name = "CloseFind", AnchorPoint = Vector2.new(1, 0.5),
-    Position = UDim2.new(1, -5, 0.5, 0), Size = UDim2.fromOffset(28, 28),
-    BackgroundTransparency = 1, BorderSizePixel = 0, Text = "×",
-    AutoButtonColor = false, TextColor3 = C.dim, Font = Enum.Font.Gotham,
-    TextSize = 21, ZIndex = 5,
+    Position = UDim2.new(1, -6, 0.5, 0),
+    Size = UDim2.fromOffset(28, 28),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+    AutoButtonColor = false, Text = "", ZIndex = 10,
 }, findPanel)
+line(exitFind, 9, 13, 12, 1.5, C.dim, 11, 45)
+line(exitFind, 9, 13, 12, 1.5, C.dim, 11, -45)
 local searchOpen = false
-local updateSearch
-local updateJump
+local updateSearch, updateJump
 
--- ---------- message area ----------
-for _, ch in ipairs(CHANNELS) do
+-- Chat history is not clipped into cards; it uses the full conversation width.
+for _, channel in ipairs(CHANNELS) do
     local list = new("ScrollingFrame", {
-        Name = "Messages_" .. ch.id,
-        Position = UDim2.fromOffset(CONTENT_X + 2, 55),
-        Size = UDim2.new(1, -CONTENT_X - 4, 1, -125),
+        Name = "Messages_" .. channel.id,
+        Position = UDim2.fromOffset(SIDE_W + 4, 67),
+        Size = UDim2.new(1, -SIDE_W - 8, 1, -149),
         BackgroundTransparency = 1, BorderSizePixel = 0,
         CanvasSize = UDim2.fromOffset(0, 0),
         AutomaticCanvasSize = Enum.AutomaticSize.Y,
         ScrollingDirection = Enum.ScrollingDirection.Y,
         ScrollBarThickness = 3, ScrollBarImageColor3 = C.divider,
         VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar,
-        Visible = ch.id == current,
+        Visible = channel.id == current, ZIndex = 2,
     }, body)
     new("UIListLayout", {
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Padding = UDim.new(0, 1),
+        SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 7),
     }, list)
     new("UIPadding", {
-        PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 13),
-        PaddingTop = UDim.new(0, 13), PaddingBottom = UDim.new(0, 13),
+        PaddingLeft = UDim.new(0, 13), PaddingRight = UDim.new(0, 15),
+        PaddingTop = UDim.new(0, 15), PaddingBottom = UDim.new(0, 15),
     }, list)
-    lists[ch.id] = list
+    lists[channel.id] = list
 end
 
--- ---------- message composer ----------
 local row = new("Frame", {
-    Name = "Composer", Position = UDim2.new(0, CONTENT_X, 1, -69),
-    Size = UDim2.new(1, -CONTENT_X, 0, 69),
-    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+    Name = "Composer", Position = UDim2.new(0, SIDE_W, 1, -82),
+    Size = UDim2.new(1, -SIDE_W, 0, 75),
+    BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 3,
 }, body)
 new("Frame", {
-    Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = C.divider,
-    BorderSizePixel = 0,
+    Position = UDim2.fromOffset(13, 1),
+    Size = UDim2.new(1, -26, 0, 1),
+    BackgroundColor3 = C.divider, BorderSizePixel = 0, ZIndex = 3,
 }, row)
 local boxBg = new("Frame", {
-    Name = "InputSurface", Position = UDim2.fromOffset(15, 13),
-    Size = UDim2.new(1, -79, 0, 42),
-    BackgroundColor3 = C.input, BorderSizePixel = 0,
+    Name = "InputSurface", Position = UDim2.fromOffset(14, 14),
+    Size = UDim2.new(1, -85, 0, 43),
+    BackgroundColor3 = C.input, BorderSizePixel = 0, ZIndex = 4,
 }, row)
-round(boxBg, 9)
+round(boxBg, 10)
 local boxStroke = new("UIStroke", {
-    Color = C.divider, Transparency = 1, Thickness = 1,
+    Color = C.accent, Thickness = 1, Transparency = 1,
 }, boxBg)
 local box = new("TextBox", {
-    Name = "Message", Position = UDim2.fromOffset(12, 0),
-    Size = UDim2.new(1, -53, 1, 0), BackgroundTransparency = 1,
-    Text = "", PlaceholderText = "Message #main-chat",
-    PlaceholderColor3 = C.dim, ClearTextOnFocus = false,
-    Font = Enum.Font.Gotham, TextSize = 13, TextColor3 = C.text,
-    TextXAlignment = Enum.TextXAlignment.Left,
+    Name = "Message", Position = UDim2.fromOffset(14, 0),
+    Size = UDim2.new(1, -64, 1, 0), BackgroundTransparency = 1,
+    Text = "", PlaceholderText = "Message #main", PlaceholderColor3 = C.dim,
+    ClearTextOnFocus = false, Font = Enum.Font.Gotham, TextSize = 13,
+    TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 5,
 }, boxBg)
 local counter = new("TextLabel", {
     Name = "CharacterCount", AnchorPoint = Vector2.new(1, 0.5),
-    Position = UDim2.new(1, -10, 0.5, 0),
-    Size = UDim2.fromOffset(42, 22), BackgroundTransparency = 1,
-    Text = "", Font = Enum.Font.Gotham, TextSize = 10,
+    Position = UDim2.new(1, -11, 0.5, 0), Size = UDim2.fromOffset(42, 22),
+    BackgroundTransparency = 1, Text = "",
+    Font = Enum.Font.Gotham, TextSize = 10,
     TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Right,
+    ZIndex = 5,
 }, boxBg)
 local sendBtn = new("TextButton", {
     Name = "Send", AnchorPoint = Vector2.new(1, 0),
-    Position = UDim2.new(1, -15, 0, 15),
-    Size = UDim2.fromOffset(39, 39), BackgroundColor3 = C.accent,
-    BackgroundTransparency = 0.45, BorderSizePixel = 0,
-    Text = "", AutoButtonColor = false,
+    Position = UDim2.new(1, -14, 0, 14),
+    Size = UDim2.fromOffset(43, 43),
+    BackgroundColor3 = C.accent, BackgroundTransparency = 0.42,
+    BorderSizePixel = 0, AutoButtonColor = false, Text = "", ZIndex = 4,
 }, row)
-round(sendBtn, 9)
-local sendIcon = icon(sendBtn, "send", 19, Color3.new(1, 1, 1), 4)
+round(sendBtn, 10)
+local sendIcon = new("TextLabel", {
+    Name = "Arrow", Size = UDim2.fromScale(1, 1),
+    BackgroundTransparency = 1, Text = "↑",
+    Font = Enum.Font.GothamBold, TextSize = 23,
+    TextColor3 = C.text, TextTransparency = 0.22, ZIndex = 5,
+}, sendBtn)
 
 local grip = new("TextButton", {
     Name = "ResizeHandle", AnchorPoint = Vector2.new(1, 1),
-    Position = UDim2.new(1, -2, 1, -2), Size = UDim2.fromOffset(19, 19),
-    BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 9,
+    Position = UDim2.new(1, -5, 1, -5),
+    Size = UDim2.fromOffset(19, 19), BackgroundTransparency = 1,
+    AutoButtonColor = false, Text = "", ZIndex = 12,
 }, win)
-for _, lineData in ipairs({{3, 12, 12}, {9, 12, 6}}) do
-    new("Frame", {
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromOffset(lineData[1] + lineData[3] / 2, lineData[2] - lineData[3] / 2),
-        Size = UDim2.fromOffset(lineData[3], 1.5), Rotation = -45,
-        BackgroundColor3 = C.dim, BorderSizePixel = 0, ZIndex = 10,
-    }, grip)
-end
+line(grip, 4, 11, 10, 1.4, C.dim, 13, -45)
+line(grip, 10, 12, 6, 1.4, C.dim, 13, -45)
 
-local sidebarCollapsed = initialWidth < 600
+local sidebarCollapsed = initialWidth < 610
 local function layoutWorkspace()
-    local offset = sidebarCollapsed and 0 or SIDE_W
+    local narrow = win.AbsoluteSize.X < 610
+    local offset = (sidebarCollapsed or narrow) and 0 or SIDE_W
     side.Visible = not sidebarCollapsed
+    side.ZIndex = narrow and 12 or 7
     roomHead.Position = UDim2.fromOffset(offset, 0)
-    roomHead.Size = UDim2.new(1, -offset, 0, 54)
-    row.Position = UDim2.new(0, offset, 1, -69)
-    row.Size = UDim2.new(1, -offset, 0, 69)
+    roomHead.Size = UDim2.new(1, -offset, 0, 66)
+    row.Position = UDim2.new(0, offset, 1, -82)
+    row.Size = UDim2.new(1, -offset, 0, 75)
     for _, list in pairs(lists) do
-        list.Position = UDim2.fromOffset(offset + 2, 55)
-        list.Size = UDim2.new(1, -offset - 4, 1, -125)
+        list.Position = UDim2.fromOffset(offset + 4, 67)
+        list.Size = UDim2.new(1, -offset - 8, 1, -149)
     end
+    local roomWidth = win.AbsoluteSize.X - offset
+    roomSubtitle.Visible = not searchOpen and roomWidth >= 365
+    roomName.Position = UDim2.fromOffset(54, roomWidth >= 365 and 11 or 22)
+    roomName.Size = UDim2.new(1, roomWidth < 355 and -166 or -198, 0, 23)
+    if roomWidth < 355 then
+        presencePill.Visible = false
+        findButton.Position = UDim2.new(1, -15, 0.5, 0)
+    else
+        presencePill.Visible = not searchOpen
+        findButton.Position = UDim2.new(1, -119, 0.5, 0)
+    end
+    if updateJump then updateJump() end
 end
 bind(sidebarButton.Activated, function()
     sidebarCollapsed = not sidebarCollapsed
@@ -576,13 +622,14 @@ layoutWorkspace()
 
 local jumpButton = new("TextButton", {
     Name = "JumpToLatest", AnchorPoint = Vector2.new(1, 1),
-    Position = UDim2.new(1, -22, 1, -84), Size = UDim2.fromOffset(117, 29),
+    Position = UDim2.new(1, -20, 1, -93),
+    Size = UDim2.fromOffset(112, 29),
     BackgroundColor3 = C.accentSoft, BorderSizePixel = 0,
-    AutoButtonColor = false, Text = "Latest messages ↓",
-    Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = C.text,
-    ZIndex = 5, Visible = false,
+    AutoButtonColor = false, Text = "↓  Latest",
+    Font = Enum.Font.GothamMedium, TextSize = 11,
+    TextColor3 = C.text, ZIndex = 5, Visible = false,
 }, body)
-round(jumpButton, 7)
+round(jumpButton, 8)
 updateJump = function()
     local list = lists[current]
     if not list or not alive then return end
@@ -600,28 +647,40 @@ for _, list in pairs(lists) do
     bind(list:GetPropertyChangedSignal("AbsoluteWindowSize"), updateJump)
 end
 
--- ---------- interaction styling ----------
 local function hover(button, normal, over)
-    bind(button.MouseEnter, function() tween(button, 0.14, {BackgroundColor3 = over}) end)
-    bind(button.MouseLeave, function() tween(button, 0.14, {BackgroundColor3 = normal}) end)
+    bind(button.MouseEnter, function()
+        tween(button, 0.14, {BackgroundColor3 = over})
+    end)
+    bind(button.MouseLeave, function()
+        tween(button, 0.14, {BackgroundColor3 = normal})
+    end)
 end
 hover(sendBtn, C.accent, C.accentHover)
-hover(findButton, C.btn, C.btnHover)
-hover(sidebarButton, C.btnHover, C.btn)
-bind(box.Focused, function() tween(boxStroke, 0.15, {Color = C.accent, Transparency = 0}) end)
-bind(box.FocusLost, function() tween(boxStroke, 0.15, {Color = C.divider, Transparency = 1}) end)
+bind(box.Focused, function()
+    tween(boxStroke, 0.16, {Transparency = 0})
+end)
+bind(box.FocusLost, function()
+    tween(boxStroke, 0.16, {Transparency = 1})
+end)
+for _, button in ipairs({sidebarButton, findButton}) do
+    bind(button.MouseEnter, function()
+        tween(button, 0.16, {BackgroundTransparency = 0})
+    end)
+    bind(button.MouseLeave, function()
+        tween(button, 0.16, {BackgroundTransparency = 1})
+    end)
+end
 
--- ---------- channel switching ----------
 local function refreshChannels()
     for id, entry in pairs(chBtns) do
         local active = id == current
         entry.btn.BackgroundColor3 = C.btnHover
-        tween(entry.btn, 0.14, {BackgroundTransparency = active and 0 or 1})
-        local count = unread[id] or 0
-        entry.badge.Visible = count > 0 and not active
-        entry.badge.Text = count > 99 and "99+" or tostring(count)
+        tween(entry.btn, 0.16, {BackgroundTransparency = active and 0 or 1})
         entry.nameLabel.TextColor3 = active and C.text or C.dim
         entry.hashLabel.TextColor3 = active and C.mine or C.dim
+        local count = unread[id] or 0
+        entry.badge.Visible = not active and count > 0
+        entry.badge.Text = count > 99 and "99+" or tostring(count)
     end
 end
 
@@ -631,17 +690,22 @@ local function setChannel(id)
     current = id
     box.Text = drafts[id] or ""
     unread[id] = 0
-    for otherId, list in pairs(lists) do list.Visible = otherId == id end
+    for other, list in pairs(lists) do list.Visible = other == id end
     roomName.Text = "# " .. chanName[id]
-    roomSubtitle.Text = id == "main" and "General discussion" or id == "lounge" and "Casual conversation" or "Everything else"
-    box.PlaceholderText = "Message #" .. (id == "offtopic" and "off-topic" or id)
+    roomSubtitle.Text = id == "main" and "Everyone, all in one place"
+        or id == "lounge" and "The place to unwind" or "Conversations beyond the usual"
+    box.PlaceholderText = "Message #" .. id
     findInput.PlaceholderText = "Find in #" .. id
+    if win.AbsoluteSize.X < 610 and not sidebarCollapsed then
+        sidebarCollapsed = true
+        layoutWorkspace()
+    end
     refreshChannels()
     if updateSearch then updateSearch() end
     if updateJump then updateJump() end
     task.defer(function()
         if alive and current == id and not searchOpen and lists[id] then
-            lists[id].CanvasPosition = Vector2.new(0, 1e6)
+            lists[id].CanvasPosition = Vector2.new(0, 1e7)
         end
     end)
 end
@@ -649,24 +713,27 @@ end
 for id, entry in pairs(chBtns) do
     bind(entry.btn.Activated, function() setChannel(id) end)
     bind(entry.btn.MouseEnter, function()
-        if current ~= id then tween(entry.btn, 0.14, {BackgroundTransparency = 0.5}) end
+        if current ~= id then
+            tween(entry.btn, 0.14, {BackgroundTransparency = 0.52})
+        end
     end)
     bind(entry.btn.MouseLeave, function()
-        if current ~= id then tween(entry.btn, 0.14, {BackgroundTransparency = 1}) end
+        if current ~= id then
+            tween(entry.btn, 0.14, {BackgroundTransparency = 1})
+        end
     end)
 end
 
--- ---------- drag / resize ----------
--- A single tracked gesture avoids accumulating temporary input connections.
+-- A single tracked gesture controls drag/resize and disconnects on cleanup.
 local dragAction
-local function makeDrag(handle, getStart, apply)
+local function makeDrag(handle, capture, apply)
     bind(handle.InputBegan, function(input)
         if not alive or dragAction or not win.Visible then return end
         local kind = input.UserInputType
         if kind ~= Enum.UserInputType.MouseButton1 and kind ~= Enum.UserInputType.Touch then return end
         dragAction = {
             input = input, touch = kind == Enum.UserInputType.Touch,
-            origin = input.Position, state = getStart(), apply = apply,
+            origin = input.Position, state = capture(), apply = apply,
         }
     end)
 end
@@ -682,27 +749,29 @@ bind(UIS.InputChanged, function(input)
     action.apply(action.state, delta.X, delta.Y)
 end)
 bind(UIS.InputEnded, function(input)
-    if dragAction and (input == dragAction.input or (not dragAction.touch
-        and input.UserInputType == Enum.UserInputType.MouseButton1)) then
+    if dragAction and (input == dragAction.input or
+        (not dragAction.touch and input.UserInputType == Enum.UserInputType.MouseButton1)) then
         dragAction = nil
     end
 end)
-
 makeDrag(titleDrag, function() return win.Position end, function(start, dx, dy)
-    local v = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(1280, 720)
+    local cameraNow = workspace.CurrentCamera
+    local screen = cameraNow and cameraNow.ViewportSize or Vector2.new(1280, 720)
     local width = win.AbsoluteSize.X
-    win.Position = UDim2.new(start.X.Scale, math.clamp(start.X.Offset + dx, 60 - width, v.X - 60),
-        start.Y.Scale, math.clamp(start.Y.Offset + dy, 0, v.Y - TITLE_H))
+    win.Position = UDim2.fromOffset(
+        math.clamp(start.X.Offset + dx, 54 - width, screen.X - 54),
+        math.clamp(start.Y.Offset + dy, 0, screen.Y - TITLE_H))
 end)
 makeDrag(grip, function() return win.Size end, function(start, dx, dy)
     if not body.Visible then return end
-    local v = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(1280, 720)
-    local maxWidth = math.max(320, v.X - win.AbsolutePosition.X - 8)
-    local maxHeight = math.max(230, v.Y - win.AbsolutePosition.Y - 8)
-    win.Size = UDim2.fromOffset(math.clamp(start.X.Offset + dx, math.min(MIN_W, maxWidth), maxWidth),
-        math.clamp(start.Y.Offset + dy, math.min(MIN_H, maxHeight), maxHeight))
+    local cameraNow = workspace.CurrentCamera
+    local screen = cameraNow and cameraNow.ViewportSize or Vector2.new(1280, 720)
+    local maxW = math.max(320, screen.X - win.AbsolutePosition.X - 8)
+    local maxH = math.max(245, screen.Y - win.AbsolutePosition.Y - 8)
+    win.Size = UDim2.fromOffset(
+        math.clamp(start.X.Offset + dx, math.min(MIN_W, maxW), maxW),
+        math.clamp(start.Y.Offset + dy, math.min(MIN_H, maxH), maxH))
 end)
-
 local minimized, savedSize = false, win.Size
 bind(minBtn.Activated, function()
     minimized = not minimized
@@ -711,12 +780,13 @@ bind(minBtn.Activated, function()
         body.Visible = false
         grip.Visible = false
         win.Size = UDim2.fromOffset(win.AbsoluteSize.X, TITLE_H)
-        minIcon.ImageTransparency = 0.35
+        restoreMark.Visible = true
     else
         win.Size = savedSize
         body.Visible = true
         grip.Visible = true
-        minIcon.ImageTransparency = 0
+        restoreMark.Visible = false
+        layoutWorkspace()
     end
 end)
 
@@ -1097,7 +1167,7 @@ bind(box:GetPropertyChangedSignal("Text"), function()
 	local n = utf8.len(txt) or #txt
 	counter.Text = n >= 160 and (n .. "/" .. MAX_LEN) or ""
 	sendBtn.BackgroundTransparency = n > 0 and 0 or 0.45
-	sendIcon.ImageTransparency = n > 0 and 0 or 0.25
+	sendIcon.TextTransparency = n > 0 and 0 or 0.22
 	counter.TextColor3 = n >= MAX_LEN and C.bad or C.dim
 end)
 bind(box.FocusLost, function(enter)
