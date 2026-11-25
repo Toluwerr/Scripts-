@@ -1259,17 +1259,146 @@ local function addMessage(message, silent)
             .. esc(shortTime) .. '</font>'
     end
 
-    new("TextLabel", {
-        Name = "Content", LayoutOrder = 2,
-        Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1, Text = contents,
-        RichText = false, TextWrapped = true,
-        Font = Enum.Font.Gotham, TextSize = 13,
-        TextColor3 = C.text,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 3,
-    }, bubble)
+    local fence = string.rep(string.char(96), 3)
+    local language, source = contents:match("^" .. fence .. "([%w%-]*)\n(.-)\n" .. fence .. "$")
+    local quote, text = contents:match("^> ([^\n]+)\n(.*)$")
+    local displayed = text or contents
+    local url = not source and displayed:match("https?://[^%s<>]+") or nil
+    if url then
+        url = url:gsub("[%,%.!%?%)%]]+$", "")
+        if not validLink(url) then url = nil end
+    end
+    if quote then
+        local quoteCard = new("Frame", {
+            Name = "Quote", LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 29),
+            BackgroundColor3 = C.btn, BorderSizePixel = 0, ZIndex = 3,
+        }, bubble)
+        round(quoteCard, 6)
+        new("TextLabel", {
+            Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -20, 1, 0),
+            BackgroundTransparency = 1, Text = quote,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            TextColor3 = C.dim, FontFace = BodyFont, TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
+        }, quoteCard)
+    end
+    if source then
+        local codePanel = new("Frame", {
+            Name = "CodeBlock", LayoutOrder = 3,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = C.bg, BorderSizePixel = 0, ZIndex = 3,
+        }, bubble)
+        round(codePanel, 7)
+        new("UIPadding", {
+            PaddingTop = UDim.new(0, 9), PaddingBottom = UDim.new(0, 10),
+            PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
+        }, codePanel)
+        new("UIListLayout", {
+            SortOrder = Enum.SortOrder.LayoutOrder,
+            Padding = UDim.new(0, 6),
+        }, codePanel)
+        local codeHead = new("Frame", {
+            LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 18),
+            BackgroundTransparency = 1, ZIndex = 4,
+        }, codePanel)
+        new("TextLabel", {
+            Size = UDim2.new(1, -40, 1, 0), BackgroundTransparency = 1,
+            Text = language ~= "" and language or "Code",
+            FontFace = UiFont, TextSize = 10, TextColor3 = C.dim,
+            TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+        }, codeHead)
+        new("TextLabel", {
+            Name = "Source", LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1, Text = source, RichText = false,
+            TextWrapped = true, Font = Enum.Font.Code, TextSize = 12,
+            TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 4,
+        }, codePanel)
+        local copySource = type(setclipboard) == "function" and setclipboard
+            or (type(toclipboard) == "function" and toclipboard)
+        if copySource then
+            local copyCode = new("TextButton", {
+                Name = "CopyCode", AnchorPoint = Vector2.new(1, 0),
+                Position = UDim2.new(1, 0, 0, -4),
+                Size = UDim2.fromOffset(28, 26),
+                BackgroundColor3 = C.btn, BorderSizePixel = 0,
+                AutoButtonColor = false, Text = "", ZIndex = 5,
+            }, codeHead)
+            round(copyCode, 7)
+            local copyIcon = lucideIcon(copyCode, "copy", 14, C.text, 6)
+            copyCode.Activated:Connect(function()
+                if not alive then return end
+                if pcall(copySource, source) then
+                    copyIcon.Image = Lucide48.check.Image
+                    copyIcon.ImageRectOffset = Lucide48.check.Offset
+                    task.delay(1, function()
+                        if alive and copyIcon.Parent then
+                            copyIcon.Image = Lucide48.copy.Image
+                            copyIcon.ImageRectOffset = Lucide48.copy.Offset
+                        end
+                    end)
+                end
+            end)
+        end
+    else
+        new("TextLabel", {
+            Name = "Content", LayoutOrder = 3,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1, Text = displayed,
+            RichText = false, TextWrapped = true,
+            FontFace = BodyFont, TextSize = 13,
+            TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 3,
+        }, bubble)
+        if url then
+            local host = url:match("^https?://([^/%?&#]+)") or "Website"
+            local card = new("TextButton", {
+                Name = "SharedLink", LayoutOrder = 4,
+                Size = UDim2.new(1, 0, 0, 44),
+                BackgroundColor3 = C.bg, BorderSizePixel = 0,
+                AutoButtonColor = false, Text = "", ZIndex = 3,
+            }, bubble)
+            round(card, 7)
+            local icon = lucideIcon(card, "link", 15, C.mine, 4)
+            icon.AnchorPoint = Vector2.new(0, 0.5)
+            icon.Position = UDim2.new(0, 10, 0.5, 0)
+            new("TextLabel", {
+                Position = UDim2.fromOffset(34, 4), Size = UDim2.new(1, -42, 0, 17),
+                BackgroundTransparency = 1, Text = host,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                FontFace = UiFont, TextSize = 11, TextColor3 = C.text,
+                TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
+            }, card)
+            new("TextLabel", {
+                Position = UDim2.fromOffset(34, 21), Size = UDim2.new(1, -42, 0, 17),
+                BackgroundTransparency = 1, Text = url,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                FontFace = BodyFont, TextSize = 10, TextColor3 = C.dim,
+                TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
+            }, card)
+            local destination = url
+            card.Activated:Connect(function()
+                if not alive then return end
+                local ok = pcall(function()
+                    game:GetService("GuiService"):OpenBrowserWindow(destination)
+                end)
+                if not ok then
+                    local clipboard = type(setclipboard) == "function" and setclipboard
+                        or (type(toclipboard) == "function" and toclipboard)
+                    if clipboard and pcall(clipboard, destination) then
+                        sys("Link copied to clipboard")
+                    else
+                        sys("Could not open link")
+                    end
+                end
+            end)
+        end
+    end
 
     local clipboard = type(setclipboard) == "function" and setclipboard
         or (type(toclipboard) == "function" and toclipboard)
@@ -1306,6 +1435,35 @@ local function addMessage(message, silent)
         end)
     end
 
+    local replyButton = new("TextButton", {
+        Name = "Reply", AnchorPoint = Vector2.new(1, 0),
+        Position = mine and UDim2.new(1, -46, 0, 8)
+            or UDim2.new(0.79, 1, 0, 8),
+        Size = UDim2.fromOffset(28, 27),
+        BackgroundColor3 = C.btnHover, BorderSizePixel = 0,
+        AutoButtonColor = false, Text = "", ZIndex = 5,
+        Visible = UIS.TouchEnabled,
+    }, node)
+    round(replyButton, 8)
+    lucideIcon(replyButton, "reply", 14, C.text, 6)
+    node.MouseEnter:Connect(function()
+        if alive and replyButton.Parent then replyButton.Visible = true end
+    end)
+    node.MouseLeave:Connect(function()
+        if alive and replyButton.Parent and not UIS.TouchEnabled then
+            replyButton.Visible = false
+        end
+    end)
+    replyButton.Activated:Connect(function()
+        if not alive then return end
+        pendingReplies[channelId] = {
+            user = user:gsub("[^%w_]", ""):sub(1, 22),
+            text = clip(displayed:gsub("[\r\n]+", " "), 54),
+        }
+        if searchOpen then toggleSearch(false) end
+        refreshReply()
+        box:CaptureFocus()
+    end)
     insertMessage(channelId, node)
     indexMessage(channelId, node, user .. " " .. contents)
     if not silent and not mine and channelId ~= current then
