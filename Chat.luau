@@ -254,7 +254,7 @@ new("Frame", {
 
 local titleDrag = new("Frame", {
     Name = "DragRegion", Size = UDim2.new(1, -82, 1, 0),
-    BackgroundTransparency = 1, Active = true, ZIndex = 4,
+    BackgroundTransparency = 1, Active = true, ZIndex = 6,
 }, titleBar)
 local dot = new("Frame", {
     Name = "ConnectionDot", Position = UDim2.fromOffset(16, math.floor((TITLE_H - 7) / 2)),
@@ -640,7 +640,9 @@ local function setChannel(id)
     if updateSearch then updateSearch() end
     if updateJump then updateJump() end
     task.defer(function()
-        if alive and lists[id] then lists[id].CanvasPosition = Vector2.new(0, 1e6) end
+        if alive and current == id and not searchOpen and lists[id] then
+            lists[id].CanvasPosition = Vector2.new(0, 1e6)
+        end
     end)
 end
 
@@ -659,7 +661,7 @@ end
 local dragAction
 local function makeDrag(handle, getStart, apply)
     bind(handle.InputBegan, function(input)
-        if not alive or dragAction then return end
+        if not alive or dragAction or not win.Visible then return end
         local kind = input.UserInputType
         if kind ~= Enum.UserInputType.MouseButton1 and kind ~= Enum.UserInputType.Touch then return end
         dragAction = {
@@ -720,6 +722,7 @@ end)
 
 -- ---------- message presentation ----------
 local seen, queues = {}, {}
+local seenOrder = {}
 local indexed = {}
 for _, channel in ipairs(CHANNELS) do
     queues[channel.id] = {}
@@ -764,9 +767,6 @@ bind(exitFind.Activated, function() toggleSearch(false) end)
 bind(findInput:GetPropertyChangedSignal("Text"), function()
     if updateSearch then updateSearch() end
 end)
-bind(findInput.FocusLost, function(entered)
-    if entered and searchOpen then findInput:ReleaseFocus() end
-end)
 local lastId, order = 0, 0
 local grouped = {}
 
@@ -780,7 +780,10 @@ local function insertMessage(channelId, node)
     if #queue > 200 then table.remove(queue, 1):Destroy() end
     if atBottom and not searchOpen then
         task.delay(0.06, function()
-            if alive and list.Parent then list.CanvasPosition = Vector2.new(0, 1e6) end
+            if alive and list.Parent and not searchOpen
+                and list.CanvasPosition.Y + list.AbsoluteWindowSize.Y >= list.AbsoluteCanvasSize.Y - 100 then
+                list.CanvasPosition = Vector2.new(0, 1e6)
+            end
         end)
     end
 end
@@ -814,13 +817,21 @@ end
 local function addMessage(message, silent)
     if type(message) ~= "table" or type(message.id) ~= "number" or seen[message.id] then return end
     seen[message.id] = true
+    seenOrder[#seenOrder + 1] = message.id
+    if #seenOrder > 2000 then
+        seen[table.remove(seenOrder, 1)] = nil
+    end
     if message.id > lastId then lastId = message.id end
     local channelId = lists[message.ch] and message.ch or "main"
     local mine = message.userId == lp.UserId
-    local user = type(message.user) == "string" and message.user or "Unknown"
-    local contents = type(message.text) == "string" and message.text or ""
-    local timestamp = math.floor(tonumber(message.ts) or 0)
-    local shortTime = os.date("%I:%M %p", timestamp > 0 and math.floor(timestamp / 1000) or os.time())
+    local user = clip(type(message.user) == "string" and message.user or "Unknown", 48)
+    local contents = clip(type(message.text) == "string" and message.text or "", MAX_LEN + 20)
+    local timestamp = tonumber(message.ts)
+    if not timestamp or timestamp ~= timestamp or timestamp < 0 or timestamp > 9999999999999 then
+        timestamp = os.time() * 1000
+    end
+    timestamp = math.floor(timestamp)
+    local shortTime = os.date("%I:%M %p", math.floor(timestamp / 1000))
     local previous = grouped[channelId]
     local compact = previous and previous.id == message.userId
         and timestamp >= previous.ts and timestamp - previous.ts <= 180000
@@ -890,13 +901,13 @@ local function addMessage(message, silent)
             TextSize = 10, ZIndex = 4, Visible = UIS.TouchEnabled,
         }, node)
         round(copyButton, 5)
-        bind(node.MouseEnter, function()
+        node.MouseEnter:Connect(function()
             if alive and copyButton.Parent then copyButton.Visible = true end
         end)
-        bind(node.MouseLeave, function()
+        node.MouseLeave:Connect(function()
             if alive and copyButton.Parent and not UIS.TouchEnabled then copyButton.Visible = false end
         end)
-        bind(copyButton.Activated, function()
+        copyButton.Activated:Connect(function()
             local ok = pcall(copyText, contents)
             copyButton.Text = ok and "Copied" or "Failed"
             task.delay(1.2, function()
