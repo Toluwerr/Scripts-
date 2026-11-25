@@ -1737,6 +1737,10 @@ round(mentionPanel, 8)
 local suggestionButtons = {}
 local mentionCandidates = {}
 local completingMention = false
+local hoveringSuggestions = false
+local lastMention
+bind(mentionPanel.MouseEnter, function() hoveringSuggestions = true end)
+bind(mentionPanel.MouseLeave, function() hoveringSuggestions = false end)
 
 local function mentionAtCursor()
     local caret = box.CursorPosition
@@ -1752,12 +1756,16 @@ end
 
 local function insertMention(name)
     local startAt, _, caret = mentionAtCursor()
+    if not startAt and lastMention and lastMention.text == box.Text then
+        startAt, caret = lastMention.startAt, lastMention.caret
+    end
     if not startAt then return end
     local replacement = "@" .. name .. " "
     box.Text = box.Text:sub(1, startAt - 1)
         .. replacement .. box.Text:sub(caret)
     box.CursorPosition = startAt + #replacement
     mentionPanel.Visible = false
+    lastMention = nil
     completingMention = false
     box:CaptureFocus()
 end
@@ -1790,14 +1798,16 @@ end
 
 refreshMentions = function()
     if not alive or UIS:GetFocusedTextBox() ~= box then
-        mentionPanel.Visible = false
+        if not hoveringSuggestions then mentionPanel.Visible = false end
         return
     end
     local startAt, query = mentionAtCursor()
     if not startAt then
         mentionPanel.Visible = false
+        lastMention = nil
         return
     end
+    lastMention = {startAt = startAt, caret = box.CursorPosition, text = box.Text}
     local matches = {}
     local needle = query:lower()
     for key, name in pairs(knownUsers) do
@@ -1862,7 +1872,7 @@ bind(box.Focused, function()
     refreshMentions()
 end)
 bind(box.FocusLost, function(enter)
-    mentionPanel.Visible = false
+    if not hoveringSuggestions then mentionPanel.Visible = false end
     if enter and not UIS:IsKeyDown(Enum.KeyCode.LeftShift)
         and not UIS:IsKeyDown(Enum.KeyCode.RightShift) then
         local content = box.Text:gsub("\n+$", "")
