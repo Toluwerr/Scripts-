@@ -2588,6 +2588,91 @@ createSettingsRow("confirmExecution", "Confirm execution", "Require a second cli
 createSettingsRow("refreshOnFocus", "Refresh on focus", "Check for new posts when Roblox regains focus.", 5)
 createSettingsRow("liveRefresh", "Live refresh", "Automatically check for new posts every 30 seconds.", 6)
 
+-- Read-only diagnostics. No executor, Roblox, or game security routines are modified.
+local diagnostics = create("Frame", {
+    Name = "ExecutorStatus", LayoutOrder = 7,
+    Size = UDim2.new(1, -5, 0, 186),
+    BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 40,
+}, settingsList)
+round(diagnostics, 8)
+
+create("TextLabel", {
+    Name = "Title", Position = UDim2.fromOffset(11, 8),
+    Size = UDim2.new(1, -132, 0, 20), BackgroundTransparency = 1,
+    Text = "Executor status", FontFace = Theme.Font, TextSize = 13,
+    TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 41,
+}, diagnostics)
+
+local checkStatus = create("TextButton", {
+    Name = "Refresh", AnchorPoint = Vector2.new(1, 0),
+    Position = UDim2.new(1, -9, 0, 7), Size = UDim2.fromOffset(83, 24),
+    BackgroundColor3 = Theme.Raised, BorderSizePixel = 0,
+    AutoButtonColor = false, FontFace = Theme.Font, TextSize = 11,
+    TextColor3 = Theme.Text, Text = "Refresh", ZIndex = 42,
+}, diagnostics)
+round(checkStatus, 6)
+
+local detectionStatus = create("TextLabel", {
+    Name = "Detection", Position = UDim2.fromOffset(11, 34),
+    Size = UDim2.new(1, -22, 0, 20), BackgroundTransparency = 1,
+    Text = "Detection: Unknown", FontFace = Theme.Font, TextSize = 12,
+    TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 41,
+}, diagnostics)
+
+local detectionExplanation = create("TextLabel", {
+    Name = "Explanation", Position = UDim2.fromOffset(11, 55),
+    Size = UDim2.new(1, -22, 0, 38), BackgroundTransparency = 1,
+    Text = "Roblox does not expose a reliable client-side detection verdict. An active session does not mean an executor is undetected.",
+    TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top,
+    FontFace = Theme.Font, TextSize = 10,
+    TextColor3 = Theme.Text:Lerp(Theme.Window, 0.35),
+    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 41,
+}, diagnostics)
+
+local function diagnosticLine(name, position)
+    return create("TextLabel", {
+        Name = name, Position = UDim2.fromOffset(11, position),
+        Size = UDim2.new(1, -22, 0, 16),
+        BackgroundTransparency = 1, Text = "",
+        FontFace = Theme.Font, TextSize = 11, TextColor3 = Theme.Text,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 41,
+    }, diagnostics)
+end
+
+local executorLine = diagnosticLine("Executor", 98)
+local sessionLine = diagnosticLine("Session", 117)
+local errorLine = diagnosticLine("ClientError", 136)
+local checkLine = diagnosticLine("CheckedAt", 155)
+checkLine.TextColor3 = Theme.Text:Lerp(Theme.Window, 0.4)
+
+local function readExecutorName()
+    local identify = if type(identifyexecutor) == "function" then identifyexecutor
+        elseif type(getexecutorname) == "function" then getexecutorname else nil
+    if not identify then return "Not reported" end
+    local ok, value = pcall(identify)
+    if not ok then return "Not reported" end
+    return plainText(value, 90) or "Not reported"
+end
+
+function settings.refreshDetectionStatus()
+    if not alive or not diagnostics.Parent then return end
+    detectionStatus.Text = "Detection: Unknown"
+    executorLine.Text = "Executor: " .. readExecutorName()
+    local loaded, isLoaded = pcall(function() return game:IsLoaded() end)
+    local active = loaded and isLoaded and player.Parent == playersService
+    sessionLine.Text = "Client session: " .. (active and "Active" or "Unavailable")
+    local ok, message = pcall(function() return GuiService.ErrorMessage end)
+    if ok and type(message) == "string" and message:match("%S") then
+        errorLine.Text = "Roblox error: " .. (plainText(message, 140) or "Unavailable")
+    else
+        errorLine.Text = "Roblox error: None reported"
+    end
+    checkLine.Text = "Last checked: " .. os.date("%H:%M:%S")
+end
+
+bind(checkStatus.Activated, settings.refreshDetectionStatus)
+
 local settingsSaved = create("TextLabel", {
     Name = "SaveStatus",
     Position = UDim2.new(0, 16, 1, -29),
@@ -2645,6 +2730,7 @@ function settings.toggle(open)
         settingsBackdrop.Visible = true
         settingsPanel.Visible = true
         settings.update(false)
+        settings.refreshDetectionStatus()
     end
     local info = TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
     local fade = TweenService:Create(settingsPanel, info, {GroupTransparency = open and 0 or 1})
