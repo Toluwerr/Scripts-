@@ -890,7 +890,59 @@ if RunService:IsServer() then
     assert(remote:IsA("RemoteFunction"), "Invalid catalogue remote")
     local cache, order, recent, pending = {}, {}, {}, {}
     local windowStart, requests = os.clock(), 0
+    local serverJoinAttempts = {}
+    remote:SetAttribute("SupportsPublicServerJoin", true)
     remote.OnServerInvoke = function(player, target)
+        if type(target) == "table" and target.action == "joinPublicServer" then
+            local place = numericId(target.placeId)
+            local instance = target.serverId
+            if not place or type(instance) ~= "string" or #instance ~= 36
+                or not instance:match("^[%x%-]+$") then
+                return {error = "Invalid server destination"}
+            end
+            local now = os.clock()
+            if now - (serverJoinAttempts[player] or -math.huge) < 5 then
+                return {error = "A join was requested recently"}
+            end
+            -- Only accept a root place and a public instance returned by this catalogue.
+            local knownPlace, knownServer = false, false
+            local prefix = "publicServers:" .. place .. ":"
+            for key, record in pairs(cache) do
+                if type(key) == "string" and now - record.time < 180
+                    and type(record.data.items) == "table" then
+                    if key:sub(1, 12) == "robloxGames:" then
+                        for _, item in ipairs(record.data.items) do
+                            if numericId(item.placeId) == place and item.isGameCard then
+                                knownPlace = true
+                                break
+                            end
+                        end
+                    elseif key:sub(1, #prefix) == prefix then
+                        for _, item in ipairs(record.data.items) do
+                            if item.id == instance and item.playing < item.capacity then
+                                knownServer = true
+                                break
+                            end
+                        end
+                    end
+                end
+                if knownPlace and knownServer then break end
+            end
+            if not knownPlace or not knownServer then
+                return {error = "Refresh the game and public server list before joining"}
+            end
+            serverJoinAttempts[player] = now
+            local options = Instance.new("TeleportOptions")
+            options.ServerInstanceId = instance
+            local ok, err = pcall(function()
+                game:GetService("TeleportService"):TeleportAsync(tonumber(place), {player}, options)
+            end)
+            if not ok then
+                warn("ScriptFinder server teleport: " .. tostring(err))
+                return {error = "Server teleport rejected"}
+            end
+            return {accepted = true}
+        end
         local isRobloxGames = type(target) == "table" and target.action == "robloxGames"
         local isPublicServers = type(target) == "table" and target.action == "publicServers"
         local isComments = type(target) == "table" and target.action == "comments"
@@ -1066,6 +1118,7 @@ if RunService:IsServer() then
     end
     Players.PlayerRemoving:Connect(function(player)
         recent[player] = nil
+        serverJoinAttempts[player] = nil
     end)
     return
 end
@@ -3901,12 +3954,23 @@ do
             status.Text = "Joining server..."
             task.spawn(function()
                 local ok, message = pcall(function()
-                    teleport:TeleportToPlaceInstance(place, server.id, player)
+                    local remote = ReplicatedStorage:FindFirstChild(CatalogRemote)
+                    if remote and remote:IsA("RemoteFunction")
+                        and remote:GetAttribute("SupportsPublicServerJoin") == true then
+                        local response = remote:InvokeServer({
+                            action = "joinPublicServer", placeId = place, serverId = server.id,
+                        })
+                        if type(response) ~= "table" or response.accepted ~= true then
+                            error(type(response) == "table" and response.error or "Server join rejected", 0)
+                        end
+                    else
+                        teleport:TeleportToPlaceInstance(place, server.id, player)
+                    end
                 end)
                 if not valid() or ticket ~= joiningTicket then return end
                 if not ok then
                     warn("Roblox server join: " .. tostring(message))
-                    finishJoin("Join failed")
+                    finishJoin("Join failed: " .. tostring(message):sub(1, 120))
                     return
                 end
                 task.delay(12, function()
