@@ -1402,11 +1402,17 @@ local highlight = create("Frame", {
     Name = "Selection",
     Position = UDim2.fromOffset(3, 3),
     Size = UDim2.fromOffset(40, 32),
-    BackgroundColor3 = Theme.Accent,
+    BackgroundColor3 = Theme.Window,
     BorderSizePixel = 0,
     ZIndex = 5,
 }, selector)
 round(highlight, 16)
+create("UIStroke", {
+    Color = Theme.Text:Lerp(Theme.Window, 0.73),
+    Thickness = 1,
+    Transparency = 0.2,
+    ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+}, highlight)
 
 local function assetUri(value)
     if typeof(value) == "number" and value > 0 then
