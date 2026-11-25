@@ -659,15 +659,22 @@ local function parseMessage(raw)
     end
     return meta
 end
+local function looksLikeCode(value)
+    if not value:find("\n", 1, true) then return false end
+    local value = value:match("^%s*(.-)%s*$")
+    return value:match("^local%s") ~= nil
+        or value:match("^function%s") ~= nil
+        or value:match("^print%(") ~= nil
+        or value:match("^if%s") ~= nil
+        or value:match("^for%s") ~= nil
+        or value:match("^while%s") ~= nil
+        or value:match("^return%s") ~= nil
+end
 local function prepareMessage(raw, reply)
     local trimmed = tostring(raw):gsub("\r\n", "\n"):match("^%s*(.-)%s*$")
     local fence = string.rep(string.char(96), 3)
     local language, code = trimmed:match("^" .. fence .. "([%w%-]*)\n(.-)\n?" .. fence .. "$")
-    if not code and trimmed:find("\n", 1, true)
-        and (trimmed:match("^local%s") or trimmed:match("^function%s")
-            or trimmed:match("^print%(") or trimmed:match("^if%s")
-            or trimmed:match("^for%s") or trimmed:match("^while%s")
-            or trimmed:match("^return%s")) then
+    if not code and looksLikeCode(trimmed) then
         language, code = "luau", trimmed
     end
     local content
@@ -1874,7 +1881,8 @@ end
 
 bind(box:GetPropertyChangedSignal("Text"), function()
     if box.CursorPosition == #box.Text + 1
-        and not box.Text:find(string.rep(string.char(96), 3), 1, true) then
+        and not box.Text:find(string.rep(string.char(96), 3), 1, true)
+        and not looksLikeCode(box.Text) then
         local replaced = emojify(box.Text)
         if replaced ~= box.Text then
             box.Text = replaced
