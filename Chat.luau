@@ -216,6 +216,8 @@ local Lucide48 = table.freeze({
     ["minus"] = {Image = "rbxassetid://16898613613", Offset = Vector2.new(771, 196)},
     ["square"] = {Image = "rbxassetid://16898613777", Offset = Vector2.new(869, 710)},
     ["chevron-down"] = {Image = "rbxassetid://16898612819", Offset = Vector2.new(196, 918)},
+    ["image"] = {Image = "rbxassetid://16898613353", Offset = Vector2.new(563, 869)},
+    ["code"] = {Image = "rbxassetid://16898612819", Offset = Vector2.new(355, 563)},
 })
 local function lucideIcon(parent, name, size, color, zIndex)
     local data = Lucide48[name]
@@ -304,7 +306,7 @@ local function windowControl(name, order, glyph)
         ZIndex = 6,
     }, controls)
     round(button, 14)
-    local image = lucideIcon(button, glyph, name == "Minimize" and 18 or 16, C.text, 7)
+    local image = lucideIcon(button, glyph, 18, C.text, 7)
     bind(button.MouseEnter, function() hover(button, 0) end)
     bind(button.MouseLeave, function() hover(button, 1) end)
     bind(button.MouseButton1Down, function() hover(button, 0.24) end)
@@ -337,24 +339,11 @@ new("Frame", {
 }, side)
 new("TextLabel", {
     Name = "Heading", Position = UDim2.fromOffset(14, 16),
-    Size = UDim2.new(1, -55, 0, 18),
+    Size = UDim2.new(1, -28, 0, 18),
     BackgroundTransparency = 1, Text = "Channels",
     FontFace = UiFont, TextSize = 13, TextColor3 = C.text,
     TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
 }, side)
-local closeSidebar = new("TextButton", {
-    Name = "Collapse", AnchorPoint = Vector2.new(1, 0),
-    Position = UDim2.new(1, -9, 0, 11),
-    Size = UDim2.fromOffset(28, 28),
-    BackgroundColor3 = C.panel, BackgroundTransparency = 1,
-    BorderSizePixel = 0, AutoButtonColor = false, Text = "",
-    ZIndex = 8,
-}, side)
-round(closeSidebar, 14)
-lucideIcon(closeSidebar, "arrow-left", 14, C.dim, 9)
-bind(closeSidebar.MouseEnter, function() hover(closeSidebar, 0) end)
-bind(closeSidebar.MouseLeave, function() hover(closeSidebar, 1) end)
-
 local current = "main"
 local drafts, unread, chBtns, chanName, lists = {}, {}, {}, {}, {}
 for index, channel in ipairs(CHANNELS) do
@@ -635,10 +624,6 @@ local function layoutWorkspace()
 end
 bind(sidebarButton.Activated, function()
     sidebarCollapsed = not sidebarCollapsed
-    layoutWorkspace()
-end)
-bind(closeSidebar.Activated, function()
-    sidebarCollapsed = true
     layoutWorkspace()
 end)
 bind(win:GetPropertyChangedSignal("AbsoluteSize"), layoutWorkspace)
