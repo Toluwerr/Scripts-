@@ -601,6 +601,192 @@ local sendBtn = new("TextButton", {
 round(sendBtn, 8)
 local sendIcon = lucideIcon(sendBtn, "arrow-right", 18, C.text, 5)
 
+local pendingReplies = {}
+local replyBanner = new("Frame", {
+    Name = "ReplyPreview", Position = UDim2.fromOffset(14, -30),
+    Size = UDim2.new(1, -26, 0, 28), BackgroundColor3 = C.panel,
+    BorderSizePixel = 0, Visible = false, ZIndex = 10,
+}, row)
+round(replyBanner, 7)
+local replyLabel = new("TextLabel", {
+    Name = "ReplyText", Position = UDim2.fromOffset(11, 0),
+    Size = UDim2.new(1, -42, 1, 0),
+    BackgroundTransparency = 1, Text = "", TextTruncate = Enum.TextTruncate.AtEnd,
+    FontFace = BodyFont, TextColor3 = C.text, TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 11,
+}, replyBanner)
+local replyCancel = new("TextButton", {
+    Name = "CancelReply", AnchorPoint = Vector2.new(1, 0.5),
+    Position = UDim2.new(1, -4, 0.5, 0),
+    Size = UDim2.fromOffset(24, 24),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+    AutoButtonColor = false, Text = "", ZIndex = 11,
+}, replyBanner)
+lucideIcon(replyCancel, "x", 14, C.dim, 12)
+local function refreshReply()
+    local selected = pendingReplies[current]
+    replyBanner.Visible = selected ~= nil
+    replyLabel.Text = selected and ("Replying to @" .. selected.user .. " · " .. selected.text) or ""
+end
+bind(replyCancel.Activated, function()
+    pendingReplies[current] = nil
+    refreshReply()
+end)
+
+local sendFormatted
+local composeMode = nil
+local composeChannel = nil
+local composeBackdrop = new("TextButton", {
+    Name = "ComposerBackdrop", Size = UDim2.fromScale(1, 1),
+    BackgroundColor3 = Color3.new(0, 0, 0),
+    BackgroundTransparency = 0.4, BorderSizePixel = 0,
+    AutoButtonColor = false, Text = "", ZIndex = 18,
+    Visible = false,
+}, body)
+local composePanel = new("Frame", {
+    Name = "ComposerDialog", AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5),
+    Size = UDim2.fromOffset(420, 260),
+    BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    Visible = false, ZIndex = 19,
+}, body)
+round(composePanel, 9)
+local composeTitle = new("TextLabel", {
+    Name = "Title", Position = UDim2.fromOffset(14, 12),
+    Size = UDim2.new(1, -56, 0, 25),
+    BackgroundTransparency = 1, Text = "",
+    FontFace = UiFont, TextSize = 15, TextColor3 = C.text,
+    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 20,
+}, composePanel)
+local composeClose = new("TextButton", {
+    Name = "Close", AnchorPoint = Vector2.new(1, 0),
+    Position = UDim2.new(1, -9, 0, 10),
+    Size = UDim2.fromOffset(27, 27),
+    BackgroundColor3 = C.btn, BackgroundTransparency = 1,
+    BorderSizePixel = 0, AutoButtonColor = false, Text = "", ZIndex = 20,
+}, composePanel)
+round(composeClose, 8)
+lucideIcon(composeClose, "x", 15, C.text, 21)
+local composeDescription = new("TextLabel", {
+    Name = "Description", Position = UDim2.fromOffset(14, 43),
+    Size = UDim2.new(1, -28, 0, 34),
+    BackgroundTransparency = 1, Text = "",
+    FontFace = BodyFont, TextSize = 11, TextWrapped = true,
+    TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 20,
+}, composePanel)
+local composeInput = new("TextBox", {
+    Name = "Content", Position = UDim2.fromOffset(14, 85),
+    Size = UDim2.new(1, -28, 1, -145),
+    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+    ClearTextOnFocus = false, Text = "", MultiLine = true,
+    TextWrapped = false, PlaceholderText = "",
+    PlaceholderColor3 = C.dim, Font = Enum.Font.Code,
+    TextSize = 12, TextColor3 = C.text,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 20,
+}, composePanel)
+round(composeInput, 8)
+new("UIPadding", {
+    PaddingLeft = UDim.new(0, 11), PaddingRight = UDim.new(0, 11),
+    PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
+}, composeInput)
+local composeCounter = new("TextLabel", {
+    Name = "Counter", Position = UDim2.fromOffset(14, 0),
+    AnchorPoint = Vector2.new(0, 1), Size = UDim2.fromOffset(118, 20),
+    BackgroundTransparency = 1, Text = "", FontFace = BodyFont,
+    TextSize = 10, TextColor3 = C.dim,
+    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 20,
+}, composePanel)
+composeCounter.Position = UDim2.new(0, 14, 1, -14)
+local composeSubmit = new("TextButton", {
+    Name = "Submit", AnchorPoint = Vector2.new(1, 1),
+    Position = UDim2.new(1, -14, 1, -12),
+    Size = UDim2.fromOffset(116, 33),
+    BackgroundColor3 = C.accent, BorderSizePixel = 0,
+    AutoButtonColor = false, Text = "Send",
+    FontFace = UiFont, TextSize = 12, TextColor3 = C.text, ZIndex = 20,
+}, composePanel)
+round(composeSubmit, 8)
+local composeError = new("TextLabel", {
+    Name = "Error", Position = UDim2.fromOffset(14, 0),
+    AnchorPoint = Vector2.new(0, 1),
+    Size = UDim2.new(1, -154, 0, 19),
+    BackgroundTransparency = 1, Text = "",
+    FontFace = BodyFont, TextSize = 10,
+    TextColor3 = C.bad, TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 20,
+}, composePanel)
+composeError.Position = UDim2.new(0, 14, 1, -35)
+local function codePayload(raw)
+    local fence = string.rep(string.char(96), 3)
+    return fence .. "luau\n" .. raw .. "\n" .. fence
+end
+local function validLink(raw)
+    if type(raw) ~= "string" or #raw > 400 or raw:find("%s") then return false end
+    local domain = raw:match("^https?://([%w%.%-]+)")
+    return domain ~= nil and domain:find("%.", 1, false) ~= nil
+        and raw:match("^https?://[^%s]+$") ~= nil
+end
+local function closeCompose()
+    composeMode = nil
+    composeBackdrop.Visible = false
+    composePanel.Visible = false
+    composeInput:ReleaseFocus()
+end
+local function openCompose(mode)
+    if banned or not alive then return end
+    composeMode, composeChannel = mode, current
+    composeInput.Text = ""
+    composeError.Text = ""
+    composeTitle.Text = mode == "code" and "Share code" or "Share a link"
+    composeDescription.Text = mode == "code"
+        and "Send a formatted Luau snippet. This server allows up to 200 characters per message."
+        or "Paste a public website URL. Everyone in the channel can access the link."
+    composeSubmit.Text = mode == "code" and "Send code" or "Share link"
+    composeInput.PlaceholderText = mode == "code" and "print(\"Hello\")" or "https://example.com"
+    composeInput.MultiLine = mode == "code"
+    composeInput.TextWrapped = mode == "link"
+    composePanel.Size = UDim2.fromOffset(
+        math.min(420, math.max(280, body.AbsoluteSize.X - 26)),
+        math.min(260, math.max(195, body.AbsoluteSize.Y - 14)))
+    composeBackdrop.Visible = true
+    composePanel.Visible = true
+    task.defer(function()
+        if alive and composeMode == mode then composeInput:CaptureFocus() end
+    end)
+end
+bind(codeButton.Activated, function() openCompose("code") end)
+bind(linkButton.Activated, function() openCompose("link") end)
+bind(composeClose.Activated, closeCompose)
+bind(composeBackdrop.Activated, closeCompose)
+bind(composeInput:GetPropertyChangedSignal("Text"), function()
+    if not composeMode then return end
+    local text = composeInput.Text
+    local payload = composeMode == "code" and codePayload(text) or text
+    local count = utf8.len(payload) or #payload
+    composeCounter.Text = tostring(count) .. "/" .. MAX_LEN
+    composeCounter.TextColor3 = count > MAX_LEN and C.bad or C.dim
+    composeError.Text = ""
+end)
+bind(composeSubmit.Activated, function()
+    if not composeMode or not sendFormatted or not alive then return end
+    local raw = composeInput.Text:match("^%s*(.-)%s*$")
+    local payload = composeMode == "code" and codePayload(raw) or raw
+    local count = utf8.len(payload) or #payload
+    if raw == "" then
+        composeError.Text = "Enter something to send"
+    elseif composeMode == "link" and not validLink(raw) then
+        composeError.Text = "Enter a valid http:// or https:// URL"
+    elseif count > MAX_LEN then
+        composeError.Text = "This chat supports up to 200 characters"
+    elseif sendFormatted(payload, composeChannel) then
+        closeCompose()
+    else
+        composeError.Text = "Unable to send"
+    end
+end)
+
 local grip = new("TextButton", {
     Name = "ResizeHandle", AnchorPoint = Vector2.new(1, 1),
     Position = UDim2.new(1, -3, 1, -3),
@@ -789,6 +975,7 @@ local function setChannel(id)
     unread[id] = 0
     for other, list in pairs(lists) do list.Visible = other == id end
     roomName.Text = chanName[id]
+    refreshReply()
     box.PlaceholderText = "Message #" .. id
     findInput.PlaceholderText = "Find in #" .. id
     if win.AbsoluteSize.X < 580 and not sidebarCollapsed then
