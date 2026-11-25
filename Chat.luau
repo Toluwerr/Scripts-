@@ -1070,6 +1070,133 @@ local function sys(text)
     addLabel(current, esc(text), C.sys)
 end
 
+local messageViews = {}
+local knownUsers = {}
+local mentionsUnread = {}
+local refreshMentions
+knownUsers[lp.Name:lower()] = lp.Name
+for _, channel in ipairs(CHANNELS) do
+    messageViews[channel.id] = {}
+    mentionsUnread[channel.id] = 0
+end
+
+local function containsOwnMention(value)
+    for name in value:gmatch("@([%w_]+)") do
+        if name:lower() == lp.Name:lower() then return true end
+    end
+    return false
+end
+
+local function formatText(value)
+    local parts, i = {}, 1
+    while i <= #value do
+        local startAt, stopAt, handle = value:find("@([%w_]+)", i)
+        if not startAt then
+            parts[#parts + 1] = esc(value:sub(i))
+            break
+        end
+        parts[#parts + 1] = esc(value:sub(i, startAt - 1))
+        if knownUsers[handle:lower()] then
+            parts[#parts + 1] = '<font color="#' .. C.mine:ToHex() .. '"><b>@'
+                .. esc(handle) .. '</b></font>'
+        else
+            parts[#parts + 1] = esc("@" .. handle)
+        end
+        i = stopAt + 1
+    end
+    return table.concat(parts)
+end
+
+local keyWords = {
+    ["and"] = true, ["break"] = true, ["continue"] = true, ["do"] = true,
+    ["else"] = true, ["elseif"] = true, ["end"] = true, ["false"] = true,
+    ["for"] = true, ["function"] = true, ["if"] = true, ["in"] = true,
+    ["local"] = true, ["nil"] = true, ["not"] = true, ["or"] = true,
+    ["repeat"] = true, ["return"] = true, ["then"] = true, ["true"] = true,
+    ["until"] = true, ["while"] = true, ["type"] = true,
+}
+local function codeHighlight(value)
+    local parts, i = {}, 1
+    local function color(part, hex)
+        parts[#parts + 1] = '<font color="' .. hex .. '">' .. esc(part) .. '</font>'
+    end
+    while i <= #value do
+        local ch = value:sub(i, i)
+        if ch == "-" and value:sub(i, i + 1) == "--" then
+            local finish = value:find("\n", i, true) or (#value + 1)
+            color(value:sub(i, finish - 1), "#929292")
+            i = finish
+        elseif ch == '"' or ch == "'" then
+            local finish, escaped = i + 1, false
+            while finish <= #value do
+                local nextChar = value:sub(finish, finish)
+                if nextChar == ch and not escaped then break end
+                if nextChar == "\\" then escaped = not escaped else escaped = false end
+                finish += 1
+            end
+            finish = math.min(finish, #value)
+            color(value:sub(i, finish), "#A1D4AE")
+            i = finish + 1
+        elseif ch:match("[%a_]") then
+            local word = value:match("^[%a_][%w_]*", i)
+            if word then
+                if keyWords[word] then color(word, "#91BAFF")
+                else parts[#parts + 1] = esc(word) end
+                i += #word
+            else
+                parts[#parts + 1] = esc(ch)
+                i += 1
+            end
+        elseif ch:match("%d") then
+            local number = value:match("^%d+%.?%d*", i)
+            if number then color(number, "#F4C68C"); i += #number
+            else parts[#parts + 1] = esc(ch); i += 1 end
+        else
+            parts[#parts + 1] = esc(ch)
+            i += 1
+        end
+    end
+    return table.concat(parts)
+end
+
+local function findSharedUrl(value)
+    local candidate = value:match("https?://[^%s<>]+")
+    if not candidate then return nil end
+    candidate = candidate:gsub("[,%.!%?%)%]]+$", "")
+    local host = candidate:match("^https?://([%w%.%-]+)")
+    if not host or not host:find("%.", 1, true) or #candidate > 250 then
+        return nil
+    end
+    return candidate, host
+end
+
+local function jumpToMessage(channelId, id)
+    local target = messageViews[channelId] and messageViews[channelId][id]
+    if not target or not target.node or not target.node.Parent then return false end
+    if current ~= channelId then setChannel(channelId) end
+    if searchOpen then toggleSearch(false) end
+    followLatest[channelId] = false
+    scrollTicket[channelId] += 1
+    local list = lists[channelId]
+    task.defer(function()
+        if not alive or not target.node.Parent then return end
+        local y = list.CanvasPosition.Y + target.node.AbsolutePosition.Y
+            - list.AbsolutePosition.Y - 24
+        list.CanvasPosition = Vector2.new(0, math.clamp(y, 0, math.max(0,
+            list.AbsoluteCanvasSize.Y - list.AbsoluteWindowSize.Y)))
+        local highlight = new("UIStroke", {
+            Color = C.accent, Thickness = 1.5, Transparency = 0,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        }, target.bubble)
+        tween(highlight, 0.9, {Transparency = 1})
+        task.delay(0.95, function()
+            if highlight.Parent then highlight:Destroy() end
+        end)
+        if updateJump then updateJump() end
+    end)
+    return true
+end
+
 local function addMessage(message, silent)
     if type(message) ~= "table" or type(message.id) ~= "number" or seen[message.id] then
         return
@@ -1084,9 +1211,12 @@ local function addMessage(message, silent)
     local channelId = lists[message.ch] and message.ch or "main"
     local mine = message.userId == lp.UserId
     local user = clip(type(message.user) == "string" and message.user or "Unknown", 48)
-    local contents = clip(type(message.text) == "string" and message.text or "", MAX_LEN + 20)
+    local raw = clip(type(message.text) == "string" and message.text or "", MAX_LEN + 24)
+    local parsed = parseMessage(raw)
+    local displayed = parsed.code or parsed.body
     local timestamp = tonumber(message.ts)
-    if not timestamp or timestamp ~= timestamp or timestamp <= 0 or timestamp > 9999999999999 then
+    if not timestamp or timestamp ~= timestamp or timestamp <= 0
+        or timestamp > 9999999999999 then
         timestamp = os.time() * 1000
     end
     timestamp = math.floor(timestamp)
@@ -1094,27 +1224,31 @@ local function addMessage(message, silent)
     local previous = grouped[channelId]
     local compact = previous and previous.id == message.userId
         and timestamp >= previous.ts and timestamp - previous.ts <= 180000
+        and not parsed.replyId and not parsed.code and not parsed.legacyReply
     grouped[channelId] = {id = message.userId, ts = timestamp}
-    local mentioned = not mine and contents:lower():find("@" .. lp.Name:lower(), 1, true) ~= nil
 
+    local safeName = user:match("^[%w_]+$")
+    if safeName and #safeName <= 28 then
+        knownUsers[safeName:lower()] = safeName
+    end
+    if refreshMentions then refreshMentions() end
+    local mentioned = not mine and not parsed.code and containsOwnMention(parsed.body)
     local node = new("Frame", {
         Name = mine and "OwnMessage" or "Message",
         Size = UDim2.new(1, -4, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         BackgroundTransparency = 1, BorderSizePixel = 0,
     }, lists[channelId])
-
     if not mine and not compact then
-        local picture = new("ImageLabel", {
+        local avatar = new("ImageLabel", {
             Name = "Avatar", Position = UDim2.fromOffset(2, 5),
-            Size = UDim2.fromOffset(31, 31),
-            BackgroundColor3 = C.btn, BorderSizePixel = 0,
-            ScaleType = Enum.ScaleType.Crop,
-            Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(message.userId or 0) .. "&w=150&h=150",
+            Size = UDim2.fromOffset(31, 31), BackgroundColor3 = C.btn,
+            BorderSizePixel = 0, ScaleType = Enum.ScaleType.Crop,
+            Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(message.userId or 0)
+                .. "&w=150&h=150",
         }, node)
-        round(picture, 16)
+        round(avatar, 8)
     end
-
     local bubble = new("Frame", {
         Name = mentioned and "Mention" or mine and "Outgoing" or "Incoming",
         AnchorPoint = mine and Vector2.new(1, 0) or Vector2.new(0, 0),
@@ -1124,113 +1258,137 @@ local function addMessage(message, silent)
         BackgroundColor3 = (mine or mentioned) and C.accentSoft or C.panel,
         BorderSizePixel = 0, ZIndex = 2,
     }, node)
-    round(bubble, 10)
+    round(bubble, 8)
     new("UIListLayout", {
         SortOrder = Enum.SortOrder.LayoutOrder,
-        Padding = UDim.new(0, compact and 0 or 4),
+        Padding = UDim.new(0, 5),
     }, bubble)
     new("UIPadding", {
-        PaddingLeft = UDim.new(0, 13), PaddingRight = UDim.new(0, 13),
-        PaddingTop = UDim.new(0, compact and 8 or 10),
-        PaddingBottom = UDim.new(0, 9),
+        PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12),
+        PaddingTop = UDim.new(0, 9), PaddingBottom = UDim.new(0, 9),
     }, bubble)
 
     if not compact then
-        local name = new("TextLabel", {
+        local author = new("TextButton", {
             Name = "Author", LayoutOrder = 1,
-            Size = UDim2.new(1, -49, 0, 18),
+            Size = UDim2.new(1, -44, 0, 18),
             BackgroundTransparency = 1, RichText = true,
-            Text = "", Font = Enum.Font.GothamMedium,
+            Text = "", FontFace = UiFont,
             TextSize = 12, TextColor3 = C.text,
             TextXAlignment = Enum.TextXAlignment.Left,
-            TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            AutoButtonColor = false, ZIndex = 3,
         }, bubble)
         local tone = mine and C.mine or nameColor(message.userId)
-        name.Text = '<font color="#' .. tone:ToHex() .. '">' .. esc(mine and "You" or user)
-            .. '</font> <font color="#' .. C.dim:ToHex() .. '" size="10">'
+        author.Text = '<font color="#' .. tone:ToHex() .. '">'
+            .. esc(mine and "You" or user)
+            .. '</font>  <font color="#' .. C.dim:ToHex() .. '" size="10">'
             .. esc(shortTime) .. '</font>'
+        author.Activated:Connect(function()
+            if not alive or mine or not safeName then return end
+            local suffix = box.Text ~= "" and " " or ""
+            box.Text = box.Text .. suffix .. "@" .. safeName .. " "
+            box.CursorPosition = #box.Text + 1
+            box:CaptureFocus()
+        end)
     end
 
-    local fence = string.rep(string.char(96), 3)
-    local language, source = contents:match("^" .. fence .. "([%w%-]*)\n(.-)\n" .. fence .. "$")
-    local quote, text = contents:match("^> ([^\n]+)\n(.*)$")
-    local displayed = text or contents
-    local url = not source and displayed:match("https?://[^%s<>]+") or nil
-    if url then
-        url = url:gsub("[%,%.!%?%)%]]+$", "")
-        if not validLink(url) then url = nil end
-    end
-    if quote then
-        local quoteCard = new("Frame", {
-            Name = "Quote", LayoutOrder = 2,
-            Size = UDim2.new(1, 0, 0, 29),
-            BackgroundColor3 = C.btn, BorderSizePixel = 0, ZIndex = 3,
+    if parsed.replyId or parsed.legacyReply then
+        local original = parsed.replyId and messageViews[channelId][parsed.replyId]
+        local toAuthor = original and original.user or parsed.replyAuthor or "Unknown"
+        local toBody = original and original.text or "Original message unavailable"
+        if parsed.legacyReply then
+            toAuthor, toBody = "Reply", parsed.legacyReply
+        end
+        local quote = new("TextButton", {
+            Name = "ReplyReference", LayoutOrder = 2,
+            Size = UDim2.new(1, 0, 0, 44),
+            BackgroundColor3 = C.btn, BorderSizePixel = 0,
+            AutoButtonColor = false, Text = "", ZIndex = 3,
         }, bubble)
-        round(quoteCard, 6)
+        round(quote, 7)
+        new("Frame", {
+            Position = UDim2.fromOffset(0, 5), Size = UDim2.fromOffset(2, 34),
+            BorderSizePixel = 0, BackgroundColor3 = C.accent, ZIndex = 4,
+        }, quote)
         new("TextLabel", {
-            Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -20, 1, 0),
-            BackgroundTransparency = 1, Text = quote,
-            TextTruncate = Enum.TextTruncate.AtEnd,
-            TextColor3 = C.dim, FontFace = BodyFont, TextSize = 11,
-            TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
-        }, quoteCard)
+            Position = UDim2.fromOffset(10, 5), Size = UDim2.new(1, -18, 0, 17),
+            BackgroundTransparency = 1, Text = toAuthor,
+            TextColor3 = C.mine, FontFace = UiFont, TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+            ZIndex = 4,
+        }, quote)
+        new("TextLabel", {
+            Position = UDim2.fromOffset(10, 22), Size = UDim2.new(1, -18, 0, 16),
+            BackgroundTransparency = 1, Text = toBody,
+            TextColor3 = C.dim, FontFace = BodyFont, TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+            ZIndex = 4,
+        }, quote)
+        if parsed.replyId then
+            local originalId = parsed.replyId
+            quote.Activated:Connect(function()
+                if not jumpToMessage(channelId, originalId) then
+                    sys("That message is no longer in the loaded history")
+                end
+            end)
+        end
     end
-    if source then
+
+    if parsed.code then
+        local source = parsed.code
         local codePanel = new("Frame", {
             Name = "CodeBlock", LayoutOrder = 3,
-            Size = UDim2.new(1, 0, 0, 0),
-            AutomaticSize = Enum.AutomaticSize.Y,
+            Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
             BackgroundColor3 = C.bg, BorderSizePixel = 0, ZIndex = 3,
         }, bubble)
         round(codePanel, 7)
         new("UIPadding", {
-            PaddingTop = UDim.new(0, 9), PaddingBottom = UDim.new(0, 10),
+            PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 10),
             PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
         }, codePanel)
         new("UIListLayout", {
-            SortOrder = Enum.SortOrder.LayoutOrder,
-            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 5),
         }, codePanel)
         local codeHead = new("Frame", {
-            LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 18),
+            LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 19),
             BackgroundTransparency = 1, ZIndex = 4,
         }, codePanel)
         new("TextLabel", {
-            Size = UDim2.new(1, -40, 1, 0), BackgroundTransparency = 1,
-            Text = language ~= "" and language or "Code",
+            Size = UDim2.new(1, -40, 1, 0),
+            BackgroundTransparency = 1, Text = parsed.language or "Luau",
             FontFace = UiFont, TextSize = 10, TextColor3 = C.dim,
             TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
         }, codeHead)
         new("TextLabel", {
             Name = "Source", LayoutOrder = 2,
             Size = UDim2.new(1, 0, 0, 0),
-            AutomaticSize = Enum.AutomaticSize.Y,
-            BackgroundTransparency = 1, Text = source, RichText = false,
-            TextWrapped = true, Font = Enum.Font.Code, TextSize = 12,
-            TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+            AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+            Text = codeHighlight(source), RichText = true, TextWrapped = true,
+            Font = Enum.Font.Code, TextSize = 12, TextColor3 = C.text,
+            TextXAlignment = Enum.TextXAlignment.Left,
             TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 4,
         }, codePanel)
-        local copySource = type(setclipboard) == "function" and setclipboard
+        local copy = type(setclipboard) == "function" and setclipboard
             or (type(toclipboard) == "function" and toclipboard)
-        if copySource then
-            local copyCode = new("TextButton", {
+        if copy then
+            local button = new("TextButton", {
                 Name = "CopyCode", AnchorPoint = Vector2.new(1, 0),
                 Position = UDim2.new(1, 0, 0, -4),
-                Size = UDim2.fromOffset(28, 26),
+                Size = UDim2.fromOffset(29, 27),
                 BackgroundColor3 = C.btn, BorderSizePixel = 0,
                 AutoButtonColor = false, Text = "", ZIndex = 5,
             }, codeHead)
-            round(copyCode, 7)
-            local copyIcon = lucideIcon(copyCode, "copy", 14, C.text, 6)
-            copyCode.Activated:Connect(function()
-                if not alive then return end
-                if pcall(copySource, source) then
-                    copyIcon.Image = Lucide48.check.Image
-                    copyIcon.ImageRectOffset = Lucide48.check.Offset
+            round(button, 7)
+            local glyph = lucideIcon(button, "copy", 14, C.text, 6)
+            button.Activated:Connect(function()
+                if alive and pcall(copy, source) then
+                    glyph.Image = Lucide48.check.Image
+                    glyph.ImageRectOffset = Lucide48.check.Offset
                     task.delay(1, function()
-                        if alive and copyIcon.Parent then
-                            copyIcon.Image = Lucide48.copy.Image
-                            copyIcon.ImageRectOffset = Lucide48.copy.Offset
+                        if alive and glyph.Parent then
+                            glyph.Image = Lucide48.copy.Image
+                            glyph.ImageRectOffset = Lucide48.copy.Offset
                         end
                     end)
                 end
@@ -1240,15 +1398,14 @@ local function addMessage(message, silent)
         new("TextLabel", {
             Name = "Content", LayoutOrder = 3,
             Size = UDim2.new(1, 0, 0, 0),
-            AutomaticSize = Enum.AutomaticSize.Y,
-            BackgroundTransparency = 1, Text = displayed,
-            RichText = false, TextWrapped = true,
-            FontFace = BodyFont, TextSize = 13,
-            TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+            AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+            Text = formatText(parsed.body), RichText = true, TextWrapped = true,
+            FontFace = BodyFont, TextSize = 13, TextColor3 = C.text,
+            TextXAlignment = Enum.TextXAlignment.Left,
             TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 3,
         }, bubble)
+        local url, domain = findSharedUrl(parsed.body)
         if url then
-            local host = url:match("^https?://([^/%?&#]+)") or "Website"
             local card = new("TextButton", {
                 Name = "SharedLink", LayoutOrder = 4,
                 Size = UDim2.new(1, 0, 0, 44),
@@ -1256,114 +1413,120 @@ local function addMessage(message, silent)
                 AutoButtonColor = false, Text = "", ZIndex = 3,
             }, bubble)
             round(card, 7)
-            local icon = lucideIcon(card, "link", 15, C.mine, 4)
-            icon.AnchorPoint = Vector2.new(0, 0.5)
-            icon.Position = UDim2.new(0, 10, 0.5, 0)
+            local linkIcon = lucideIcon(card, "link", 15, C.mine, 4)
+            linkIcon.AnchorPoint = Vector2.new(0, 0.5)
+            linkIcon.Position = UDim2.new(0, 10, 0.5, 0)
             new("TextLabel", {
-                Position = UDim2.fromOffset(34, 4), Size = UDim2.new(1, -42, 0, 17),
-                BackgroundTransparency = 1, Text = host,
+                Position = UDim2.fromOffset(34, 4),
+                Size = UDim2.new(1, -43, 0, 17),
+                BackgroundTransparency = 1, Text = domain,
                 TextTruncate = Enum.TextTruncate.AtEnd,
                 FontFace = UiFont, TextSize = 11, TextColor3 = C.text,
                 TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
             }, card)
             new("TextLabel", {
-                Position = UDim2.fromOffset(34, 21), Size = UDim2.new(1, -42, 0, 17),
+                Position = UDim2.fromOffset(34, 21),
+                Size = UDim2.new(1, -43, 0, 17),
                 BackgroundTransparency = 1, Text = url,
                 TextTruncate = Enum.TextTruncate.AtEnd,
                 FontFace = BodyFont, TextSize = 10, TextColor3 = C.dim,
                 TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
             }, card)
-            local destination = url
             card.Activated:Connect(function()
                 if not alive then return end
                 local ok = pcall(function()
-                    game:GetService("GuiService"):OpenBrowserWindow(destination)
+                    game:GetService("GuiService"):OpenBrowserWindow(url)
                 end)
                 if not ok then
                     local clipboard = type(setclipboard) == "function" and setclipboard
                         or (type(toclipboard) == "function" and toclipboard)
-                    if clipboard and pcall(clipboard, destination) then
+                    if clipboard and pcall(clipboard, url) then
                         sys("Link copied to clipboard")
                     else
-                        sys("Could not open link")
+                        sys("Could not open or copy the link")
                     end
                 end
             end)
         end
     end
 
-    local clipboard = type(setclipboard) == "function" and setclipboard
-        or (type(toclipboard) == "function" and toclipboard)
-    if clipboard then
-        local copy = new("TextButton", {
-            Name = "Copy", AnchorPoint = Vector2.new(1, 0),
-            Position = mine and UDim2.new(1, -13, 0, 8)
-                or UDim2.new(0.79, 34, 0, 8),
-            Size = UDim2.fromOffset(28, 27),
-            BackgroundColor3 = C.btnHover, BorderSizePixel = 0,
-            AutoButtonColor = false, Text = "",
-            ZIndex = 5, Visible = UIS.TouchEnabled,
-        }, node)
-        round(copy, 8)
-        local copyIcon = lucideIcon(copy, "copy", 14, C.text, 6)
-        node.MouseEnter:Connect(function()
-            if alive and copy.Parent then copy.Visible = true end
-        end)
-        node.MouseLeave:Connect(function()
-            if alive and copy.Parent and not UIS.TouchEnabled then copy.Visible = false end
-        end)
-        copy.Activated:Connect(function()
-            local ok = pcall(clipboard, contents)
-            if ok then
-                copyIcon.Image = Lucide48.check.Image
-                copyIcon.ImageRectOffset = Lucide48.check.Offset
-            end
-            task.delay(1.2, function()
-                if alive and copy.Parent then
-                    copyIcon.Image = Lucide48.copy.Image
-                    copyIcon.ImageRectOffset = Lucide48.copy.Offset
-                end
-            end)
-        end)
-    end
-
-    local replyButton = new("TextButton", {
-        Name = "Reply", AnchorPoint = Vector2.new(1, 0),
-        Position = mine and UDim2.new(1, -46, 0, 8)
-            or UDim2.new(0.79, 1, 0, 8),
-        Size = UDim2.fromOffset(28, 27),
-        BackgroundColor3 = C.btnHover, BorderSizePixel = 0,
-        AutoButtonColor = false, Text = "", ZIndex = 5,
-        Visible = UIS.TouchEnabled,
+    local actions = new("Frame", {
+        Name = "MessageActions", AnchorPoint = Vector2.new(1, 0),
+        Position = mine and UDim2.new(1, -8, 0, 5)
+            or UDim2.new(0.79, 30, 0, 5),
+        Size = UDim2.fromOffset(62, 28),
+        BackgroundTransparency = 1, Visible = UIS.TouchEnabled, ZIndex = 5,
     }, node)
-    round(replyButton, 8)
-    lucideIcon(replyButton, "reply", 14, C.text, 6)
-    node.MouseEnter:Connect(function()
-        if alive and replyButton.Parent then replyButton.Visible = true end
-    end)
-    node.MouseLeave:Connect(function()
-        if alive and replyButton.Parent and not UIS.TouchEnabled then
-            replyButton.Visible = false
-        end
-    end)
-    replyButton.Activated:Connect(function()
+    local actionList = new("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 3),
+    }, actions)
+    local function actionButton(name, order, iconName)
+        local button = new("TextButton", {
+            Name = name, LayoutOrder = order,
+            Size = UDim2.fromOffset(28, 27), BackgroundColor3 = C.btnHover,
+            BorderSizePixel = 0, AutoButtonColor = false, Text = "", ZIndex = 6,
+        }, actions)
+        round(button, 8)
+        local glyph = lucideIcon(button, iconName, 14, C.text, 7)
+        return button, glyph
+    end
+    local reply = actionButton("Reply", 1, "reply")
+    reply.Activated:Connect(function()
         if not alive then return end
         pendingReplies[channelId] = {
-            user = user:gsub("[^%w_]", ""):sub(1, 22),
-            text = clip(displayed:gsub("[\r\n]+", " "), 54),
+            id = message.id,
+            user = safeName or "Unknown",
+            text = clip(displayed:gsub("[\r\n]+", " "), 64),
         }
+        if current ~= channelId then setChannel(channelId) end
         if searchOpen then toggleSearch(false) end
         refreshReply()
         box:CaptureFocus()
     end)
+    local clipboard = type(setclipboard) == "function" and setclipboard
+        or (type(toclipboard) == "function" and toclipboard)
+    if clipboard then
+        local copy, glyph = actionButton("Copy", 2, "copy")
+        copy.Activated:Connect(function()
+            if alive and pcall(clipboard, displayed) then
+                glyph.Image = Lucide48.check.Image
+                glyph.ImageRectOffset = Lucide48.check.Offset
+                task.delay(1, function()
+                    if alive and glyph.Parent then
+                        glyph.Image = Lucide48.copy.Image
+                        glyph.ImageRectOffset = Lucide48.copy.Offset
+                    end
+                end)
+            end
+        end)
+    end
+    node.MouseEnter:Connect(function()
+        if alive and actions.Parent then actions.Visible = true end
+    end)
+    node.MouseLeave:Connect(function()
+        if alive and actions.Parent and not UIS.TouchEnabled then
+            actions.Visible = false
+        end
+    end)
     insertMessage(channelId, node)
-    indexMessage(channelId, node, user .. " " .. contents)
-    if not silent and not mine and channelId ~= current then
-        unread[channelId] = (unread[channelId] or 0) + 1
-        refreshChannels()
+    indexMessage(channelId, node, user .. " " .. displayed)
+    messageViews[channelId][message.id] = {
+        node = node, bubble = bubble, user = user, text = clip(displayed:gsub("[\r\n]+", " "), 110),
+    }
+    if not silent and not mine then
+        if mentioned then
+            mentionsUnread[channelId] += 1
+        end
+        if channelId ~= current then
+            unread[channelId] = (unread[channelId] or 0) + 1
+            refreshChannels()
+        elseif mentioned then
+            refreshChannels()
+        end
     end
 end
-
 
 local STATUS = {
     connecting = {"Connecting", C.dim},
