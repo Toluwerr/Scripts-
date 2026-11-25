@@ -349,6 +349,7 @@ new("TextLabel", {
 }, side)
 local current = "main"
 local drafts, unread, chBtns, chanName, lists = {}, {}, {}, {}, {}
+local mentionsUnread = {}
 for index, channel in ipairs(CHANNELS) do
     chanName[channel.id] = channel.name
     unread[channel.id] = 0
@@ -855,7 +856,9 @@ local function refreshChannels()
         entry.hashLabel.TextColor3 = active and C.accent or C.dim
         local count = unread[id] or 0
         entry.badge.Visible = not active and count > 0
-        entry.badge.Text = count > 99 and "99+" or tostring(count)
+        local pings = mentionsUnread[id] or 0
+        entry.badge.Text = pings > 0 and ("@" .. tostring(math.min(pings, 9)))
+            or count > 99 and "99+" or tostring(count)
     end
 end
 
@@ -865,6 +868,7 @@ local function setChannel(id)
     current = id
     box.Text = drafts[id] or ""
     unread[id] = 0
+    mentionsUnread[id] = 0
     for other, list in pairs(lists) do list.Visible = other == id end
     roomName.Text = chanName[id]
     refreshReply()
@@ -1072,7 +1076,6 @@ end
 
 local messageViews = {}
 local knownUsers = {}
-local mentionsUnread = {}
 local refreshMentions
 knownUsers[lp.Name:lower()] = lp.Name
 for _, channel in ipairs(CHANNELS) do
@@ -1138,7 +1141,7 @@ local function codeHighlight(value)
             color(value:sub(i, finish), "#A1D4AE")
             i = finish + 1
         elseif ch:match("[%a_]") then
-            local word = value:match("^[%a_][%w_]*", i)
+            local word = value:sub(i):match("^[%a_][%w_]*")
             if word then
                 if keyWords[word] then color(word, "#91BAFF")
                 else parts[#parts + 1] = esc(word) end
@@ -1148,7 +1151,7 @@ local function codeHighlight(value)
                 i += 1
             end
         elseif ch:match("%d") then
-            local number = value:match("^%d+%.?%d*", i)
+            local number = value:sub(i):match("^%d+%.?%d*")
             if number then color(number, "#F4C68C"); i += #number
             else parts[#parts + 1] = esc(ch); i += 1 end
         else
@@ -1513,10 +1516,17 @@ local function addMessage(message, silent)
     insertMessage(channelId, node)
     indexMessage(channelId, node, user .. " " .. displayed)
     messageViews[channelId][message.id] = {
-        node = node, bubble = bubble, user = user, text = clip(displayed:gsub("[\r\n]+", " "), 110),
+        node = node, bubble = bubble, user = user,
+        text = clip(displayed:gsub("[\r\n]+", " "), 110),
     }
+    node.Destroying:Connect(function()
+        if messageViews[channelId][message.id] and
+            messageViews[channelId][message.id].node == node then
+            messageViews[channelId][message.id] = nil
+        end
+    end)
     if not silent and not mine then
-        if mentioned then
+        if mentioned and channelId ~= current then
             mentionsUnread[channelId] += 1
         end
         if channelId ~= current then
@@ -1719,47 +1729,194 @@ task.spawn(function()
 end)
 
 
-bind(box:GetPropertyChangedSignal("Text"), function()
-	local txt = box.Text
+local mentionPanel = new("Frame", {
+    Name = "MentionSuggestions", Position = UDim2.fromOffset(14, -40),
+    Size = UDim2.new(1, -87, 0, 35),
+    BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    Visible = false, ZIndex = 12,
+}, row)
+round(mentionPanel, 8)
+local suggestionButtons = {}
+local mentionCandidates = {}
+local completingMention = false
 
-	if box.CursorPosition == #txt + 1 then txt = emojify(txt) end
-	txt = clip(txt, MAX_LEN)
-	if txt ~= box.Text then
-		box.Text = txt
-		box.CursorPosition = #txt + 1
-	end
-	drafts[current] = txt
-	local available = math.max(0, MAX_LEN - (utf8.len(replyPrefix(current)) or #replyPrefix(current)))
-    if (utf8.len(txt) or #txt) > available then
-        txt = clip(txt, available)
-        if box.Text ~= txt then box.Text = txt end
+local function mentionAtCursor()
+    local caret = box.CursorPosition
+    if caret < 1 then return nil end
+    local before = box.Text:sub(1, caret - 1)
+    local index, query = before:match("()@([%w_]*)$")
+    if not index then return nil end
+    if index > 1 and before:sub(index - 1, index - 1):match("[%w_@]") then
+        return nil
     end
-    local n = utf8.len(txt) or #txt
-    local combined = n + (utf8.len(replyPrefix(current)) or #replyPrefix(current))
-	counter.Text = combined >= 160 and (combined .. "/" .. MAX_LEN) or ""
-	sendBtn.BackgroundTransparency = n > 0 and 0 or 0.45
-	sendIcon.ImageTransparency = n > 0 and 0 or 0.22
-	counter.TextColor3 = combined >= MAX_LEN and C.bad or C.dim
+    return index, query, caret
+end
+
+local function insertMention(name)
+    local startAt, _, caret = mentionAtCursor()
+    if not startAt then return end
+    local replacement = "@" .. name .. " "
+    box.Text = box.Text:sub(1, startAt - 1)
+        .. replacement .. box.Text:sub(caret)
+    box.CursorPosition = startAt + #replacement
+    mentionPanel.Visible = false
+    completingMention = false
+    box:CaptureFocus()
+end
+
+for i = 1, 5 do
+    local choice = new("TextButton", {
+        Name = "Suggestion" .. tostring(i),
+        Position = UDim2.fromOffset(5, 5 + (i - 1) * 30),
+        Size = UDim2.new(1, -10, 0, 28),
+        BackgroundColor3 = C.btn, BackgroundTransparency = 1,
+        BorderSizePixel = 0, AutoButtonColor = false,
+        Text = "", Visible = false, ZIndex = 13,
+    }, mentionPanel)
+    round(choice, 6)
+    local handle = new("TextLabel", {
+        Name = "Username", Position = UDim2.fromOffset(9, 0),
+        Size = UDim2.new(1, -18, 1, 0),
+        BackgroundTransparency = 1, Text = "",
+        FontFace = UiFont, TextSize = 12, TextColor3 = C.text,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 14,
+    }, choice)
+    bind(choice.MouseEnter, function() hover(choice, 0) end)
+    bind(choice.MouseLeave, function() hover(choice, 1) end)
+    bind(choice.Activated, function()
+        local name = mentionCandidates[i]
+        if name then insertMention(name) end
+    end)
+    suggestionButtons[i] = {button = choice, label = handle}
+end
+
+refreshMentions = function()
+    if not alive or UIS:GetFocusedTextBox() ~= box then
+        mentionPanel.Visible = false
+        return
+    end
+    local startAt, query = mentionAtCursor()
+    if not startAt then
+        mentionPanel.Visible = false
+        return
+    end
+    local matches = {}
+    local needle = query:lower()
+    for key, name in pairs(knownUsers) do
+        if key:sub(1, #needle) == needle and name:lower() ~= lp.Name:lower() then
+            matches[#matches + 1] = name
+        end
+    end
+    table.sort(matches, function(a, b) return a:lower() < b:lower() end)
+    local count = math.min(#matches, 5)
+    mentionPanel.Visible = count > 0
+    if count > 0 then
+        local height = count * 30 + 10
+        mentionPanel.Position = UDim2.fromOffset(14, -height - 3)
+        mentionPanel.Size = UDim2.new(1, -87, 0, height)
+    end
+    for i, entry in ipairs(suggestionButtons) do
+        local name = matches[i]
+        mentionCandidates[i] = name
+        entry.button.Visible = i <= count
+        entry.label.Text = name and ("@" .. name) or ""
+    end
+end
+
+refreshInput = function()
+    if not alive then return end
+    local text = box.Text
+    local wire = prepareMessage(text, pendingReplies[current])
+    local length = utf8.len(wire) or #wire
+    local lines = select(2, text:gsub("\n", "")) + 1
+    local newHeight = 61 + math.min(3, math.max(0, lines - 1)) * 18
+    if composerHeight ~= newHeight then
+        composerHeight = newHeight
+        box.TextYAlignment = lines > 1 and Enum.TextYAlignment.Top
+            or Enum.TextYAlignment.Center
+        layoutWorkspace()
+        if followLatest[current] then scheduleLatest(current) end
+    end
+    local nonempty = text:match("%S") ~= nil
+    counter.Text = length >= 150 and (tostring(length) .. "/" .. MAX_LEN) or ""
+    counter.TextColor3 = length > MAX_LEN and C.bad or C.dim
+    sendBtn.BackgroundTransparency = nonempty and length <= MAX_LEN and 0 or 0.5
+    sendIcon.ImageTransparency = nonempty and length <= MAX_LEN and 0 or 0.22
+    if not completingMention then refreshMentions() end
+end
+
+bind(box:GetPropertyChangedSignal("Text"), function()
+    if box.CursorPosition == #box.Text + 1
+        and not box.Text:find(string.rep(string.char(96), 3), 1, true) then
+        local replaced = emojify(box.Text)
+        if replaced ~= box.Text then
+            box.Text = replaced
+            box.CursorPosition = #replaced + 1
+        end
+    end
+    drafts[current] = box.Text
+    refreshInput()
+end)
+bind(box:GetPropertyChangedSignal("CursorPosition"), function()
+    if not completingMention then refreshMentions() end
+end)
+bind(box.Focused, function()
+    refreshMentions()
 end)
 bind(box.FocusLost, function(enter)
-	if enter then
-		if send(box.Text) then box.Text = "" end
-		task.defer(function() if alive then box:CaptureFocus() end end)
-	end
+    mentionPanel.Visible = false
+    if enter and not UIS:IsKeyDown(Enum.KeyCode.LeftShift)
+        and not UIS:IsKeyDown(Enum.KeyCode.RightShift) then
+        local content = box.Text:gsub("\n+$", "")
+        if send(content) then box.Text = "" end
+    end
 end)
-bind(sendBtn.Activated, function()
-    if send(box.Text) then box.Text = "" end
-end)
-bind(UIS.InputBegan, function(i, gp)
-	if not gp and i.KeyCode == Enum.KeyCode.RightShift then
+local function sendCurrent()
+    local content = box.Text:gsub("\n+$", "")
+    if send(content) then box.Text = "" end
+end
+bind(sendBtn.Activated, sendCurrent)
+bind(UIS.InputBegan, function(input, processed)
+    if UIS:GetFocusedTextBox() == box then
+        if input.KeyCode == Enum.KeyCode.Tab and mentionPanel.Visible then
+            local name = mentionCandidates[1]
+            if name then
+                completingMention = true
+                insertMention(name)
+            end
+            return
+        end
+        if input.KeyCode == Enum.KeyCode.Return
+            or input.KeyCode == Enum.KeyCode.KeypadEnter then
+            if UIS:IsKeyDown(Enum.KeyCode.LeftShift)
+                or UIS:IsKeyDown(Enum.KeyCode.RightShift) then
+                return
+            end
+            task.defer(function()
+                if alive then sendCurrent() end
+            end)
+            return
+        end
+        if input.KeyCode == Enum.KeyCode.Escape then
+            if pendingReplies[current] then
+                pendingReplies[current] = nil
+                refreshReply()
+            end
+            mentionPanel.Visible = false
+            return
+        end
+    end
+    if not processed and input.KeyCode == Enum.KeyCode.RightShift then
         win.Visible = not win.Visible
-    elseif i.KeyCode == Enum.KeyCode.F and win.Visible
-        and (UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then
+    elseif input.KeyCode == Enum.KeyCode.F and win.Visible
+        and (UIS:IsKeyDown(Enum.KeyCode.LeftControl)
+            or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then
         toggleSearch(true)
-    elseif i.KeyCode == Enum.KeyCode.Escape and searchOpen then
+    elseif input.KeyCode == Enum.KeyCode.Escape and searchOpen then
         toggleSearch(false)
     end
 end)
+refreshInput()
 
 local function cleanup()
 	alive = false
