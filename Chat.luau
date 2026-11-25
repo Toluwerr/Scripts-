@@ -602,6 +602,10 @@ round(sendBtn, 8)
 local sendIcon = lucideIcon(sendBtn, "arrow-right", 18, C.text, 5)
 
 local pendingReplies = {}
+local function replyPrefix(id)
+    local selected = pendingReplies[id]
+    return selected and ("> @" .. selected.user .. ": " .. selected.text .. "\n") or ""
+end
 local replyBanner = new("Frame", {
     Name = "ReplyPreview", Position = UDim2.fromOffset(14, -30),
     Size = UDim2.new(1, -26, 0, 28), BackgroundColor3 = C.panel,
@@ -627,6 +631,10 @@ local function refreshReply()
     local selected = pendingReplies[current]
     replyBanner.Visible = selected ~= nil
     replyLabel.Text = selected and ("Replying to @" .. selected.user .. " · " .. selected.text) or ""
+    local available = math.max(0, MAX_LEN - (utf8.len(replyPrefix(current)) or #replyPrefix(current)))
+    if (utf8.len(box.Text) or #box.Text) > available then
+        box.Text = clip(box.Text, available)
+    end
 end
 bind(replyCancel.Activated, function()
     pendingReplies[current] = nil
@@ -739,6 +747,8 @@ local function openCompose(mode)
     composeMode, composeChannel = mode, current
     composeInput.Text = ""
     composeError.Text = ""
+    composeCounter.Text = (mode == "code" and "11" or "0") .. "/" .. MAX_LEN
+    composeCounter.TextColor3 = C.dim
     composeTitle.Text = mode == "code" and "Share code" or "Share a link"
     composeDescription.Text = mode == "code"
         and "Send a formatted Luau snippet. This server allows up to 200 characters per message."
@@ -772,6 +782,9 @@ end)
 bind(composeSubmit.Activated, function()
     if not composeMode or not sendFormatted or not alive then return end
     local raw = composeInput.Text:match("^%s*(.-)%s*$")
+    if composeMode == "link" and raw:match("^www%.") then
+        raw = "https://" .. raw
+    end
     local payload = composeMode == "code" and codePayload(raw) or raw
     local count = utf8.len(payload) or #payload
     if raw == "" then
@@ -1555,8 +1568,7 @@ local function send(text, channelOverride, standalone)
     end
     local quote = pendingReplies[channel]
     if quote and not standalone then
-        local prefix = "> @" .. quote.user .. ": " .. quote.text .. "\n"
-        t = prefix .. t
+        t = replyPrefix(channel) .. t
     end
     if (utf8.len(t) or #t) > MAX_LEN then
         sys("Message exceeds 200 characters")
@@ -1675,11 +1687,17 @@ bind(box:GetPropertyChangedSignal("Text"), function()
 		box.CursorPosition = #txt + 1
 	end
 	drafts[current] = txt
-	local n = utf8.len(txt) or #txt
-	counter.Text = n >= 160 and (n .. "/" .. MAX_LEN) or ""
+	local available = math.max(0, MAX_LEN - (utf8.len(replyPrefix(current)) or #replyPrefix(current)))
+    if (utf8.len(txt) or #txt) > available then
+        txt = clip(txt, available)
+        if box.Text ~= txt then box.Text = txt end
+    end
+    local n = utf8.len(txt) or #txt
+    local combined = n + (utf8.len(replyPrefix(current)) or #replyPrefix(current))
+	counter.Text = combined >= 160 and (combined .. "/" .. MAX_LEN) or ""
 	sendBtn.BackgroundTransparency = n > 0 and 0 or 0.45
 	sendIcon.ImageTransparency = n > 0 and 0 or 0.22
-	counter.TextColor3 = n >= MAX_LEN and C.bad or C.dim
+	counter.TextColor3 = combined >= MAX_LEN and C.bad or C.dim
 end)
 bind(box.FocusLost, function(enter)
 	if enter then
