@@ -1122,21 +1122,6 @@ local header = create("CanvasGroup", {
     ZIndex = 3,
 }, window)
 
-local branding = create("TextLabel", {
-    Name = "Branding",
-    Position = UDim2.fromOffset(14, 0),
-    Size = UDim2.new(1, -164, 1, 0),
-    BackgroundTransparency = 1,
-    BorderSizePixel = 0,
-    Text = "ScriptFinder",
-    FontFace = Theme.Font,
-    TextSize = 13,
-    TextColor3 = Theme.Text,
-    TextXAlignment = Enum.TextXAlignment.Left,
-    TextTruncate = Enum.TextTruncate.AtEnd,
-    ZIndex = 4,
-}, header)
-
 local dragRegion = create("Frame", {
     Name = "DragRegion",
     BackgroundTransparency = 1,
@@ -4450,8 +4435,6 @@ local function layout(nextMode, view)
     end
     header.Position = UDim2.fromOffset(0, headerTop)
     controls.Position = UDim2.new(1, -right, 0.5, 0)
-    branding.Position = UDim2.fromOffset(left + 14, 0)
-    branding.Size = UDim2.new(1, -164 - left - right, 1, 0)
     dragRegion.Position = UDim2.fromOffset(left, 0)
     dragRegion.Size = UDim2.new(1, -142 - right - left, 1, 0)
     content.Position = UDim2.fromOffset(0, Theme.Header + headerTop)
