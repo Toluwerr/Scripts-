@@ -1287,7 +1287,7 @@ local function control(name, order)
         Text = "",
         ZIndex = 5,
     }, controls)
-    round(button, 6)
+    round(button, 14)
     local icon = create("Frame", {
         Name = "Icon",
         AnchorPoint = Vector2.new(0.5, 0.5),
@@ -1514,7 +1514,7 @@ local function pageControl(name, x, direction)
         Text = "",
         ZIndex = 5,
     }, navigation)
-    round(button, 7)
+    round(button, 16)
     lucideIcon(button, direction < 0 and "arrow-left" or "arrow-right", 18, Theme.Text, 6)
     bind(button.MouseEnter, function()
         hover(button, 0)
@@ -1632,12 +1632,14 @@ local function shortcut(name, iconName)
         Text = "",
         ZIndex = 5,
     }, shortcuts)
-    round(button, 7)
+    round(button, 19)
     local icon = lucideIcon(button, iconName, 18, Theme.Text, 6)
     bind(button.MouseEnter, function()
-        hover(button, 0)
+        button:SetAttribute("Hovered", true)
+        if button.Active then hover(button, 0) end
     end)
     bind(button.MouseLeave, function()
+        button:SetAttribute("Hovered", false)
         hover(button, button:GetAttribute("Selected") and 0 or 1)
     end)
     return function(x)
@@ -1658,6 +1660,7 @@ do
         Name = "Filters",
         Size = UDim2.fromOffset(32, 38),
         BackgroundColor3 = Theme.Raised,
+        BackgroundTransparency = 1,
         BorderSizePixel = 0,
         Text = "",
         AutoButtonColor = false,
@@ -1669,6 +1672,14 @@ do
     local icon = lucideIcon(button, "filter", 18, Theme.Text, 9)
     icon.Position = UDim2.fromOffset(16, 19)
     filterState.icon = icon
+    bind(button.MouseEnter, function()
+        button:SetAttribute("Hovered", true)
+        if button.Active then hover(button, 0) end
+    end)
+    bind(button.MouseLeave, function()
+        button:SetAttribute("Hovered", false)
+        hover(button, (filterState.expanded or Filters.count(filterState.values) > 0) and 0 or 1)
+    end)
     filterState.label = create("TextLabel", {
         Name = "Label",
         Position = UDim2.fromOffset(32, 0),
@@ -1811,7 +1822,7 @@ local scopeBack = create("TextButton", {
     Visible = false,
     ZIndex = 5,
 }, content)
-round(scopeBack, 7)
+round(scopeBack, 16)
 lucideIcon(scopeBack, "arrow-left", 18, Theme.Text, 6)
 bind(scopeBack.MouseEnter, function() hover(scopeBack, 0.24) end)
 bind(scopeBack.MouseLeave, function() hover(scopeBack, 0) end)
@@ -1828,7 +1839,7 @@ local function updateShortcuts()
             icon.ImageColor3 = color
         end
         if not filterState.hidden[button] then
-            button.BackgroundTransparency = selected and 0 or 1
+            button.BackgroundTransparency = (selected or (button.Active and button:GetAttribute("Hovered"))) and 0 or 1
         end
     end
     filterState.button.Active = selectedProvider >= 1 and catalogueScope ~= "games"
@@ -2267,7 +2278,7 @@ local settingsButton = create("TextButton", {
     Text = "",
     ZIndex = 5,
 }, header)
-round(settingsButton, 7)
+round(settingsButton, 14)
 lucideIcon(settingsButton, "settings", 17, Theme.Text, 6)
 bind(settingsButton.MouseEnter, function()
     hover(settingsButton, 0)
@@ -4128,7 +4139,7 @@ layoutSearchBar = function(animate)
         local x = index == 2 and math.max(0, (visibleIcons - 1) * 38) or 0
         filterState.motion(button, {
             Position = UDim2.fromOffset(x, 0),
-            BackgroundTransparency = shown and button:GetAttribute("Selected") and 0 or 1,
+            BackgroundTransparency = shown and (button:GetAttribute("Selected") or button:GetAttribute("Hovered")) and 0 or 1,
         }, animate)
         if icon then filterState.motion(icon, {ImageTransparency = shown and 0 or 1}, animate) end
         if not shown then
@@ -4143,9 +4154,13 @@ layoutSearchBar = function(animate)
             end
         end
     end
+    local filterHover = hoverTweens[filterState.button]
+    if filterHover then filterHover:Cancel() end
     filterState.motion(filterState.button, {
         Position = UDim2.fromOffset(visibleIcons * 38, 0),
         Size = UDim2.fromOffset(filterWidth, 38),
+        BackgroundTransparency = (not games and (expanded or Filters.count(filterState.values) > 0
+            or filterState.button:GetAttribute("Hovered"))) and 0 or 1,
     }, animate)
     filterState.motion(filterState.gamesButton, {
         Position = UDim2.fromOffset(visibleIcons * 38 + filterWidth + 6, 0),
