@@ -825,6 +825,7 @@ local function toggleSearch(open)
     roomSubtitle.Visible = not open
     presencePill.Visible = not open
     if not open then findInput.Text = "" end
+    layoutWorkspace()
     updateSearch()
     if open then
         task.defer(function()
@@ -885,19 +886,22 @@ local function sys(text)
 end
 
 local function addMessage(message, silent)
-    if type(message) ~= "table" or type(message.id) ~= "number" or seen[message.id] then return end
+    if type(message) ~= "table" or type(message.id) ~= "number" or seen[message.id] then
+        return
+    end
     seen[message.id] = true
     seenOrder[#seenOrder + 1] = message.id
     if #seenOrder > 2000 then
         seen[table.remove(seenOrder, 1)] = nil
     end
     if message.id > lastId then lastId = message.id end
+
     local channelId = lists[message.ch] and message.ch or "main"
     local mine = message.userId == lp.UserId
     local user = clip(type(message.user) == "string" and message.user or "Unknown", 48)
     local contents = clip(type(message.text) == "string" and message.text or "", MAX_LEN + 20)
     local timestamp = tonumber(message.ts)
-    if not timestamp or timestamp ~= timestamp or timestamp < 0 or timestamp > 9999999999999 then
+    if not timestamp or timestamp ~= timestamp or timestamp <= 0 or timestamp > 9999999999999 then
         timestamp = os.time() * 1000
     end
     timestamp = math.floor(timestamp)
@@ -906,85 +910,102 @@ local function addMessage(message, silent)
     local compact = previous and previous.id == message.userId
         and timestamp >= previous.ts and timestamp - previous.ts <= 180000
     grouped[channelId] = {id = message.userId, ts = timestamp}
-    local mentioned = contents:lower():find("@" .. lp.Name:lower(), 1, true) ~= nil
+    local mentioned = not mine and contents:lower():find("@" .. lp.Name:lower(), 1, true) ~= nil
 
     local node = new("Frame", {
         Name = mine and "OwnMessage" or "Message",
-        Size = UDim2.new(1, -4, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundColor3 = C.accentSoft, BackgroundTransparency = mentioned and 0.72 or 1,
-        BorderSizePixel = 0, Active = true,
+        Size = UDim2.new(1, -4, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1, BorderSizePixel = 0,
     }, lists[channelId])
-    if mentioned then round(node, 7) end
-    new("UIPadding", {
-        PaddingTop = UDim.new(0, compact and 1 or 7),
-        PaddingBottom = UDim.new(0, 3),
-    }, node)
 
-    if not compact then
-        local avatar = new("ImageLabel", {
-            Name = "Avatar", Size = UDim2.fromOffset(30, 30),
-            Position = UDim2.fromOffset(0, 5),
+    if not mine and not compact then
+        local picture = new("ImageLabel", {
+            Name = "Avatar", Position = UDim2.fromOffset(2, 5),
+            Size = UDim2.fromOffset(31, 31),
             BackgroundColor3 = C.btn, BorderSizePixel = 0,
             ScaleType = Enum.ScaleType.Crop,
             Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(message.userId or 0) .. "&w=150&h=150",
         }, node)
-        round(avatar, 15)
+        round(picture, 16)
     end
-    local textColumn = new("Frame", {
-        Name = "TextColumn", Position = UDim2.fromOffset(40, 0),
-        Size = UDim2.new(1, -40, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1,
+
+    local bubble = new("Frame", {
+        Name = mentioned and "Mention" or mine and "Outgoing" or "Incoming",
+        AnchorPoint = mine and Vector2.new(1, 0) or Vector2.new(0, 0),
+        Position = mine and UDim2.new(1, -6, 0, 2) or UDim2.fromOffset(42, 2),
+        Size = UDim2.new(mine and 0.78 or 0.79, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = (mine or mentioned) and C.accentSoft or C.panel,
+        BorderSizePixel = 0, ZIndex = 2,
     }, node)
+    round(bubble, 10)
     new("UIListLayout", {
-        SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2),
-    }, textColumn)
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, compact and 0 or 4),
+    }, bubble)
+    new("UIPadding", {
+        PaddingLeft = UDim.new(0, 13), PaddingRight = UDim.new(0, 13),
+        PaddingTop = UDim.new(0, compact and 8 or 10),
+        PaddingBottom = UDim.new(0, 9),
+    }, bubble)
+
     if not compact then
         local name = new("TextLabel", {
             Name = "Author", LayoutOrder = 1,
-            Size = UDim2.new(1, 0, 0, 17), BackgroundTransparency = 1,
-            Text = "", RichText = true, Font = Enum.Font.GothamMedium,
-            TextSize = 12, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
-            TextTruncate = Enum.TextTruncate.AtEnd,
-        }, textColumn)
+            Size = UDim2.new(1, -49, 0, 18),
+            BackgroundTransparency = 1, RichText = true,
+            Text = "", Font = Enum.Font.GothamMedium,
+            TextSize = 12, TextColor3 = C.text,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3,
+        }, bubble)
         local tone = mine and C.mine or nameColor(message.userId)
-        name.Text = '<font color="#' .. tone:ToHex() .. '">' .. esc(user)
-            .. '</font>  <font color="#' .. C.dim:ToHex() .. '" size="10">' .. esc(shortTime) .. '</font>'
+        name.Text = '<font color="#' .. tone:ToHex() .. '">' .. esc(mine and "You" or user)
+            .. '</font> <font color="#' .. C.dim:ToHex() .. '" size="10">'
+            .. esc(shortTime) .. '</font>'
     end
+
     new("TextLabel", {
-        Name = "Content", LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 0),
+        Name = "Content", LayoutOrder = 2,
+        Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         BackgroundTransparency = 1, Text = contents,
         RichText = false, TextWrapped = true,
         Font = Enum.Font.Gotham, TextSize = 13,
-        TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Top,
-    }, textColumn)
-    local copyText = type(setclipboard) == "function" and setclipboard
+        TextColor3 = C.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 3,
+    }, bubble)
+
+    local clipboard = type(setclipboard) == "function" and setclipboard
         or (type(toclipboard) == "function" and toclipboard)
-    if copyText then
-        local copyButton = new("TextButton", {
-            Name = "CopyMessage", AnchorPoint = Vector2.new(1, 0),
-            Position = UDim2.new(1, -5, 0, compact and 0 or 6),
-            Size = UDim2.fromOffset(43, 20), BackgroundColor3 = C.btnHover,
-            BorderSizePixel = 0, AutoButtonColor = false,
-            Text = "Copy", TextColor3 = C.text, Font = Enum.Font.GothamMedium,
-            TextSize = 10, ZIndex = 4, Visible = UIS.TouchEnabled,
-        }, node)
-        round(copyButton, 5)
-        node.MouseEnter:Connect(function()
-            if alive and copyButton.Parent then copyButton.Visible = true end
+    if clipboard then
+        local copy = new("TextButton", {
+            Name = "Copy", AnchorPoint = Vector2.new(1, 0),
+            Position = UDim2.new(1, -7, 0, 6),
+            Size = UDim2.fromOffset(40, 21),
+            BackgroundColor3 = C.btnHover, BorderSizePixel = 0,
+            AutoButtonColor = false, Text = "Copy",
+            TextColor3 = C.text, Font = Enum.Font.GothamMedium,
+            TextSize = 10, ZIndex = 5, Visible = UIS.TouchEnabled,
+        }, bubble)
+        round(copy, 6)
+        bubble.MouseEnter:Connect(function()
+            if alive and copy.Parent then copy.Visible = true end
         end)
-        node.MouseLeave:Connect(function()
-            if alive and copyButton.Parent and not UIS.TouchEnabled then copyButton.Visible = false end
+        bubble.MouseLeave:Connect(function()
+            if alive and copy.Parent and not UIS.TouchEnabled then copy.Visible = false end
         end)
-        copyButton.Activated:Connect(function()
-            local ok = pcall(copyText, contents)
-            copyButton.Text = ok and "Copied" or "Failed"
+        copy.Activated:Connect(function()
+            local ok = pcall(clipboard, contents)
+            copy.Text = ok and "Copied" or "Failed"
             task.delay(1.2, function()
-                if alive and copyButton.Parent then copyButton.Text = "Copy" end
+                if alive and copy.Parent then copy.Text = "Copy" end
             end)
         end)
     end
+
     insertMessage(channelId, node)
     indexMessage(channelId, node, user .. " " .. contents)
     if not silent and not mine and channelId ~= current then
