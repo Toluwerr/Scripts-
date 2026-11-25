@@ -199,8 +199,8 @@ local function tween(object, duration, props)
 end
 
 local function esc(value)
-    return (tostring(value):gsub("&", "&amp;"):gsub("<", "&lt;")
-        :gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&apos;"))
+    return (tostring(value):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+        :gsub('"', "&quot;"):gsub("'", "&apos;"))
 end
 
 local function nameColor(id)
@@ -248,7 +248,7 @@ local titleBar = new("Frame", {
 local titleDrag = new("Frame", {
     Name = "DragArea", Position = UDim2.fromOffset(8, 0),
     Size = UDim2.new(1, -98, 1, 0),
-    BackgroundTransparency = 1, Active = true, ZIndex = 3,
+    BackgroundTransparency = 1, Active = true, ZIndex = 6,
 }, titleBar)
 
 local dot = new("Frame", {
@@ -311,6 +311,15 @@ local side = new("Frame", {
     ZIndex = 7,
 }, body)
 round(side, 11)
+local closeSidebar = new("TextButton", {
+    Name = "CloseChannels", AnchorPoint = Vector2.new(1, 0),
+    Position = UDim2.new(1, -9, 0, 9), Size = UDim2.fromOffset(25, 25),
+    BackgroundColor3 = C.btnHover, BackgroundTransparency = 1,
+    BorderSizePixel = 0, AutoButtonColor = false, Text = "", ZIndex = 9,
+}, side)
+round(closeSidebar, 6)
+line(closeSidebar, 8, 12, 10, 1.4, C.dim, 10, 45)
+line(closeSidebar, 8, 12, 10, 1.4, C.dim, 10, -45)
 new("TextLabel", {
     Name = "Section", Position = UDim2.fromOffset(14, 16),
     Size = UDim2.new(1, -28, 0, 16),
@@ -616,6 +625,16 @@ end
 bind(sidebarButton.Activated, function()
     sidebarCollapsed = not sidebarCollapsed
     layoutWorkspace()
+end)
+bind(closeSidebar.Activated, function()
+    sidebarCollapsed = true
+    layoutWorkspace()
+end)
+bind(closeSidebar.MouseEnter, function()
+    tween(closeSidebar, 0.14, {BackgroundTransparency = 0})
+end)
+bind(closeSidebar.MouseLeave, function()
+    tween(closeSidebar, 0.14, {BackgroundTransparency = 1})
 end)
 bind(win:GetPropertyChangedSignal("AbsoluteSize"), layoutWorkspace)
 layoutWorkspace()
