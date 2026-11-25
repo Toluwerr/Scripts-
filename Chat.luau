@@ -1098,20 +1098,33 @@ end
 
 local function formatText(value)
     local parts, i = {}, 1
+    local tick = string.char(96)
     while i <= #value do
-        local startAt, stopAt, handle = value:find("@([%w_]+)", i)
-        if not startAt then
-            parts[#parts + 1] = esc(value:sub(i))
-            break
-        end
-        parts[#parts + 1] = esc(value:sub(i, startAt - 1))
-        if knownUsers[handle:lower()] then
-            parts[#parts + 1] = '<font color="#' .. C.mine:ToHex() .. '"><b>@'
-                .. esc(handle) .. '</b></font>'
+        local char = value:sub(i, i)
+        if char == tick and value:sub(i, i + 2) ~= tick .. tick .. tick then
+            local finish = value:find(tick, i + 1, true)
+            if finish and finish - i < 180 then
+                parts[#parts + 1] = '<font color="#ACCBFA">'
+                    .. esc(value:sub(i + 1, finish - 1)) .. '</font>'
+                i = finish + 1
+            else
+                parts[#parts + 1] = esc(char)
+                i += 1
+            end
+        elseif char == "@" then
+            local handle = value:sub(i + 1):match("^([%w_]+)")
+            if handle and knownUsers[handle:lower()] then
+                parts[#parts + 1] = '<font color="#' .. C.mine:ToHex()
+                    .. '"><b>@' .. esc(handle) .. '</b></font>'
+                i += #handle + 1
+            else
+                parts[#parts + 1] = esc(char)
+                i += 1
+            end
         else
-            parts[#parts + 1] = esc("@" .. handle)
+            parts[#parts + 1] = esc(char)
+            i += 1
         end
-        i = stopAt + 1
     end
     return table.concat(parts)
 end
