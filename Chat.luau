@@ -308,6 +308,7 @@ new("TextLabel", {
 }, side)
 
 local current = "main"
+local drafts = {}
 local unread, chBtns, chanName = {}, {}, {}
 local lists = {}
 local CONTENT_X = SIDE_W
@@ -430,6 +431,46 @@ for _, y in ipairs({8, 13, 18}) do
     }, sidebarButton)
 end
 
+local findButton = new("TextButton", {
+    Name = "FindMessages", AnchorPoint = Vector2.new(1, 0.5),
+    Position = UDim2.new(1, -116, 0.5, 0), Size = UDim2.fromOffset(46, 25),
+    BackgroundColor3 = C.btn, BorderSizePixel = 0,
+    AutoButtonColor = false, Text = "Find", Font = Enum.Font.GothamMedium,
+    TextSize = 11, TextColor3 = C.dim,
+}, roomHead)
+round(findButton, 7)
+local findPanel = new("Frame", {
+    Name = "FindPanel", Position = UDim2.fromOffset(55, 8),
+    Size = UDim2.new(1, -70, 0, 38), BackgroundColor3 = C.input,
+    BorderSizePixel = 0, ZIndex = 4, Visible = false,
+}, roomHead)
+round(findPanel, 8)
+local findInput = new("TextBox", {
+    Name = "FindInput", Position = UDim2.fromOffset(11, 0),
+    Size = UDim2.new(1, -103, 1, 0), BackgroundTransparency = 1,
+    ClearTextOnFocus = false, Text = "", PlaceholderText = "Find in #main",
+    PlaceholderColor3 = C.dim, TextColor3 = C.text,
+    Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 5,
+}, findPanel)
+local findResult = new("TextLabel", {
+    Name = "ResultCount", AnchorPoint = Vector2.new(1, 0.5),
+    Position = UDim2.new(1, -35, 0.5, 0), Size = UDim2.fromOffset(61, 20),
+    BackgroundTransparency = 1, Text = "", Font = Enum.Font.Gotham,
+    TextSize = 10, TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Right,
+    ZIndex = 5,
+}, findPanel)
+local exitFind = new("TextButton", {
+    Name = "CloseFind", AnchorPoint = Vector2.new(1, 0.5),
+    Position = UDim2.new(1, -5, 0.5, 0), Size = UDim2.fromOffset(28, 28),
+    BackgroundTransparency = 1, BorderSizePixel = 0, Text = "×",
+    AutoButtonColor = false, TextColor3 = C.dim, Font = Enum.Font.Gotham,
+    TextSize = 21, ZIndex = 5,
+}, findPanel)
+local searchOpen = false
+local updateSearch
+local updateJump
+
 -- ---------- message area ----------
 for _, ch in ipairs(CHANNELS) do
     local list = new("ScrollingFrame", {
@@ -533,12 +574,40 @@ end)
 bind(win:GetPropertyChangedSignal("AbsoluteSize"), layoutWorkspace)
 layoutWorkspace()
 
+local jumpButton = new("TextButton", {
+    Name = "JumpToLatest", AnchorPoint = Vector2.new(1, 1),
+    Position = UDim2.new(1, -22, 1, -84), Size = UDim2.fromOffset(117, 29),
+    BackgroundColor3 = C.accentSoft, BorderSizePixel = 0,
+    AutoButtonColor = false, Text = "Latest messages ↓",
+    Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = C.text,
+    ZIndex = 5, Visible = false,
+}, body)
+round(jumpButton, 7)
+updateJump = function()
+    local list = lists[current]
+    if not list or not alive then return end
+    local remaining = list.AbsoluteCanvasSize.Y - list.CanvasPosition.Y - list.AbsoluteWindowSize.Y
+    jumpButton.Visible = not searchOpen and remaining > 70
+end
+bind(jumpButton.Activated, function()
+    local list = lists[current]
+    if list then list.CanvasPosition = Vector2.new(0, 1e7) end
+    updateJump()
+end)
+for _, list in pairs(lists) do
+    bind(list:GetPropertyChangedSignal("CanvasPosition"), updateJump)
+    bind(list:GetPropertyChangedSignal("AbsoluteCanvasSize"), updateJump)
+    bind(list:GetPropertyChangedSignal("AbsoluteWindowSize"), updateJump)
+end
+
 -- ---------- interaction styling ----------
 local function hover(button, normal, over)
     bind(button.MouseEnter, function() tween(button, 0.14, {BackgroundColor3 = over}) end)
     bind(button.MouseLeave, function() tween(button, 0.14, {BackgroundColor3 = normal}) end)
 end
 hover(sendBtn, C.accent, C.accentHover)
+hover(findButton, C.btn, C.btnHover)
+hover(sidebarButton, C.btnHover, C.btn)
 bind(box.Focused, function() tween(boxStroke, 0.15, {Color = C.accent, Transparency = 0}) end)
 bind(box.FocusLost, function() tween(boxStroke, 0.15, {Color = C.divider, Transparency = 1}) end)
 
@@ -558,13 +627,18 @@ end
 
 local function setChannel(id)
     if not lists[id] then return end
+    drafts[current] = box.Text
     current = id
+    box.Text = drafts[id] or ""
     unread[id] = 0
     for otherId, list in pairs(lists) do list.Visible = otherId == id end
     roomName.Text = "# " .. chanName[id]
     roomSubtitle.Text = id == "main" and "General discussion" or id == "lounge" and "Casual conversation" or "Everything else"
     box.PlaceholderText = "Message #" .. (id == "offtopic" and "off-topic" or id)
+    findInput.PlaceholderText = "Find in #" .. id
     refreshChannels()
+    if updateSearch then updateSearch() end
+    if updateJump then updateJump() end
     task.defer(function()
         if alive and lists[id] then lists[id].CanvasPosition = Vector2.new(0, 1e6) end
     end)
@@ -606,7 +680,10 @@ bind(UIS.InputChanged, function(input)
     action.apply(action.state, delta.X, delta.Y)
 end)
 bind(UIS.InputEnded, function(input)
-    if dragAction and input == dragAction.input then dragAction = nil end
+    if dragAction and (input == dragAction.input or (not dragAction.touch
+        and input.UserInputType == Enum.UserInputType.MouseButton1)) then
+        dragAction = nil
+    end
 end)
 
 makeDrag(titleDrag, function() return win.Position end, function(start, dx, dy)
@@ -643,7 +720,53 @@ end)
 
 -- ---------- message presentation ----------
 local seen, queues = {}, {}
-for _, channel in ipairs(CHANNELS) do queues[channel.id] = {} end
+local indexed = {}
+for _, channel in ipairs(CHANNELS) do
+    queues[channel.id] = {}
+    indexed[channel.id] = {}
+end
+local function indexMessage(channelId, node, contents)
+    local entries = indexed[channelId]
+    entries[#entries + 1] = {node = node, text = tostring(contents):lower()}
+    if #entries > 200 then table.remove(entries, 1) end
+    if searchOpen and updateSearch then updateSearch() end
+end
+updateSearch = function()
+    local query = searchOpen and findInput.Text:lower():sub(1, 80) or ""
+    local hits = 0
+    for id, entries in pairs(indexed) do
+        for _, entry in ipairs(entries) do
+            local match = query == "" or entry.text:find(query, 1, true) ~= nil
+            entry.node.Visible = id ~= current or match
+            if id == current and match then hits += 1 end
+        end
+    end
+    findResult.Text = query == "" and "" or tostring(hits) .. " found"
+    if updateJump then updateJump() end
+end
+local function toggleSearch(open)
+    searchOpen = open
+    findPanel.Visible = open
+    findButton.Visible = not open
+    roomName.Visible = not open
+    roomSubtitle.Visible = not open
+    presencePill.Visible = not open
+    if not open then findInput.Text = "" end
+    updateSearch()
+    if open then
+        task.defer(function()
+            if alive and searchOpen then findInput:CaptureFocus() end
+        end)
+    end
+end
+bind(findButton.Activated, function() toggleSearch(true) end)
+bind(exitFind.Activated, function() toggleSearch(false) end)
+bind(findInput:GetPropertyChangedSignal("Text"), function()
+    if updateSearch then updateSearch() end
+end)
+bind(findInput.FocusLost, function(entered)
+    if entered and searchOpen then findInput:ReleaseFocus() end
+end)
 local lastId, order = 0, 0
 local grouped = {}
 
@@ -655,7 +778,7 @@ local function insertMessage(channelId, node)
     node.LayoutOrder = order
     queue[#queue + 1] = node
     if #queue > 200 then table.remove(queue, 1):Destroy() end
-    if atBottom then
+    if atBottom and not searchOpen then
         task.delay(0.06, function()
             if alive and list.Parent then list.CanvasPosition = Vector2.new(0, 1e6) end
         end)
@@ -680,6 +803,7 @@ local function addLabel(channelId, richText, color)
         TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Top,
     }, frame)
     insertMessage(id, frame)
+    indexMessage(id, frame, richText)
     return frame
 end
 
@@ -701,12 +825,15 @@ local function addMessage(message, silent)
     local compact = previous and previous.id == message.userId
         and timestamp >= previous.ts and timestamp - previous.ts <= 180000
     grouped[channelId] = {id = message.userId, ts = timestamp}
+    local mentioned = contents:lower():find("@" .. lp.Name:lower(), 1, true) ~= nil
 
     local node = new("Frame", {
         Name = mine and "OwnMessage" or "Message",
         Size = UDim2.new(1, -4, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1, BorderSizePixel = 0,
+        BackgroundColor3 = C.accentSoft, BackgroundTransparency = mentioned and 0.72 or 1,
+        BorderSizePixel = 0, Active = true,
     }, lists[channelId])
+    if mentioned then round(node, 7) end
     new("UIPadding", {
         PaddingTop = UDim.new(0, compact and 1 or 7),
         PaddingBottom = UDim.new(0, 3),
@@ -736,6 +863,7 @@ local function addMessage(message, silent)
             Size = UDim2.new(1, 0, 0, 17), BackgroundTransparency = 1,
             Text = "", RichText = true, Font = Enum.Font.GothamMedium,
             TextSize = 12, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
         }, textColumn)
         local tone = mine and C.mine or nameColor(message.userId)
         name.Text = '<font color="#' .. tone:ToHex() .. '">' .. esc(user)
@@ -750,7 +878,34 @@ local function addMessage(message, silent)
         TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
     }, textColumn)
+    local copyText = type(setclipboard) == "function" and setclipboard
+        or (type(toclipboard) == "function" and toclipboard)
+    if copyText then
+        local copyButton = new("TextButton", {
+            Name = "CopyMessage", AnchorPoint = Vector2.new(1, 0),
+            Position = UDim2.new(1, -5, 0, compact and 0 or 6),
+            Size = UDim2.fromOffset(43, 20), BackgroundColor3 = C.btnHover,
+            BorderSizePixel = 0, AutoButtonColor = false,
+            Text = "Copy", TextColor3 = C.text, Font = Enum.Font.GothamMedium,
+            TextSize = 10, ZIndex = 4, Visible = UIS.TouchEnabled,
+        }, node)
+        round(copyButton, 5)
+        bind(node.MouseEnter, function()
+            if alive and copyButton.Parent then copyButton.Visible = true end
+        end)
+        bind(node.MouseLeave, function()
+            if alive and copyButton.Parent and not UIS.TouchEnabled then copyButton.Visible = false end
+        end)
+        bind(copyButton.Activated, function()
+            local ok = pcall(copyText, contents)
+            copyButton.Text = ok and "Copied" or "Failed"
+            task.delay(1.2, function()
+                if alive and copyButton.Parent then copyButton.Text = "Copy" end
+            end)
+        end)
+    end
     insertMessage(channelId, node)
+    indexMessage(channelId, node, user .. " " .. contents)
     if not silent and not mine and channelId ~= current then
         unread[channelId] = (unread[channelId] or 0) + 1
         refreshChannels()
@@ -760,8 +915,8 @@ end
 -- status: connecting | online (websocket) | fallback (http polling) | offline | banned
 local STATUS = {
 	connecting = { "Connecting...", C.warn },
-	online = { "Online", C.good },
-	fallback = { "Online", C.warn }, -- yellow dot = working, but on the slower HTTP fallback
+	online = { "Live · WebSocket", C.good },
+	fallback = { "Live · Polling", C.warn },
 	offline = { "Offline", C.bad },
 	banned = { "Banned", C.bad },
 }
@@ -912,6 +1067,7 @@ bind(box:GetPropertyChangedSignal("Text"), function()
 		box.Text = txt
 		box.CursorPosition = #txt + 1
 	end
+	drafts[current] = txt
 	local n = utf8.len(txt) or #txt
 	counter.Text = n >= 160 and (n .. "/" .. MAX_LEN) or ""
 	sendBtn.BackgroundTransparency = n > 0 and 0 or 0.45
