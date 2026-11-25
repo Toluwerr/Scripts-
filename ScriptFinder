@@ -285,6 +285,7 @@ local function summaryFor(item)
     local experience = type(item.game) == "table" and item.game or {}
     local metadata = Filters.metadata(item)
     return {
+        provider = 3,
         placeId = numericId(experience.placeId or item.placeId or experience.gameId),
         gameName = plainText(experience.name or experience.title or experience.gameName, 140),
         scriptType = metadata.scriptType,
@@ -3334,6 +3335,8 @@ local function renderDetails(body, item, data)
             end
             fetchingComments = false
             if not ok or type(response) ~= "table" or type(response.comments) ~= "table" then
+                warn("ScriptFinder comments: " .. tostring(not ok and response
+                    or (type(response) == "table" and response.error) or "Invalid comments response"))
                 if target == 1 and commentCount == 0 and type(data.comments) == "table" and #data.comments > 0 then
                     appendComments(data.comments)
                     commentsStatus.Text = "Additional comments unavailable."
@@ -3378,7 +3381,8 @@ local function renderDetails(body, item, data)
             loadComments(nextCommentsPage)
         end
     end)
-    if data and item.provider ~= 3 then
+    local provider = (data and data.provider) or item.provider or 3
+    if data and (provider == 1 or provider == 2) then
         local count = data.commentsCount
         commentsStatus.Text = count and (tostring(count) .. " comments (text unavailable)")
             or "Comments unavailable"
@@ -3834,7 +3838,7 @@ openDetails = function(item)
         local setCode = renderDetails(scroller, item, data)
         if not setCode then return end
         task.spawn(function()
-            if item.provider ~= 3 and type(data.source) == "string" and data.source ~= "" then
+            if (item.provider == 1 or item.provider == 2) and type(data.source) == "string" and data.source ~= "" then
                 if alive and token == detailGeneration and detailView == view then setCode(data.source) end
                 return
             end
