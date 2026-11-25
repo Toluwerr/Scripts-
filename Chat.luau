@@ -983,18 +983,19 @@ local function addMessage(message, silent)
     if clipboard then
         local copy = new("TextButton", {
             Name = "Copy", AnchorPoint = Vector2.new(1, 0),
-            Position = UDim2.new(1, -7, 0, 6),
+            Position = mine and UDim2.new(1, -13, 0, 8)
+                or UDim2.new(0.79, 34, 0, 8),
             Size = UDim2.fromOffset(40, 21),
             BackgroundColor3 = C.btnHover, BorderSizePixel = 0,
             AutoButtonColor = false, Text = "Copy",
             TextColor3 = C.text, Font = Enum.Font.GothamMedium,
             TextSize = 10, ZIndex = 5, Visible = UIS.TouchEnabled,
-        }, bubble)
+        }, node)
         round(copy, 6)
-        bubble.MouseEnter:Connect(function()
+        node.MouseEnter:Connect(function()
             if alive and copy.Parent then copy.Visible = true end
         end)
-        bubble.MouseLeave:Connect(function()
+        node.MouseLeave:Connect(function()
             if alive and copy.Parent and not UIS.TouchEnabled then copy.Visible = false end
         end)
         copy.Activated:Connect(function()
