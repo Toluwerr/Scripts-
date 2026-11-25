@@ -233,9 +233,12 @@ if syn and syn.protect_gui then pcall(syn.protect_gui, gui) end
 
 local cam = workspace.CurrentCamera
 local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+local initialWidth = math.min(WIN_W, math.max(320, vp.X - 24))
+local initialHeight = math.min(WIN_H, math.max(230, vp.Y - 24))
 local win = new("Frame", {
-    Name = "ChatWindow", Size = UDim2.fromOffset(WIN_W, WIN_H),
-    Position = UDim2.fromOffset(math.floor((vp.X - WIN_W) / 2), math.floor((vp.Y - WIN_H) / 2)),
+    Name = "ChatWindow", Size = UDim2.fromOffset(initialWidth, initialHeight),
+    Position = UDim2.fromOffset(math.max(0, math.floor((vp.X - initialWidth) / 2)),
+        math.max(0, math.floor((vp.Y - initialHeight) / 2))),
     BackgroundColor3 = C.bg, BorderSizePixel = 0, ClipsDescendants = true,
 }, gui)
 round(win, 11)
@@ -253,22 +256,15 @@ local titleDrag = new("Frame", {
     Name = "DragRegion", Size = UDim2.new(1, -82, 1, 0),
     BackgroundTransparency = 1, Active = true, ZIndex = 4,
 }, titleBar)
-new("TextLabel", {
-    Name = "Title", Position = UDim2.fromOffset(16, 0),
-    Size = UDim2.fromOffset(55, TITLE_H), BackgroundTransparency = 1,
-    Text = "Chat", TextColor3 = C.text, TextSize = 14,
-    Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
-}, titleBar)
-
 local dot = new("Frame", {
-    Name = "ConnectionDot", Position = UDim2.fromOffset(77, math.floor((TITLE_H - 7) / 2)),
+    Name = "ConnectionDot", Position = UDim2.fromOffset(16, math.floor((TITLE_H - 7) / 2)),
     Size = UDim2.fromOffset(7, 7), BackgroundColor3 = C.warn,
     BorderSizePixel = 0, ZIndex = 5,
 }, titleBar)
 round(dot, 4)
 local status = new("TextLabel", {
-    Name = "ConnectionStatus", Position = UDim2.fromOffset(91, 0),
-    Size = UDim2.fromOffset(132, TITLE_H), BackgroundTransparency = 1,
+    Name = "ConnectionStatus", Position = UDim2.fromOffset(31, 0),
+    Size = UDim2.fromOffset(165, TITLE_H), BackgroundTransparency = 1,
     Text = "Connecting", TextColor3 = C.dim, TextSize = 11,
     Font = Enum.Font.Gotham, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
 }, titleBar)
@@ -325,12 +321,6 @@ for i, ch in ipairs(CHANNELS) do
         BorderSizePixel = 0, AutoButtonColor = false, Text = "",
     }, side)
     round(button, 7)
-    local selected = new("Frame", {
-        Name = "ActiveIndicator", Position = UDim2.fromOffset(0, 8),
-        Size = UDim2.fromOffset(3, 17), BackgroundColor3 = C.accent,
-        BorderSizePixel = 0, Visible = false,
-    }, button)
-    round(selected, 2)
     local hashLabel = new("TextLabel", {
         Name = "Hash", Position = UDim2.fromOffset(13, 0),
         Size = UDim2.fromOffset(16, 33), BackgroundTransparency = 1,
@@ -352,7 +342,7 @@ for i, ch in ipairs(CHANNELS) do
         TextColor3 = C.text, Visible = false,
     }, button)
     round(badge, 8)
-    chBtns[ch.id] = {btn = button, badge = badge, selected = selected, nameLabel = nameLabel, hashLabel = hashLabel}
+    chBtns[ch.id] = {btn = button, badge = badge, nameLabel = nameLabel, hashLabel = hashLabel}
     unread[ch.id] = 0
 end
 
@@ -378,7 +368,7 @@ new("TextLabel", {
 new("TextLabel", {
     Name = "IdentityLabel", Position = UDim2.fromOffset(42, 23),
     Size = UDim2.new(1, -50, 0, 13), BackgroundTransparency = 1,
-    Text = "Signed in", Font = Enum.Font.Gotham, TextSize = 10,
+    Text = "Local player", Font = Enum.Font.Gotham, TextSize = 10,
     TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
 }, userChip)
 
@@ -393,15 +383,15 @@ new("Frame", {
     BackgroundColor3 = C.divider, BorderSizePixel = 0,
 }, roomHead)
 local roomName = new("TextLabel", {
-    Name = "ChannelName", Position = UDim2.fromOffset(18, 8),
-    Size = UDim2.new(1, -152, 0, 23), BackgroundTransparency = 1,
+    Name = "ChannelName", Position = UDim2.fromOffset(55, 8),
+    Size = UDim2.new(1, -255, 0, 23), BackgroundTransparency = 1,
     Text = "# Main Chat", Font = Enum.Font.GothamBold, TextSize = 15,
     TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
     TextTruncate = Enum.TextTruncate.AtEnd,
 }, roomHead)
 local roomSubtitle = new("TextLabel", {
-    Name = "ChannelSubtitle", Position = UDim2.fromOffset(18, 30),
-    Size = UDim2.new(1, -152, 0, 15), BackgroundTransparency = 1,
+    Name = "ChannelSubtitle", Position = UDim2.fromOffset(55, 30),
+    Size = UDim2.new(1, -255, 0, 15), BackgroundTransparency = 1,
     Text = "Public conversation", Font = Enum.Font.Gotham, TextSize = 11,
     TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
     TextTruncate = Enum.TextTruncate.AtEnd,
@@ -425,6 +415,20 @@ local countLbl = new("TextLabel", {
     TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
     TextTruncate = Enum.TextTruncate.AtEnd,
 }, presencePill)
+
+local sidebarButton = new("TextButton", {
+    Name = "ToggleChannels", Position = UDim2.fromOffset(15, 13),
+    Size = UDim2.fromOffset(29, 28),
+    BackgroundColor3 = C.btnHover, BackgroundTransparency = 1,
+    BorderSizePixel = 0, AutoButtonColor = false, Text = "",
+}, roomHead)
+round(sidebarButton, 7)
+for _, y in ipairs({8, 13, 18}) do
+    new("Frame", {
+        Position = UDim2.fromOffset(8, y), Size = UDim2.fromOffset(13, 1.4),
+        BackgroundColor3 = C.text, BorderSizePixel = 0,
+    }, sidebarButton)
+end
 
 -- ---------- message area ----------
 for _, ch in ipairs(CHANNELS) do
@@ -509,6 +513,26 @@ for _, lineData in ipairs({{3, 12, 12}, {9, 12, 6}}) do
     }, grip)
 end
 
+local sidebarCollapsed = initialWidth < 600
+local function layoutWorkspace()
+    local offset = sidebarCollapsed and 0 or SIDE_W
+    side.Visible = not sidebarCollapsed
+    roomHead.Position = UDim2.fromOffset(offset, 0)
+    roomHead.Size = UDim2.new(1, -offset, 0, 54)
+    row.Position = UDim2.new(0, offset, 1, -69)
+    row.Size = UDim2.new(1, -offset, 0, 69)
+    for _, list in pairs(lists) do
+        list.Position = UDim2.fromOffset(offset + 2, 55)
+        list.Size = UDim2.new(1, -offset - 4, 1, -125)
+    end
+end
+bind(sidebarButton.Activated, function()
+    sidebarCollapsed = not sidebarCollapsed
+    layoutWorkspace()
+end)
+bind(win:GetPropertyChangedSignal("AbsoluteSize"), layoutWorkspace)
+layoutWorkspace()
+
 -- ---------- interaction styling ----------
 local function hover(button, normal, over)
     bind(button.MouseEnter, function() tween(button, 0.14, {BackgroundColor3 = over}) end)
@@ -522,8 +546,7 @@ bind(box.FocusLost, function() tween(boxStroke, 0.15, {Color = C.divider, Transp
 local function refreshChannels()
     for id, entry in pairs(chBtns) do
         local active = id == current
-        entry.selected.Visible = active
-        entry.btn.BackgroundColor3 = active and C.btnHover or C.btn
+        entry.btn.BackgroundColor3 = C.btnHover
         tween(entry.btn, 0.14, {BackgroundTransparency = active and 0 or 1})
         local count = unread[id] or 0
         entry.badge.Visible = count > 0 and not active
@@ -550,7 +573,7 @@ end
 for id, entry in pairs(chBtns) do
     bind(entry.btn.Activated, function() setChannel(id) end)
     bind(entry.btn.MouseEnter, function()
-        if current ~= id then tween(entry.btn, 0.14, {BackgroundTransparency = 0.35}) end
+        if current ~= id then tween(entry.btn, 0.14, {BackgroundTransparency = 0.5}) end
     end)
     bind(entry.btn.MouseLeave, function()
         if current ~= id then tween(entry.btn, 0.14, {BackgroundTransparency = 1}) end
@@ -558,25 +581,33 @@ for id, entry in pairs(chBtns) do
 end
 
 -- ---------- drag / resize ----------
+-- A single tracked gesture avoids accumulating temporary input connections.
+local dragAction
 local function makeDrag(handle, getStart, apply)
     bind(handle.InputBegan, function(input)
+        if not alive or dragAction then return end
         local kind = input.UserInputType
         if kind ~= Enum.UserInputType.MouseButton1 and kind ~= Enum.UserInputType.Touch then return end
-        local origin, state = input.Position, getStart()
-        local moveConnection, endConnection
-        moveConnection = UIS.InputChanged:Connect(function(nextInput)
-            if nextInput.UserInputType == Enum.UserInputType.MouseMovement or nextInput == input then
-                apply(state, nextInput.Position.X - origin.X, nextInput.Position.Y - origin.Y)
-            end
-        end)
-        endConnection = input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                moveConnection:Disconnect()
-                endConnection:Disconnect()
-            end
-        end)
+        dragAction = {
+            input = input, touch = kind == Enum.UserInputType.Touch,
+            origin = input.Position, state = getStart(), apply = apply,
+        }
     end)
 end
+bind(UIS.InputChanged, function(input)
+    local action = dragAction
+    if not alive or not action then return end
+    if action.touch then
+        if input ~= action.input then return end
+    elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then
+        return
+    end
+    local delta = input.Position - action.origin
+    action.apply(action.state, delta.X, delta.Y)
+end)
+bind(UIS.InputEnded, function(input)
+    if dragAction and input == dragAction.input then dragAction = nil end
+end)
 
 makeDrag(titleDrag, function() return win.Position end, function(start, dx, dy)
     local v = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(1280, 720)
@@ -587,10 +618,10 @@ end)
 makeDrag(grip, function() return win.Size end, function(start, dx, dy)
     if not body.Visible then return end
     local v = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(1280, 720)
-    local maxWidth = math.max(MIN_W, v.X - win.AbsolutePosition.X - 8)
-    local maxHeight = math.max(MIN_H, v.Y - win.AbsolutePosition.Y - 8)
-    win.Size = UDim2.fromOffset(math.clamp(start.X.Offset + dx, MIN_W, maxWidth),
-        math.clamp(start.Y.Offset + dy, MIN_H, maxHeight))
+    local maxWidth = math.max(320, v.X - win.AbsolutePosition.X - 8)
+    local maxHeight = math.max(230, v.Y - win.AbsolutePosition.Y - 8)
+    win.Size = UDim2.fromOffset(math.clamp(start.X.Offset + dx, math.min(MIN_W, maxWidth), maxWidth),
+        math.clamp(start.Y.Offset + dy, math.min(MIN_H, maxHeight), maxHeight))
 end)
 
 local minimized, savedSize = false, win.Size
