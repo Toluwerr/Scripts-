@@ -548,40 +548,20 @@ local boxBg = new("Frame", {
     BackgroundColor3 = C.panel, BorderSizePixel = 0, ZIndex = 4,
 }, row)
 round(boxBg, 8)
-local codeButton = new("TextButton", {
-    Name = "CodeBlock", Position = UDim2.fromOffset(7, 6),
-    Size = UDim2.fromOffset(29, 28),
-    BackgroundColor3 = C.btn, BackgroundTransparency = 1,
-    BorderSizePixel = 0, AutoButtonColor = false, Text = "",
-    ZIndex = 5,
-}, boxBg)
-round(codeButton, 7)
-lucideIcon(codeButton, "code", 16, C.text, 6)
-bind(codeButton.MouseEnter, function() hover(codeButton, 0) end)
-bind(codeButton.MouseLeave, function() hover(codeButton, 1) end)
-local linkButton = new("TextButton", {
-    Name = "ShareLink", Position = UDim2.fromOffset(39, 6),
-    Size = UDim2.fromOffset(29, 28),
-    BackgroundColor3 = C.btn, BackgroundTransparency = 1,
-    BorderSizePixel = 0, AutoButtonColor = false, Text = "",
-    ZIndex = 5,
-}, boxBg)
-round(linkButton, 7)
-lucideIcon(linkButton, "link", 16, C.text, 6)
-bind(linkButton.MouseEnter, function() hover(linkButton, 0) end)
-bind(linkButton.MouseLeave, function() hover(linkButton, 1) end)
 local boxStroke = new("UIStroke", {
     Color = C.accent, Thickness = 1, Transparency = 1,
     ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 }, boxBg)
 local box = new("TextBox", {
-    Name = "Message", Position = UDim2.fromOffset(78, 0),
-    Size = UDim2.new(1, -132, 1, 0),
+    Name = "Message", Position = UDim2.fromOffset(12, 0),
+    Size = UDim2.new(1, -66, 1, 0),
     BackgroundTransparency = 1,
     Text = "", PlaceholderText = "Message #main",
     PlaceholderColor3 = C.dim, ClearTextOnFocus = false,
     FontFace = BodyFont, TextSize = 13, TextColor3 = C.text,
-    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+    TextWrapped = true, MultiLine = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 5,
 }, boxBg)
 local counter = new("TextLabel", {
     Name = "CharacterCount", AnchorPoint = Vector2.new(1, 0.5),
@@ -602,19 +582,17 @@ round(sendBtn, 8)
 local sendIcon = lucideIcon(sendBtn, "arrow-right", 18, C.text, 5)
 
 local pendingReplies = {}
-local function replyPrefix(id)
-    local selected = pendingReplies[id]
-    return selected and ("> @" .. selected.user .. ": " .. selected.text .. "\n") or ""
-end
+local composerHeight = 61
+local refreshInput
 local replyBanner = new("Frame", {
-    Name = "ReplyPreview", Position = UDim2.fromOffset(14, -30),
-    Size = UDim2.new(1, -26, 0, 28), BackgroundColor3 = C.panel,
-    BorderSizePixel = 0, Visible = false, ZIndex = 10,
+    Name = "ReplyPreview", Position = UDim2.fromOffset(14, -33),
+    Size = UDim2.new(1, -26, 0, 30),
+    BackgroundColor3 = C.panel, BorderSizePixel = 0, Visible = false, ZIndex = 10,
 }, row)
-round(replyBanner, 7)
+round(replyBanner, 8)
 local replyLabel = new("TextLabel", {
-    Name = "ReplyText", Position = UDim2.fromOffset(11, 0),
-    Size = UDim2.new(1, -42, 1, 0),
+    Name = "ReplyText", Position = UDim2.fromOffset(10, 0),
+    Size = UDim2.new(1, -44, 1, 0),
     BackgroundTransparency = 1, Text = "", TextTruncate = Enum.TextTruncate.AtEnd,
     FontFace = BodyFont, TextColor3 = C.text, TextSize = 11,
     TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 11,
@@ -622,183 +600,82 @@ local replyLabel = new("TextLabel", {
 local replyCancel = new("TextButton", {
     Name = "CancelReply", AnchorPoint = Vector2.new(1, 0.5),
     Position = UDim2.new(1, -4, 0.5, 0),
-    Size = UDim2.fromOffset(24, 24),
-    BackgroundTransparency = 1, BorderSizePixel = 0,
-    AutoButtonColor = false, Text = "", ZIndex = 11,
+    Size = UDim2.fromOffset(25, 25), BackgroundTransparency = 1,
+    BorderSizePixel = 0, AutoButtonColor = false, Text = "", ZIndex = 11,
 }, replyBanner)
 lucideIcon(replyCancel, "x", 14, C.dim, 12)
 local function refreshReply()
     local selected = pendingReplies[current]
     replyBanner.Visible = selected ~= nil
-    replyLabel.Text = selected and ("Replying to @" .. selected.user .. " · " .. selected.text) or ""
-    local available = math.max(0, MAX_LEN - (utf8.len(replyPrefix(current)) or #replyPrefix(current)))
-    if (utf8.len(box.Text) or #box.Text) > available then
-        box.Text = clip(box.Text, available)
-    end
+    replyLabel.Text = selected and ("Replying to " .. selected.user .. "  ·  " .. selected.text) or ""
+    if refreshInput then refreshInput() end
 end
 bind(replyCancel.Activated, function()
     pendingReplies[current] = nil
     refreshReply()
 end)
 
-local sendFormatted
-local composeMode = nil
-local composeChannel = nil
-local composeBackdrop = new("TextButton", {
-    Name = "ComposerBackdrop", Size = UDim2.fromScale(1, 1),
-    BackgroundColor3 = Color3.new(0, 0, 0),
-    BackgroundTransparency = 0.4, BorderSizePixel = 0,
-    AutoButtonColor = false, Text = "", ZIndex = 18,
-    Visible = false,
-}, body)
-local composePanel = new("Frame", {
-    Name = "ComposerDialog", AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.5),
-    Size = UDim2.fromOffset(420, 260),
-    BackgroundColor3 = C.panel, BorderSizePixel = 0,
-    Visible = false, ZIndex = 19,
-}, body)
-round(composePanel, 9)
-local composeTitle = new("TextLabel", {
-    Name = "Title", Position = UDim2.fromOffset(14, 12),
-    Size = UDim2.new(1, -56, 0, 25),
-    BackgroundTransparency = 1, Text = "",
-    FontFace = UiFont, TextSize = 15, TextColor3 = C.text,
-    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 20,
-}, composePanel)
-local composeClose = new("TextButton", {
-    Name = "Close", AnchorPoint = Vector2.new(1, 0),
-    Position = UDim2.new(1, -9, 0, 10),
-    Size = UDim2.fromOffset(27, 27),
-    BackgroundColor3 = C.btn, BackgroundTransparency = 1,
-    BorderSizePixel = 0, AutoButtonColor = false, Text = "", ZIndex = 20,
-}, composePanel)
-round(composeClose, 8)
-lucideIcon(composeClose, "x", 15, C.text, 21)
-local composeDescription = new("TextLabel", {
-    Name = "Description", Position = UDim2.fromOffset(14, 43),
-    Size = UDim2.new(1, -28, 0, 34),
-    BackgroundTransparency = 1, Text = "",
-    FontFace = BodyFont, TextSize = 11, TextWrapped = true,
-    TextColor3 = C.dim, TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 20,
-}, composePanel)
-local composeInput = new("TextBox", {
-    Name = "Content", Position = UDim2.fromOffset(14, 85),
-    Size = UDim2.new(1, -28, 1, -145),
-    BackgroundColor3 = C.bg, BorderSizePixel = 0,
-    ClearTextOnFocus = false, Text = "", MultiLine = true,
-    TextWrapped = false, PlaceholderText = "",
-    PlaceholderColor3 = C.dim, Font = Enum.Font.Code,
-    TextSize = 12, TextColor3 = C.text,
-    TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 20,
-}, composePanel)
-round(composeInput, 8)
-new("UIPadding", {
-    PaddingLeft = UDim.new(0, 11), PaddingRight = UDim.new(0, 11),
-    PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
-}, composeInput)
-local composeCounter = new("TextLabel", {
-    Name = "Counter", Position = UDim2.fromOffset(14, 0),
-    AnchorPoint = Vector2.new(0, 1), Size = UDim2.fromOffset(118, 20),
-    BackgroundTransparency = 1, Text = "", FontFace = BodyFont,
-    TextSize = 10, TextColor3 = C.dim,
-    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 20,
-}, composePanel)
-composeCounter.Position = UDim2.new(0, 14, 1, -14)
-local composeSubmit = new("TextButton", {
-    Name = "Submit", AnchorPoint = Vector2.new(1, 1),
-    Position = UDim2.new(1, -14, 1, -12),
-    Size = UDim2.fromOffset(116, 33),
-    BackgroundColor3 = C.accent, BorderSizePixel = 0,
-    AutoButtonColor = false, Text = "Send",
-    FontFace = UiFont, TextSize = 12, TextColor3 = C.text, ZIndex = 20,
-}, composePanel)
-round(composeSubmit, 8)
-local composeError = new("TextLabel", {
-    Name = "Error", Position = UDim2.fromOffset(14, 0),
-    AnchorPoint = Vector2.new(0, 1),
-    Size = UDim2.new(1, -154, 0, 19),
-    BackgroundTransparency = 1, Text = "",
-    FontFace = BodyFont, TextSize = 10,
-    TextColor3 = C.bad, TextXAlignment = Enum.TextXAlignment.Left,
-    TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 20,
-}, composePanel)
-composeError.Position = UDim2.new(0, 14, 1, -35)
-local function codePayload(raw)
-    local fence = string.rep(string.char(96), 3)
-    return fence .. "luau\n" .. raw .. "\n" .. fence
+local function codeEncode(value)
+    value = value:gsub("\r\n", "\n"):gsub("\r", "\n")
+    return (value:gsub("\\", "\\\\"):gsub("\n", "\\n"))
 end
-local function validLink(raw)
-    if type(raw) ~= "string" or #raw > 400 or raw:find("%s") then return false end
-    local domain = raw:match("^https?://([%w%.%-]+)")
-    return domain ~= nil and domain:find("%.", 1, false) ~= nil
-        and raw:match("^https?://[^%s]+$") ~= nil
+local function codeDecode(value)
+    return (value:gsub("\\(.)", function(char)
+        if char == "n" then return "\n" end
+        if char == "\\" then return "\\" end
+        return "\\" .. char
+    end))
 end
-local function closeCompose()
-    composeMode = nil
-    composeBackdrop.Visible = false
-    composePanel.Visible = false
-    composeInput:ReleaseFocus()
-end
-local function openCompose(mode)
-    if banned or not alive then return end
-    composeMode, composeChannel = mode, current
-    composeInput.Text = ""
-    composeError.Text = ""
-    composeCounter.Text = (mode == "code" and "11" or "0") .. "/" .. MAX_LEN
-    composeCounter.TextColor3 = C.dim
-    composeTitle.Text = mode == "code" and "Share code" or "Share a link"
-    composeDescription.Text = mode == "code"
-        and "Send a formatted Luau snippet. This server allows up to 200 characters per message."
-        or "Paste a public website URL. Everyone in the channel can access the link."
-    composeSubmit.Text = mode == "code" and "Send code" or "Share link"
-    composeInput.PlaceholderText = mode == "code" and "print(\"Hello\")" or "https://example.com"
-    composeInput.MultiLine = mode == "code"
-    composeInput.TextWrapped = mode == "link"
-    composePanel.Size = UDim2.fromOffset(
-        math.min(420, math.max(280, body.AbsoluteSize.X - 26)),
-        math.min(260, math.max(195, body.AbsoluteSize.Y - 14)))
-    composeBackdrop.Visible = true
-    composePanel.Visible = true
-    task.defer(function()
-        if alive and composeMode == mode then composeInput:CaptureFocus() end
-    end)
-end
-bind(codeButton.Activated, function() openCompose("code") end)
-bind(linkButton.Activated, function() openCompose("link") end)
-bind(composeClose.Activated, closeCompose)
-bind(composeBackdrop.Activated, closeCompose)
-bind(composeInput:GetPropertyChangedSignal("Text"), function()
-    if not composeMode then return end
-    local text = composeInput.Text
-    local payload = composeMode == "code" and codePayload(text) or text
-    local count = utf8.len(payload) or #payload
-    composeCounter.Text = tostring(count) .. "/" .. MAX_LEN
-    composeCounter.TextColor3 = count > MAX_LEN and C.bad or C.dim
-    composeError.Text = ""
-end)
-bind(composeSubmit.Activated, function()
-    if not composeMode or not sendFormatted or not alive then return end
-    local raw = composeInput.Text:match("^%s*(.-)%s*$")
-    if composeMode == "link" and raw:match("^www%.") then
-        raw = "https://" .. raw
+local function parseMessage(raw)
+    local meta = {body = raw}
+    local id, author, rest = raw:match("^~r:(%d+):([%w_]+)|(.+)$")
+    if id and tonumber(id) then
+        meta.replyId = tonumber(id)
+        meta.replyAuthor = author
+        meta.body = rest
     end
-    local payload = composeMode == "code" and codePayload(raw) or raw
-    local count = utf8.len(payload) or #payload
-    if raw == "" then
-        composeError.Text = "Enter something to send"
-    elseif composeMode == "link" and not validLink(raw) then
-        composeError.Text = "Enter a valid http:// or https:// URL"
-    elseif count > MAX_LEN then
-        composeError.Text = "This chat supports up to 200 characters"
-    elseif sendFormatted(payload, composeChannel) then
-        closeCompose()
+    local language, encoded = meta.body:match("^~c:([%w_%-]+):(.+)$")
+    if language then
+        meta.code = codeDecode(encoded)
+        meta.language = language
     else
-        composeError.Text = "Unable to send"
+        local fence = string.rep(string.char(96), 3)
+        local lang, content = meta.body:match("^" .. fence .. "([%w%-]*)\n(.-)\n?" .. fence .. "$")
+        if content then
+            meta.code, meta.language = content, lang ~= "" and lang or "luau"
+        end
     end
-end)
+    if not meta.replyId then
+        local older, rest = meta.body:match("^> ([^\n]+)\n(.*)$")
+        if older then
+            meta.legacyReply = older
+            meta.body = rest
+        end
+    end
+    return meta
+end
+local function prepareMessage(raw, reply)
+    local trimmed = tostring(raw):gsub("\r\n", "\n"):match("^%s*(.-)%s*$")
+    local fence = string.rep(string.char(96), 3)
+    local language, code = trimmed:match("^" .. fence .. "([%w%-]*)\n(.-)\n?" .. fence .. "$")
+    if not code and trimmed:find("\n", 1, true)
+        and (trimmed:match("^local%s") or trimmed:match("^function%s")
+            or trimmed:match("^print%(") or trimmed:match("^if%s")
+            or trimmed:match("^for%s") or trimmed:match("^while%s")
+            or trimmed:match("^return%s")) then
+        language, code = "luau", trimmed
+    end
+    local content
+    if code then
+        content = "~c:" .. (language ~= "" and language or "luau") .. ":" .. codeEncode(code)
+    else
+        content = emojify(trimmed)
+    end
+    if reply then
+        content = "~r:" .. tostring(reply.id) .. ":" .. reply.user .. "|" .. content
+    end
+    return content
+end
 
 local grip = new("TextButton", {
     Name = "ResizeHandle", AnchorPoint = Vector2.new(1, 1),
@@ -830,11 +707,13 @@ local function layoutWorkspace()
     sidebarIcon.ImageRectOffset = Lucide48[sidebarCollapsed and "arrow-right" or "arrow-left"].Offset
     roomHead.Position = UDim2.fromOffset(offset, 0)
     roomHead.Size = UDim2.new(1, -offset, 0, 53)
-    row.Position = UDim2.new(0, offset, 1, -62)
-    row.Size = UDim2.new(1, -offset, 0, 61)
+    row.Position = UDim2.new(0, offset, 1, -composerHeight - 1)
+    row.Size = UDim2.new(1, -offset, 0, composerHeight)
+    boxBg.Size = UDim2.new(1, -73, 0, composerHeight - 21)
+    sendBtn.Position = UDim2.new(1, -12, 1, -51)
     for _, list in pairs(lists) do
         list.Position = UDim2.fromOffset(offset + 1, 53)
-        list.Size = UDim2.new(1, -offset - 1, 1, -116)
+        list.Size = UDim2.new(1, -offset - 1, 1, -55 - composerHeight)
     end
     local available = win.AbsoluteSize.X - offset
     roomName.Size = UDim2.new(1, available < 365 and -105 or -215, 1, 0)
