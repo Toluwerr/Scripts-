@@ -3853,12 +3853,10 @@ do
         local back = button(view, "Back", "", UDim2.fromOffset(0, 0), UDim2.fromOffset(32, 32))
         lucideIcon(back, "arrow-left", 18, Theme.Text, 9)
         back.Activated:Connect(closeDetails)
-        local heading = label(view, "Title", item.title .. " · Servers", UDim2.fromOffset(42, 0), UDim2.new(1, -122, 0, 32))
+        local heading = label(view, "Title", item.title .. " · Servers", UDim2.fromOffset(42, 0), UDim2.new(1, -84, 0, 32))
         heading.TextSize = 14
         local refresh = button(view, "Refresh", "", UDim2.new(1, -32, 0, 0), UDim2.fromOffset(32, 32))
         lucideIcon(refresh, "refresh-cw", 16, Theme.Text, 9)
-        local experience = button(view, "Experience", "", UDim2.new(1, -70, 0, 0), UDim2.fromOffset(32, 32))
-        lucideIcon(experience, "gamepad-2", 16, Theme.Text, 9)
         local toolbar = create("Frame", {
             Name = "Filters", Position = UDim2.fromOffset(0, 40), Size = UDim2.new(1, 0, 0, 30),
             BackgroundTransparency = 1, ZIndex = 7,
@@ -3881,23 +3879,7 @@ do
         local busy, sequence = false, 0
         local teleport = game:GetService("TeleportService")
         local joiningId, joiningTicket = nil, 0
-        local restricted = false
-        local renderRows
         local place = tonumber(numericId(item.placeId))
-        experience.Activated:Connect(function()
-            local universe = tonumber(numericId(item.universeId))
-            if not valid() or not universe or joiningId then return end
-            experience.Active = false
-            task.spawn(function()
-                local ok = pcall(function()
-                    teleport:PromptExperienceDetailsAsync(player, universe)
-                end)
-                if valid() then
-                    experience.Active = true
-                    if not ok then status.Text = "Open the experience in Roblox to join." end
-                end
-            end)
-        end)
         local function finishJoin(message)
             joiningTicket += 1
             joiningId = nil
@@ -3905,19 +3887,13 @@ do
         end
         local failed = teleport.TeleportInitFailed:Connect(function(who, result, message, targetPlace)
             if joiningId and who == player and targetPlace == place then
-                if result == Enum.TeleportResult.Unauthorized then
-                    restricted = true
-                    finishJoin("Direct join restricted. Use Roblox's experience page.")
-                    if renderRows then renderRows() end
-                else
-                    finishJoin("Join failed: " .. tostring(result.Name))
-                end
+                finishJoin("Join failed: " .. tostring(result.Name))
                 warn("Roblox server join: " .. tostring(message))
             end
         end)
         view.Destroying:Once(function() failed:Disconnect() end)
         local function joinServer(server)
-            if not valid() or joiningId or restricted or server.playing >= server.capacity
+            if not valid() or joiningId or server.playing >= server.capacity
                 or (place == game.PlaceId and server.id == game.JobId) then return end
             joiningTicket += 1
             local ticket = joiningTicket
@@ -3938,7 +3914,7 @@ do
                 end)
             end)
         end
-        renderRows = function()
+        local function renderRows()
             for _, child in ipairs(list:GetChildren()) do
                 if child:IsA("Frame") then child:Destroy() end
             end
@@ -3972,9 +3948,9 @@ do
                     label(row, "Performance", ping .. "  ·  " .. fps, UDim2.fromOffset(10, 24),
                         UDim2.new(1, -58, 0, 21), true)
                     local play = button(row, "Join", "", UDim2.new(1, -38, 0, 10), UDim2.fromOffset(30, 30),
-                        (full or current or restricted) and Theme.Window or Theme.Accent)
+                        (full or current) and Theme.Window or Theme.Accent)
                     local glyph = lucideIcon(play, current and "check" or "play", 15, Theme.Text, 9)
-                    if full or current or restricted then
+                    if full or current then
                         play.Active = false
                         glyph.ImageTransparency = 0.5
                     else
@@ -4024,8 +4000,7 @@ do
                 for _, entry in ipairs(entries) do
                     if not hideFull or entry.playing < entry.capacity then visible += 1 end
                 end
-                status.Text = restricted and "Direct join restricted. Use Roblox's experience page."
-                    or (tostring(visible) .. " public servers loaded" .. (sortIndex >= 3 and " · Loaded results" or ""))
+                status.Text = tostring(visible) .. " public servers loaded" .. (sortIndex >= 3 and " · Loaded results" or "")
                 more.Active = cursor ~= "" and #entries < 500
                 more.Text = more.Active and "Load more" or "No more servers"
             end)
@@ -4040,8 +4015,7 @@ do
             else
                 renderRows()
                 if #entries > 0 then
-                    status.Text = restricted and "Direct join restricted. Use Roblox's experience page."
-                        or (tostring(#entries) .. " public servers loaded · Loaded results")
+                    status.Text = tostring(#entries) .. " public servers loaded · Loaded results"
                 else
                     fetch(true)
                 end
