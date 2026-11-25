@@ -954,6 +954,7 @@ local function onBanned(msg)
 end
 
 local function handle(raw)
+    if not alive or banned then return end
 	local ok, d = pcall(HttpService.JSONDecode, HttpService, raw)
 	if not ok or type(d) ~= "table" then return end
 	if d.t == "hist" then
@@ -990,8 +991,8 @@ end
 
 local function send(text)
 	local t = tostring(text):match("^%s*(.-)%s*$")
-	if t == "" then return end
-	if banned then sys("you are banned"); return end
+	if t == "" then return false end
+	if banned then sys("you are banned"); return false end
 
 	if t:sub(1, 1) == "/" then
 		if ADMIN_TOKEN == "" then
@@ -999,21 +1000,30 @@ local function send(text)
 		else
 			sendCommand(t)
 		end
-		return
+		return true
 	end
 
 	t = clip(emojify(t), MAX_LEN)
-	local payload = { t = "send", ch = current, user = lp.Name, userId = lp.UserId, text = t }
-	if wsSend(payload) then return end
+    local channel = current
+	local payload = { t = "send", ch = channel, user = lp.Name, userId = lp.UserId, text = t }
+	if wsSend(payload) then return true end
 	task.spawn(function()
 		local code, data = api("POST", "/send", payload)
+        if not alive then return end
 		if code == 200 and data and data.m then
 			addMessage(data.m)
 		else
 			if code == 403 and data and data.error == "you are banned" then onBanned(data.error) end
+            if not banned then
+                if drafts[channel] == "" or drafts[channel] == nil then
+                    drafts[channel] = t
+                    if current == channel and box.Text == "" then box.Text = t end
+                end
+            end
 			sys((data and data.error) or ("send failed (" .. tostring(code) .. ")"))
 		end
 	end)
+    return true
 end
 
 -- websocket loop (reconnects)
@@ -1023,7 +1033,9 @@ if hasWS then
 			local ok, sock = pcall(WebSocket.connect, WS_URL)
 			if ok and sock then
 				local closed = false
-				sock.OnMessage:Connect(handle)
+				sock.OnMessage:Connect(function(raw)
+                    if alive and ws == sock then handle(raw) end
+                end)
 				sock.OnClose:Connect(function() closed = true end)
 				ws, wsLive = sock, true
 				setStatus("online")
@@ -1054,7 +1066,10 @@ task.spawn(function()
 		if not wsLive then
 			local first = lastId == 0
 			local code, data = api("GET", "/poll?since=" .. lastId)
-			if code == 200 and data then
+            if not alive then break end
+			if wsLive then
+                -- A WebSocket connected while the HTTP poll was in flight.
+			elseif code == 200 and data then
 				setStatus("fallback")
 				for _, m in ipairs(data.msgs or {}) do addMessage(m, first) end
 				setCount(data.n)
@@ -1087,17 +1102,22 @@ bind(box:GetPropertyChangedSignal("Text"), function()
 end)
 bind(box.FocusLost, function(enter)
 	if enter then
-		send(box.Text)
-		box.Text = ""
+		if send(box.Text) then box.Text = "" end
 		task.defer(function() if alive then box:CaptureFocus() end end)
 	end
 end)
 bind(sendBtn.Activated, function()
-	send(box.Text)
-	box.Text = ""
+    if send(box.Text) then box.Text = "" end
 end)
 bind(UIS.InputBegan, function(i, gp)
-	if not gp and i.KeyCode == Enum.KeyCode.RightShift then win.Visible = not win.Visible end
+	if not gp and i.KeyCode == Enum.KeyCode.RightShift then
+        win.Visible = not win.Visible
+    elseif i.KeyCode == Enum.KeyCode.F and win.Visible
+        and (UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then
+        toggleSearch(true)
+    elseif i.KeyCode == Enum.KeyCode.Escape and searchOpen then
+        toggleSearch(false)
+    end
 end)
 
 local function cleanup()
