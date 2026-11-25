@@ -1535,43 +1535,78 @@ local function sendCommand(text)
 	end)
 end
 
-local function send(text)
-	local t = tostring(text):match("^%s*(.-)%s*$")
-	if t == "" then return false end
-	if banned then sys("you are banned"); return false end
-
-	if t:sub(1, 1) == "/" then
-		if ADMIN_TOKEN == "" then
-			sys("commands are admin-only")
-		else
-			sendCommand(t)
-		end
-		return true
-	end
-
-	t = clip(emojify(t), MAX_LEN)
-    local channel = current
-	local payload = { t = "send", ch = channel, user = lp.Name, userId = lp.UserId, text = t }
-	if wsSend(payload) then return true end
-	task.spawn(function()
-		local code, data = api("POST", "/send", payload)
+local function send(text, channelOverride, standalone)
+    local channel = channelOverride or current
+    if not lists[channel] then return false end
+    local t = tostring(text):match("^%s*(.-)%s*$")
+    if t == "" then return false end
+    if banned then sys("You are banned"); return false end
+    if t:sub(1, 1) == "/" and not standalone then
+        if ADMIN_TOKEN == "" then
+            sys("Commands are admin-only")
+        else
+            sendCommand(t)
+        end
+        return true
+    end
+    local fence = string.rep(string.char(96), 3)
+    if not standalone and t:sub(1, 3) ~= fence then
+        t = emojify(t)
+    end
+    local quote = pendingReplies[channel]
+    if quote and not standalone then
+        local prefix = "> @" .. quote.user .. ": " .. quote.text .. "\n"
+        t = prefix .. t
+    end
+    if (utf8.len(t) or #t) > MAX_LEN then
+        sys("Message exceeds 200 characters")
+        return false
+    end
+    if not req and not wsLive then
+        sys("Not connected: cannot send")
+        return false
+    end
+    local payload = {
+        t = "send", ch = channel, user = lp.Name,
+        userId = lp.UserId, text = t,
+    }
+    if wsSend(payload) then
+        if quote and not standalone then
+            pendingReplies[channel] = nil
+            refreshReply()
+        end
+        return true
+    end
+    if not req then
+        sys("Unable to send while disconnected")
+        return false
+    end
+    task.spawn(function()
+        local code, data = api("POST", "/send", payload)
         if not alive then return end
-		if code == 200 and data and data.m then
-			addMessage(data.m)
-		else
-			if code == 403 and data and data.error == "you are banned" then onBanned(data.error) end
-            if not banned then
-                if drafts[channel] == "" or drafts[channel] == nil then
-                    drafts[channel] = t
-                    if current == channel and box.Text == "" then box.Text = t end
-                end
+        if code == 200 and data and data.m then
+            addMessage(data.m)
+        else
+            if code == 403 and data and data.error == "you are banned" then
+                onBanned(data.error)
             end
-			sys((data and data.error) or ("send failed (" .. tostring(code) .. ")"))
-		end
-	end)
+            if not banned and not standalone and (drafts[channel] == "" or drafts[channel] == nil) then
+                local original = tostring(text)
+                drafts[channel] = original
+                if current == channel and box.Text == "" then box.Text = original end
+            end
+            sys((data and data.error) or ("Send failed (" .. tostring(code) .. ")"))
+        end
+    end)
+    if quote and not standalone then
+        pendingReplies[channel] = nil
+        refreshReply()
+    end
     return true
 end
-
+sendFormatted = function(payload, targetChannel)
+    return send(payload, targetChannel, true)
+end
 
 if hasWS then
 	task.spawn(function()
