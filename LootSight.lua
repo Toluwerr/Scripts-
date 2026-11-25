@@ -1233,7 +1233,7 @@ local function updatePlayerEsp(player, localRoot, tickCount)
 end
 
 -- =============================================================
--- Stats HUD (Reborn:CreateHUD overlay, library v0.9.3+)
+-- Stats HUD
 -- =============================================================
 
 local function ensureHud()
@@ -1241,34 +1241,159 @@ local function ensureHud()
                 return hud
         end
 
-        if type(Reborn.CreateHUD) ~= "function" then
-                if not hudWarned then
-                        hudWarned = true
-                        notify("Stats HUD", "Needs Reborn v0.9.3+ - update the UI library to use the HUD.")
+        local gui
+        local conns = {}
+        local function connect(signal, callback)
+                local connection = signal:Connect(callback)
+                table.insert(conns, connection)
+                return connection
+        end
+
+        local function dispose()
+                for _, connection in ipairs(conns) do
+                        connection:Disconnect()
                 end
-                return nil
+                table.clear(conns)
+                if gui then
+                        gui:Destroy()
+                        gui = nil
+                end
         end
 
         local ok, created = pcall(function()
-                return Reborn:CreateHUD({
-                        Title = "LootSight",
-                        Position = "TopLeft",
-                        Draggable = true,
-                        Lines = {
-                                { Text = "", TextSize = 15, Color = "Text" },
-                                { Text = "", TextSize = 13, Color = "Text" },
-                                { Text = "", TextSize = 13, Color = "Accent" },
-                        },
-                })
+                local theme = Window.Theme
+                local parent = Window.Gui.Parent
+                if not parent then
+                        return nil
+                end
+
+                gui = Instance.new("ScreenGui")
+                gui.Name = "LootSightStats"
+                gui.ResetOnSpawn = false
+                gui.IgnoreGuiInset = true
+                gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+                gui.DisplayOrder = Window.Gui.DisplayOrder + 1
+                gui.Enabled = false
+
+                local card = Instance.new("Frame")
+                card.Position = UDim2.fromOffset(12, 12)
+                card.Size = UDim2.fromOffset(0, 0)
+                card.AutomaticSize = Enum.AutomaticSize.XY
+                card.BackgroundColor3 = theme.Surface
+                card.BorderSizePixel = 0
+                card.Active = true
+                card.Parent = gui
+
+                local corner = Instance.new("UICorner")
+                corner.CornerRadius = UDim.new(0, 8)
+                corner.Parent = card
+
+                local padding = Instance.new("UIPadding")
+                padding.PaddingTop = UDim.new(0, 11)
+                padding.PaddingBottom = UDim.new(0, 11)
+                padding.PaddingLeft = UDim.new(0, 12)
+                padding.PaddingRight = UDim.new(0, 12)
+                padding.Parent = card
+
+                local layout = Instance.new("UIListLayout")
+                layout.SortOrder = Enum.SortOrder.LayoutOrder
+                layout.Padding = UDim.new(0, 3)
+                layout.Parent = card
+
+                local function addLabel(order, text, size, color, weight)
+                        local label = Instance.new("TextLabel")
+                        label.Size = UDim2.fromOffset(0, size + 4)
+                        label.AutomaticSize = Enum.AutomaticSize.X
+                        label.BackgroundTransparency = 1
+                        label.FontFace = Font.new("rbxassetid://12187365364", weight)
+                        label.TextSize = size
+                        label.TextColor3 = color
+                        label.TextXAlignment = Enum.TextXAlignment.Left
+                        label.Text = text
+                        label.LayoutOrder = order
+                        label.Parent = card
+                        return label
+                end
+
+                addLabel(0, "LootSight", 11, theme.TextFaint, Enum.FontWeight.SemiBold)
+                local lines = {
+                        addLabel(1, "", 15, theme.Text, Enum.FontWeight.Medium),
+                        addLabel(2, "", 13, theme.Text, Enum.FontWeight.Medium),
+                        addLabel(3, "", 13, theme.Accent, Enum.FontWeight.Medium),
+                }
+
+                local inputService = game:GetService("UserInputService")
+                local drag
+                connect(card.InputBegan, function(input)
+                        local kind = input.UserInputType
+                        if drag or (kind ~= Enum.UserInputType.MouseButton1 and kind ~= Enum.UserInputType.Touch) then
+                                return
+                        end
+                        drag = { input = input, start = input.Position, position = card.Position }
+                end)
+                connect(inputService.InputChanged, function(input)
+                        if not drag then
+                                return
+                        end
+                        if drag.input.UserInputType == Enum.UserInputType.Touch then
+                                if input ~= drag.input then return end
+                        elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then
+                                return
+                        end
+                        local delta = input.Position - drag.start
+                        local camera = Workspace.CurrentCamera
+                        local viewport = camera and camera.ViewportSize or Vector2.new(1920, 1080)
+                        local x = math.clamp(drag.position.X.Offset + delta.X, -math.max(0, card.AbsoluteSize.X - 60), math.max(0, viewport.X - 60))
+                        local y = math.clamp(drag.position.Y.Offset + delta.Y, 0, math.max(0, viewport.Y - 30))
+                        card.Position = UDim2.fromOffset(math.round(x), math.round(y))
+                end)
+                connect(inputService.InputEnded, function(input)
+                        if drag and input == drag.input then
+                                drag = nil
+                        end
+                end)
+
+                local result = {}
+                function result:SetLine(index, value)
+                        local label = lines[index]
+                        if not label then return false end
+                        if type(value) == "table" then
+                                local size = math.clamp(math.round(tonumber(value.TextSize) or 13), 8, 24)
+                                local color = value.Color
+                                label.TextSize = size
+                                label.Size = UDim2.fromOffset(0, size + 4)
+                                label.TextColor3 = typeof(color) == "Color3" and color or theme[color] or theme.Text
+                                label.Text = tostring(value.Text or "")
+                        else
+                                label.Text = tostring(value or "")
+                        end
+                        return true
+                end
+                function result:SetVisible(value)
+                        if not value then drag = nil end
+                        if gui then gui.Enabled = value == true end
+                end
+                function result:Destroy()
+                        drag = nil
+                        dispose()
+                end
+
+                gui.Parent = parent
+                return result
         end)
+
         if not ok or type(created) ~= "table" then
+                dispose()
+                if not hudWarned then
+                        hudWarned = true
+                        warn("[LootSight] Failed to create the stats HUD:", created)
+                end
                 return nil
         end
 
         hud = created
         hudLast = { stats = nil, best = nil, bestColor = nil, you = nil }
         hudVisible = false
-        created:SetVisible(false)
         return created
 end
 

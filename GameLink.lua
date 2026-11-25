@@ -620,7 +620,7 @@ local Window = Reborn:CreateWindow({
         Size = Vector2.new(480, 300)
 })
 
-local LinkTab = Window:Tab("Link", "satellite")
+local LinkTab = Window:Tab("Link", "antenna")
 local LinkSection = LinkTab:Section("Bridge")
 
 statusLabel = LinkSection:Paragraph({

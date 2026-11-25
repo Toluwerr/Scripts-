@@ -1,7 +1,7 @@
 local outerState = ... 
 if game.GameId ~= 10770730129 then error("Open Ragdoll Soccer before running this script.") end
 setthreadidentity(8)
-local Reborn = assert(loadstring(game:HttpGet("https://raw.githubusercontent.com/Toluwer/Reborn/cb5d73f9b387c11ef16e4b887d7bf28fb38fb7a7/src/Reborn.luau"), "@Reborn"))()
+local Reborn = assert(loadstring(game:HttpGet("https://raw.githubusercontent.com/Toluwer/Reborn/d690740197180f814727d3ece0d2a12a045f2042/src/Reborn.luau"), "@Reborn"))()
 assert(type(Reborn) == "table" and type(Reborn.CreateWindow) == "function" and type(Reborn.Destroy) == "function", "Reborn could not load")
 local env = getgenv()
 local previous = env.__PoopSoccer
@@ -4543,7 +4543,7 @@ local okWindow, window = pcall(Reborn.CreateWindow, Reborn, {Title = "Ragdoll So
 if not okWindow then life.cleanup(); error(window) end
 window.ToggleKey = "Right Shift"
 S.window = window
-S.ui = {library = "Reborn", revision = "cb5d73f9b387c11ef16e4b887d7bf28fb38fb7a7", tabs = {}}
+S.ui = {library = "Reborn", revision = "d690740197180f814727d3ece0d2a12a045f2042", tabs = {}}
 life.connect(window.Gui.Destroying, function() life.cleanup() end)
 local aimGui = Instance.new("ScreenGui")
 aimGui.Name = "PoopAimDot"
