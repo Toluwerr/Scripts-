@@ -690,7 +690,7 @@ local Reborn
 do
         local ok, library = pcall(function()
                 return loadstring(game:HttpGet(
-                        "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau"
+                        "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau?t=" .. tostring(DateTime.now().UnixTimestampMillis)
                 ))()
         end)
 
