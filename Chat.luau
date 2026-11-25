@@ -1,13 +1,10 @@
--- Executor chat client (WebSocket with automatic HTTP-poll fallback)
+
 local SERVER = "https://nonfq-chat.doorplayz123.workers.dev"
 
 local env = (getgenv and getgenv()) or _G
 if env.__ChatCleanup then pcall(env.__ChatCleanup) end
 
--- The admin token is NOT stored in this script (it's public). It is loaded from:
---   1) a file named chat_admin.txt in your executor's workspace folder (just the token, nothing else), or
---   2) getgenv().ChatAdminToken = "..." set in your own autoexec before this script runs.
--- If neither exists, admin commands are simply off.
+
 local ADMIN_TOKEN = ""
 do
 	local ok, v = pcall(function()
@@ -23,7 +20,7 @@ local UIS = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local lp = Players.LocalPlayer
 
--- id must match CHANNELS in worker.js
+
 local CHANNELS = {
 	{ id = "main", name = "Main Chat" },
 	{ id = "lounge", name = "Lounge" },
@@ -40,7 +37,7 @@ local SIDE_W = 172
 local req = request or http_request or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request)
 local hasWS = (WebSocket and WebSocket.connect) and true or false
 
--- hardware id (used for HWID bans)
+
 local HWID = ""
 do
 	local ok, v = pcall(function()
@@ -59,7 +56,7 @@ local function bind(signal, fn)
 	return c
 end
 
--- ---------- emoji shortcodes (:sob: -> emoji) ----------
+
 local EMOJI_RAW = {
 	smile = 0x1F604, grin = 0x1F601, joy = 0x1F602, rofl = 0x1F923, smiley = 0x1F603, laughing = 0x1F606,
 	sweat_smile = 0x1F605, wink = 0x1F609, blush = 0x1F60A, innocent = 0x1F607, slight_smile = 0x1F642,
@@ -122,7 +119,7 @@ local function emojify(s)
 			out[#out + 1] = e
 			i = b + 1
 		else
-			-- not a known shortcode: keep text, let the closing colon start the next match
+
 			out[#out + 1] = s:sub(i, b - 1)
 			i = b
 		end
@@ -131,7 +128,7 @@ local function emojify(s)
 	return table.concat(out)
 end
 
--- character-aware clip (never cuts an emoji in half)
+
 local function clip(s, n)
 	local len = utf8.len(s)
 	if not len then return s:sub(1, n) end
@@ -139,7 +136,7 @@ local function clip(s, n)
 	return s:sub(1, utf8.offset(s, n + 1) - 1)
 end
 
--- ---------- http ----------
+
 local function api(method, path, body)
 	if not req then return nil end
 	local ok, res = pcall(req, {
@@ -158,7 +155,7 @@ local function api(method, path, body)
 	return res.StatusCode, dok and data or nil
 end
 
--- ---------- visual system (shared with ScriptFinder) ----------
+
 local C = {
     bg = Color3.fromRGB(24, 24, 24),
     bar = Color3.fromRGB(24, 24, 24),
@@ -208,7 +205,7 @@ local function nameColor(id)
     return Color3.fromHSV(((tonumber(id) or 0) * 47 % 360) / 360, 0.34, 0.94)
 end
 
--- Same genuine Lucide 48px sprite atlas entries used in ScriptFinder.
+
 local Lucide48 = table.freeze({
     ["arrow-left"] = {Image = "rbxassetid://16898612629", Offset = Vector2.new(98, 918)},
     ["arrow-right"] = {Image = "rbxassetid://16898612629", Offset = Vector2.new(453, 820)},
@@ -259,7 +256,7 @@ local win = new("Frame", {
     BackgroundColor3 = C.bg, BorderSizePixel = 0,
     ClipsDescendants = true,
 }, gui)
-round(win, 8) -- borderless window; all corners remain clipped and rounded
+round(win, 8)
 
 local titleBar = new("Frame", {
     Name = "Header", Size = UDim2.new(1, 0, 0, TITLE_H),
@@ -276,7 +273,7 @@ new("Frame", {
     BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 4,
 }, titleBar)
 
--- The top bar is deliberately title-free, like ScriptFinder.
+
 local status = new("TextLabel", {
     Name = "ConnectionStatus", Position = UDim2.fromOffset(15, 0),
     Size = UDim2.new(1, -152, 1, 0),
@@ -325,7 +322,7 @@ local body = new("Frame", {
     ClipsDescendants = true,
 }, win)
 
--- Flat, neutral navigation: no rounded sidebar card or status circles.
+
 local side = new("Frame", {
     Name = "Channels", Position = UDim2.fromOffset(0, 0),
     Size = UDim2.new(0, SIDE_W, 1, 0),
@@ -420,7 +417,7 @@ new("TextLabel", {
     TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 8,
 }, identity)
 
--- Conversation-specific toolbar. The title lives here, not in the window bar.
+
 local roomHead = new("Frame", {
     Name = "ConversationHeader", Position = UDim2.fromOffset(SIDE_W, 0),
     Size = UDim2.new(1, -SIDE_W, 0, 53),
@@ -647,6 +644,37 @@ end)
 bind(win:GetPropertyChangedSignal("AbsoluteSize"), layoutWorkspace)
 layoutWorkspace()
 
+local followLatest, autoScrolling, userScrolling, settleUntil, scrollTicket = {}, {}, {}, {}, {}
+for _, channel in ipairs(CHANNELS) do
+    followLatest[channel.id] = true
+    scrollTicket[channel.id] = 0
+end
+
+local function bottomY(list)
+    return math.max(0, list.AbsoluteCanvasSize.Y - list.AbsoluteWindowSize.Y)
+end
+
+local function atBottom(list)
+    return bottomY(list) - list.CanvasPosition.Y <= 12
+end
+
+local function scheduleLatest(id)
+    local list = lists[id]
+    if not alive or not list or not followLatest[id] or searchOpen then return end
+    scrollTicket[id] = scrollTicket[id] + 1
+    local ticket = scrollTicket[id]
+    local function sync()
+        if not alive or not list.Parent or not followLatest[id] or searchOpen
+            or scrollTicket[id] ~= ticket then return end
+        autoScrolling[id] = true
+        list.CanvasPosition = Vector2.new(0, bottomY(list))
+        task.defer(function() autoScrolling[id] = false end)
+    end
+    task.defer(sync)
+    task.delay(0.05, sync)
+    task.delay(0.16, sync)
+end
+
 local jumpButton = new("TextButton", {
     Name = "JumpToLatest", AnchorPoint = Vector2.new(1, 1),
     Position = UDim2.new(1, -14, 1, -70),
@@ -668,18 +696,64 @@ new("TextLabel", {
 updateJump = function()
     local list = lists[current]
     if not list or not alive then return end
-    local remaining = list.AbsoluteCanvasSize.Y - list.CanvasPosition.Y - list.AbsoluteWindowSize.Y
-    jumpButton.Visible = not searchOpen and remaining > 70
+    jumpButton.Visible = not searchOpen and not followLatest[current] and not atBottom(list)
 end
 bind(jumpButton.Activated, function()
-    local list = lists[current]
-    if list then list.CanvasPosition = Vector2.new(0, 1e7) end
+    followLatest[current] = true
+    scheduleLatest(current)
     updateJump()
 end)
-for _, list in pairs(lists) do
-    bind(list:GetPropertyChangedSignal("CanvasPosition"), updateJump)
-    bind(list:GetPropertyChangedSignal("AbsoluteCanvasSize"), updateJump)
-    bind(list:GetPropertyChangedSignal("AbsoluteWindowSize"), updateJump)
+for id, list in pairs(lists) do
+    bind(list:GetPropertyChangedSignal("CanvasPosition"), function()
+        if not alive then return end
+        if not autoScrolling[id] and not searchOpen
+            and (userScrolling[id] or os.clock() >= (settleUntil[id] or 0)) then
+            followLatest[id] = atBottom(list)
+        end
+        if id == current then updateJump() end
+    end)
+    bind(list:GetPropertyChangedSignal("AbsoluteCanvasSize"), function()
+        if followLatest[id] then scheduleLatest(id) end
+        if id == current then updateJump() end
+    end)
+    bind(list:GetPropertyChangedSignal("AbsoluteWindowSize"), function()
+        if followLatest[id] then scheduleLatest(id) end
+        if id == current then updateJump() end
+    end)
+    bind(list.InputChanged, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseWheel then
+            if input.Position.Z > 0 then
+                followLatest[id] = false
+            else
+                task.defer(function()
+                    if alive and atBottom(list) then
+                        followLatest[id] = true
+                        scheduleLatest(id)
+                    end
+                end)
+            end
+            if id == current then updateJump() end
+        end
+    end)
+    bind(list.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            userScrolling[id] = true
+        end
+    end)
+    bind(list.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            task.defer(function()
+                userScrolling[id] = false
+                if alive and atBottom(list) then
+                    followLatest[id] = true
+                    scheduleLatest(id)
+                end
+                if id == current then updateJump() end
+            end)
+        end
+    end)
 end
 bind(box.Focused, function() tween(boxStroke, 0.17, {Transparency = 0}) end)
 bind(box.FocusLost, function() tween(boxStroke, 0.17, {Transparency = 1}) end)
@@ -714,11 +788,7 @@ local function setChannel(id)
     refreshChannels()
     if updateSearch then updateSearch() end
     if updateJump then updateJump() end
-    task.defer(function()
-        if alive and current == id and not searchOpen and lists[id] then
-            lists[id].CanvasPosition = Vector2.new(0, 1e7)
-        end
-    end)
+    if followLatest[id] then scheduleLatest(id) end
 end
 
 for id, entry in pairs(chBtns) do
@@ -731,7 +801,7 @@ for id, entry in pairs(chBtns) do
     end)
 end
 
--- Single input gesture for dragging and resizing.
+
 local dragAction
 local function makeDrag(handle, capture, apply)
     bind(handle.InputBegan, function(input)
@@ -822,7 +892,7 @@ bind(minBtn.Activated, function()
     end
 end)
 
--- ---------- message presentation ----------
+
 local seen, queues = {}, {}
 local seenOrder = {}
 local indexed = {}
@@ -859,6 +929,7 @@ local function toggleSearch(open)
     if not open then findInput.Text = "" end
     layoutWorkspace()
     updateSearch()
+    if not open and followLatest[current] then scheduleLatest(current) end
     if open then
         task.defer(function()
             if alive and searchOpen then findInput:CaptureFocus() end
@@ -876,19 +947,12 @@ local grouped = {}
 local function insertMessage(channelId, node)
     local id = lists[channelId] and channelId or "main"
     local list, queue = lists[id], queues[id]
-    local atBottom = list.CanvasPosition.Y + list.AbsoluteWindowSize.Y >= list.AbsoluteCanvasSize.Y - 45
+    settleUntil[id] = os.clock() + 0.2
     order += 1
     node.LayoutOrder = order
     queue[#queue + 1] = node
     if #queue > 200 then table.remove(queue, 1):Destroy() end
-    if atBottom and not searchOpen then
-        task.delay(0.06, function()
-            if alive and list.Parent and not searchOpen
-                and list.CanvasPosition.Y + list.AbsoluteWindowSize.Y >= list.AbsoluteCanvasSize.Y - 100 then
-                list.CanvasPosition = Vector2.new(0, 1e6)
-            end
-        end)
-    end
+    if followLatest[id] then scheduleLatest(id) end
 end
 
 local function addLabel(channelId, richText, color)
@@ -1017,13 +1081,13 @@ local function addMessage(message, silent)
             Name = "Copy", AnchorPoint = Vector2.new(1, 0),
             Position = mine and UDim2.new(1, -13, 0, 8)
                 or UDim2.new(0.79, 34, 0, 8),
-            Size = UDim2.fromOffset(40, 21),
+            Size = UDim2.fromOffset(28, 27),
             BackgroundColor3 = C.btnHover, BorderSizePixel = 0,
-            AutoButtonColor = false, Text = "Copy",
-            TextColor3 = C.text, Font = Enum.Font.GothamMedium,
-            TextSize = 10, ZIndex = 5, Visible = UIS.TouchEnabled,
+            AutoButtonColor = false, Text = "",
+            ZIndex = 5, Visible = UIS.TouchEnabled,
         }, node)
-        round(copy, 6)
+        round(copy, 8)
+        local copyIcon = lucideIcon(copy, "copy", 14, C.text, 6)
         node.MouseEnter:Connect(function()
             if alive and copy.Parent then copy.Visible = true end
         end)
@@ -1032,9 +1096,15 @@ local function addMessage(message, silent)
         end)
         copy.Activated:Connect(function()
             local ok = pcall(clipboard, contents)
-            copy.Text = ok and "Copied" or "Failed"
+            if ok then
+                copyIcon.Image = Lucide48.check.Image
+                copyIcon.ImageRectOffset = Lucide48.check.Offset
+            end
             task.delay(1.2, function()
-                if alive and copy.Parent then copy.Text = "Copy" end
+                if alive and copy.Parent then
+                    copyIcon.Image = Lucide48.copy.Image
+                    copyIcon.ImageRectOffset = Lucide48.copy.Offset
+                end
             end)
         end)
     end
@@ -1047,7 +1117,7 @@ local function addMessage(message, silent)
     end
 end
 
--- status: connecting | online (websocket) | fallback (http polling) | offline | banned
+
 local STATUS = {
     connecting = {"Connecting", C.dim},
     online = {"Connected", C.text},
@@ -1063,7 +1133,7 @@ local function setCount(n)
     if type(n) == "number" then countLbl.Text = tostring(n) .. " online" end
 end
 
--- ---------- network ----------
+
 local ws, wsLive = nil, false
 
 local function onBanned(msg)
@@ -1147,7 +1217,7 @@ local function send(text)
     return true
 end
 
--- websocket loop (reconnects)
+
 if hasWS then
 	task.spawn(function()
 		while alive and not banned do
@@ -1172,7 +1242,7 @@ if hasWS then
 		end
 	end)
 
-	-- keep-alive + refreshes the online count
+
 	task.spawn(function()
 		while alive do
 			task.wait(20)
@@ -1181,7 +1251,7 @@ if hasWS then
 	end)
 end
 
--- poll loop (only runs while the websocket isn't live)
+
 task.spawn(function()
 	while alive and not banned do
 		if not wsLive then
@@ -1189,7 +1259,7 @@ task.spawn(function()
 			local code, data = api("GET", "/poll?since=" .. lastId)
             if not alive then break end
 			if wsLive then
-                -- A WebSocket connected while the HTTP poll was in flight.
+
 			elseif code == 200 and data then
 				setStatus("fallback")
 				for _, m in ipairs(data.msgs or {}) do addMessage(m, first) end
@@ -1204,10 +1274,10 @@ task.spawn(function()
 	end
 end)
 
--- ---------- input ----------
+
 bind(box:GetPropertyChangedSignal("Text"), function()
 	local txt = box.Text
-	-- Discord-style: :sob: turns into the emoji as soon as you close the colon
+
 	if box.CursorPosition == #txt + 1 then txt = emojify(txt) end
 	txt = clip(txt, MAX_LEN)
 	if txt ~= box.Text then
