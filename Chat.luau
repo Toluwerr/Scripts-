@@ -629,10 +629,14 @@ local function codeDecode(value)
 end
 local function parseMessage(raw)
     local meta = {body = raw}
-    local id, author, rest = raw:match("^~r:(%d+):([%w_]+)|(.+)$")
+    local id, author, excerpt, rest = raw:match("^~r:(%d+):([%w_]+):([^|]*)|(.+)$")
+    if not id then
+        id, author, rest = raw:match("^~r:(%d+):([%w_]+)|(.+)$")
+    end
     if id and tonumber(id) then
         meta.replyId = tonumber(id)
         meta.replyAuthor = author
+        meta.replyExcerpt = excerpt
         meta.body = rest
     end
     local language, encoded = meta.body:match("^~c:([%w_%-]+):(.+)$")
@@ -673,7 +677,9 @@ local function prepareMessage(raw, reply)
         content = emojify(trimmed)
     end
     if reply then
-        content = "~r:" .. tostring(reply.id) .. ":" .. reply.user .. "|" .. content
+        local excerpt = reply.text:gsub("[|\r\n]+", " "):sub(1, 36)
+        content = "~r:" .. tostring(reply.id) .. ":" .. reply.user
+            .. ":" .. excerpt .. "|" .. content
     end
     return content
 end
@@ -1299,7 +1305,7 @@ local function addMessage(message, silent)
     if parsed.replyId or parsed.legacyReply then
         local original = parsed.replyId and messageViews[channelId][parsed.replyId]
         local toAuthor = original and original.user or parsed.replyAuthor or "Unknown"
-        local toBody = original and original.text or "Original message unavailable"
+        local toBody = original and original.text or parsed.replyExcerpt or "Original message unavailable"
         if parsed.legacyReply then
             toAuthor, toBody = "Reply", parsed.legacyReply
         end
@@ -1481,7 +1487,7 @@ local function addMessage(message, silent)
         pendingReplies[channelId] = {
             id = message.id,
             user = safeName or "Unknown",
-            text = clip(displayed:gsub("[\r\n]+", " "), 64),
+            text = clip(displayed:gsub("[\r\n|]+", " "), 48),
         }
         if current ~= channelId then setChannel(channelId) end
         if searchOpen then toggleSearch(false) end
