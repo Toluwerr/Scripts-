@@ -902,22 +902,44 @@ function People.presence(items)
                 item.presence = ({[0] = "Offline", [1] = "Online", [2] = "In game", [3] = "In Studio", [4] = "Unknown"})[kind or -1] or "Unknown"
                 if kind == 2 then
                     item.visibleUniverse = numericId(record.universeId)
-                    if item.visibleUniverse or numericId(record.placeId) then
-                        local location = plainText(record.lastLocation, 120)
-                        if location and location:match("%S") then
-                            local normalized = location:lower():match("^%s*(.-)%s*$")
-                            if normalized ~= "playing" and normalized ~= "in game" and normalized ~= "website"
-                                and normalized ~= "roblox" and normalized ~= "unknown" then
-                                item.currentGame = location
-                            end
-                        end
+                    local location = plainText(record.lastLocation, 120)
+                    if location and location:match("%S") then
+                        local normalized = location:lower():match("^%s*(.-)%s*$")
+                        local generic = {["playing"] = true, ["in game"] = true, ["in-game"] = true,
+                            ["website"] = true, ["roblox"] = true, ["unknown"] = true,
+                            ["playing a game"] = true, ["playing an experience"] = true,
+                            ["private"] = true, ["hidden"] = true, ["offline"] = true}
+                        if not generic[normalized] then item.currentGame = location end
+                    end
+                    if not item.visibleUniverse and not item.currentGame then
+                        item.visiblePlace = numericId(record.rootPlaceId) or numericId(record.placeId)
                     end
                 end
             end
         end
     end
+    local resolvedPlaces, pendingPlaces = {}, {}
+    local pending = 0
+    for _, item in ipairs(items) do
+        local place = item.visiblePlace
+        if place and not pendingPlaces[place] then
+            pendingPlaces[place] = true
+            pending += 1
+            task.spawn(function()
+                local ok, response = pcall(readResponse, "https://apis.roblox.com/universes/v1/places/" .. place .. "/universe", true)
+                if ok and type(response) == "table" then
+                    resolvedPlaces[place] = numericId(response.universeId)
+                end
+                pending -= 1
+            end)
+        end
+    end
+    local deadline = os.clock() + 3
+    while pending > 0 and os.clock() < deadline do task.wait(0.05) end
     local universes, seen = {}, {}
     for _, item in ipairs(items) do
+        item.visibleUniverse = item.visibleUniverse or (item.visiblePlace and resolvedPlaces[item.visiblePlace])
+        item.visiblePlace = nil
         local id = item.visibleUniverse
         if id and not seen[id] then
             seen[id] = true
@@ -1040,7 +1062,7 @@ end
 
 function People.statusText(item)
     if item.presence == "In game" then
-        return item.currentGame and ("In game · " .. item.currentGame) or "In game · Game not shared"
+        return item.currentGame or "In game (game unavailable)"
     end
     if item.presence == "Offline" then return "Offline / hidden" end
     return item.presence == "Unknown" and "Status unavailable" or (item.presence or "Status unavailable")
@@ -1998,7 +2020,7 @@ do
     end
     function filterState.updateRows()
         local count = Filters.count(filterState.values)
-        filterState.label.Text = count > 0 and ("Filters · " .. count) or "Filters"
+        filterState.label.Text = count > 0 and ("Filters (" .. count .. ")") or "Filters"
         filterState.icon.ImageColor3 = count > 0 and Theme.Accent or Theme.Text
         filterState.chevron.Rotation = filterState.menuOpen and 180 or 0
         if filterState.headings then
@@ -3030,18 +3052,19 @@ local function makeMetrics(parent, item, layer)
 end
 
 function People.paintStatusIcon(icon, item)
-    icon.ImageColor3 = People.statusColor(item)
-    icon.Visible = item.presence == "In game" or item.presence == "Online" or item.presence == "In Studio"
-    icon.Image = item.presence == "In game" and "rbxasset://textures/ui/Shell/Icons/RobloxIcon24.png"
-        or item.presence == "In Studio" and "rbxasset://textures/ui/Settings/MenuBarIcons/PlayersTabIcon.png"
-        or "rbxasset://textures/ui/Shell/Icons/DefaultProfileIcon.png"
+    local name = ({["In game"] = "controller", ["Online"] = "person", ["In Studio"] = "studio"})[item.presence]
+    icon.Visible = name ~= nil
+    icon.TextColor3 = People.statusColor(item)
+    icon.Text = name and ('<font family="rbxasset://LuaPackages/Packages/_Index/BuilderIcons/BuilderIcons/BuilderIcons.json"><b>' .. name .. '</b></font>') or ""
 end
 
 function People.statusIcon(parent, item, x, y, layer)
-    local icon = create("ImageLabel", {
+    local icon = create("TextLabel", {
         Name = "PresenceIcon", Position = UDim2.fromOffset(x, y),
-        Size = UDim2.fromOffset(13, 13), BackgroundTransparency = 1,
-        BorderSizePixel = 0, ScaleType = Enum.ScaleType.Fit, ZIndex = layer,
+        Size = UDim2.fromOffset(16, 16), BackgroundTransparency = 1,
+        BorderSizePixel = 0, TextSize = 15, RichText = true, Text = "",
+        TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Center,
+        ZIndex = layer,
     }, parent)
     People.paintStatusIcon(icon, item)
     return icon
@@ -3095,7 +3118,7 @@ local function makeCard(scroller, item, index)
             BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 4,
         }, card)
         round(pill, 6)
-        local presenceIcon = People.statusIcon(pill, item, 5, 3, 5)
+        local presenceIcon = People.statusIcon(pill, item, 4, 2, 5)
         local presence = create("TextLabel", {
             Name = "Status", Position = UDim2.fromOffset(22, 0), Size = UDim2.new(1, -27, 1, 0),
             BackgroundTransparency = 1, Text = People.statusText(item),
@@ -3711,7 +3734,7 @@ local function renderDetails(body, item, data)
     end)
     if data and item.provider ~= 3 then
         local count = data.commentsCount
-        commentsStatus.Text = count and (tostring(count) .. " comments · Public comment text unavailable")
+        commentsStatus.Text = count and (tostring(count) .. " comments (text unavailable)")
             or "Comments unavailable"
         commentsStatus.Visible = true
     elseif data then
@@ -3795,7 +3818,7 @@ local function renderDetails(body, item, data)
         elseif data.bumped == false then
             table.insert(parts, "Not bumped")
         end
-        local meta = detailText(byline, "Metadata", table.concat(parts, "  ·  "), 11, true, 2)
+        local meta = detailText(byline, "Metadata", table.concat(parts, ", "), 11, true, 2)
         meta.Position = UDim2.fromOffset(0, 20)
         meta.Size = UDim2.new(1, 0, 0, 20)
         meta.AutomaticSize = Enum.AutomaticSize.None
@@ -4105,159 +4128,172 @@ do
             BackgroundTransparency = 1, Text = "Profile", FontFace = Theme.Font,
             TextColor3 = Theme.Text, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 8,
         }, view)
-        local scroll = create("ScrollingFrame", {
-            Name = "ProfileContent", Position = UDim2.fromOffset(0, 42), Size = UDim2.new(1, 0, 1, -42),
-            BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.fromOffset(0, 0),
-            AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
-            ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Divider, ZIndex = 7,
+        local body = create("Frame", {
+            Name = "ProfileContent", Position = UDim2.fromOffset(0, 40), Size = UDim2.new(1, 0, 1, -40),
+            BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 7,
         }, view)
         local function valid()
             return alive and detailView == view and detailGeneration == token
         end
         local function render(profile, message)
             if not valid() then return end
-            scroll:ClearAllChildren()
-            create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6)}, scroll)
-            local function section(name, height, order)
+            body:ClearAllChildren()
+            local function card(name)
                 local frame = create("Frame", {
-                    Name = name, LayoutOrder = order, Size = UDim2.new(1, -5, 0, height),
-                    BackgroundColor3 = Theme.Raised, BorderSizePixel = 0, ZIndex = 7,
-                }, scroll)
+                    Name = name, BackgroundColor3 = Theme.Raised, BorderSizePixel = 0,
+                    ClipsDescendants = true, ZIndex = 7,
+                }, body)
                 round(frame, 8)
-                return frame
+                local scroll = create("ScrollingFrame", {
+                    Name = "Content", Position = UDim2.fromOffset(10, 9),
+                    Size = UDim2.new(1, -20, 1, -18), BackgroundTransparency = 1,
+                    BorderSizePixel = 0, CanvasSize = UDim2.fromOffset(0, 0),
+                    AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
+                    ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Divider,
+                    VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar, ZIndex = 8,
+                }, frame)
+                create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 5)}, scroll)
+                return frame, scroll
             end
-            local function text(parent, name, value, x, y, height, size, muted)
-                return create("TextLabel", {
-                    Name = name, Position = UDim2.fromOffset(x, y), Size = UDim2.new(1, -x - 12, 0, height),
-                    BackgroundTransparency = 1, Text = value, FontFace = Theme.Font,
-                    TextColor3 = muted and Theme.Text:Lerp(Theme.Window, 0.38) or Theme.Text,
-                    TextSize = size, TextTruncate = Enum.TextTruncate.AtEnd,
-                    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 8,
-                }, parent)
-            end
-            local top = section("Identity", 86, 1)
-            local avatar = create("ImageLabel", {
-                Name = "Avatar", Position = UDim2.fromOffset(9, 9), Size = UDim2.fromOffset(68, 68),
-                BackgroundColor3 = Theme.Window, BorderSizePixel = 0, Image = profile.thumbnail,
-                ScaleType = Enum.ScaleType.Fit, ZIndex = 8,
-            }, top)
-            round(avatar, 34)
-            text(top, "DisplayName", profile.title, 87, 6, 21, 16, false)
-            text(top, "Username", "@" .. profile.username .. "  ·  ID " .. profile.userId, 87, 27, 17, 11, true)
-            local pill = create("Frame", {
-                Name = "Presence", Position = UDim2.fromOffset(87, 49), Size = UDim2.new(1, -97, 0, 23),
-                BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 8,
-            }, top)
-            round(pill, 6)
-            People.statusIcon(pill, profile, 6, 5, 9)
-            local status = text(pill, "Presence", People.statusText(profile), 24, 0, 23, 11, false)
-            status.ZIndex = 9
-            if message then
-                local notice = section("Status", 28, 2)
-                text(notice, "Message", message, 9, 0, 28, 11, true)
-                return
+            local left, preview = card("PreviewColumn")
+            local right, info = card("InformationCard")
+            local function line(parent, name, value, size, muted, order)
+                local label = detailText(parent, name, value, size, muted, order)
+                label.ZIndex = 9
+                return label
             end
             local function exact(value)
                 if value == nil then return "—" end
                 local str = tostring(value)
-                while true do
-                    local nextValue, n = str:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
-                    str = nextValue
-                    if n == 0 then break end
-                end
-                return str
+                local result = str:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+                return (result:gsub("^,", ""))
             end
             local function flag(value, yes, no)
                 if value == nil then return "Unavailable" end
                 return value and yes or no
             end
-            local social = section("Social", 43, 2)
-            for i, field in ipairs({{"connections", "Connections"}, {"followers", "Followers"}, {"following", "Following"}}) do
-                local cell = create("Frame", {
-                    Position = UDim2.new((i - 1) / 3, 0, 0, 0), Size = UDim2.new(1 / 3, 0, 1, 0),
-                    BackgroundTransparency = 1, ZIndex = 8,
-                }, social)
-                local amount = text(cell, "Count", exact(profile[field[1]]), 0, 3, 20, 14, false)
-                amount.Size = UDim2.new(1, 0, 0, 20)
-                amount.TextXAlignment = Enum.TextXAlignment.Center
-                local caption = text(cell, "Label", field[2], 0, 23, 15, 10, true)
-                caption.Size = UDim2.new(1, 0, 0, 15)
-                caption.TextXAlignment = Enum.TextXAlignment.Center
-            end
-            local account = section("Account", 94, 3)
-            text(account, "Title", "Account", 9, 3, 17, 12, false)
-            local age = profile.accountDays and (exact(profile.accountDays) .. " days") or "Unavailable"
-            local count = profile.gameCount ~= nil and (exact(profile.gameCount) .. (profile.gamesPartial and "+" or "")) or "Unavailable"
-            local visits = profile.gameVisits ~= nil and (exact(profile.gameVisits) .. (profile.gamesPartial and "+" or "")) or "Unavailable"
-            local values = {
-                {"Joined", profile.created and profile.created:sub(1, 10) or "Unavailable"},
-                {"Account age", age},
-                {"Verified badge", flag(profile.verified, "Yes", "No")},
-                {"Moderation", flag(profile.isBanned, "Banned", "Not banned")},
-                {"Public experiences", count},
-                {profile.gamesPartial and "Loaded game visits" or "Public game visits", visits},
-            }
-            for i, entry in ipairs(values) do
-                local column = (i - 1) % 2
-                local row = math.floor((i - 1) / 2)
-                local cell = create("Frame", {
-                    Position = UDim2.new(column / 2, 9, 0, 22 + row * 22),
-                    Size = UDim2.new(0.5, -15, 0, 20), BackgroundTransparency = 1, ZIndex = 8,
-                }, account)
-                local label = text(cell, "Field", entry[1], 0, 0, 20, 10, true)
-                label.Size = UDim2.new(0.49, 0, 1, 0)
-                local value = text(cell, "Value", entry[2], 0, 0, 20, 11, false)
-                value.Position = UDim2.new(0.5, 0, 0, 0)
-                value.Size = UDim2.new(0.5, 0, 1, 0)
-            end
-            local order = 4
-            if profile.description and profile.description:match("%S") then
-                local about = section("About", 48, order)
-                order += 1
-                text(about, "Title", "About", 9, 4, 18, 12, false)
-                local bio = text(about, "Description", profile.description, 9, 24, 0, 11, true)
-                bio.TextWrapped = true
-                bio.TextTruncate = Enum.TextTruncate.None
-                bio.AutomaticSize = Enum.AutomaticSize.Y
-                bio.TextYAlignment = Enum.TextYAlignment.Top
-                local function resizeAbout()
-                    if about.Parent then about.Size = UDim2.new(1, -5, 0, math.max(43, 31 + bio.AbsoluteSize.Y)) end
+            local picture = create("Frame", {
+                Name = "AvatarPreview", LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 100),
+                BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 9,
+            }, preview)
+            round(picture, 6)
+            local avatar = create("ImageLabel", {
+                Name = "Avatar", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+                Size = UDim2.fromOffset(100, 100), Image = "rbxthumb://type=Avatar&id=" .. profile.userId .. "&w=420&h=420",
+                BackgroundTransparency = 1, BorderSizePixel = 0, ScaleType = Enum.ScaleType.Fit, ZIndex = 10,
+            }, picture)
+            local pill = create("Frame", {
+                Name = "Presence", LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 24),
+                BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 9,
+            }, preview)
+            round(pill, 6)
+            People.statusIcon(pill, profile, 4, 4, 10)
+            local status = create("TextLabel", {
+                Position = UDim2.fromOffset(24, 0), Size = UDim2.new(1, -28, 1, 0),
+                Text = People.statusText(profile), BackgroundTransparency = 1, FontFace = Theme.Font,
+                TextColor3 = Theme.Text, TextSize = 11, TextTruncate = Enum.TextTruncate.AtEnd,
+                TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 10,
+            }, pill)
+            line(info, "DisplayName", profile.title, 17, false, 1)
+            line(info, "Username", "@" .. profile.username, 12, true, 2)
+            line(info, "UserId", "ID: " .. profile.userId, 11, true, 3)
+            if message then
+                line(info, "Message", message, 12, true, 4)
+            else
+                local stats = create("Frame", {
+                    Name = "Statistics", LayoutOrder = 4, Size = UDim2.new(1, 0, 0, 35),
+                    BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 9,
+                }, info)
+                round(stats, 6)
+                for i, pair in ipairs({{"connections", "Connections"}, {"followers", "Followers"}, {"following", "Following"}}) do
+                    local cell = create("Frame", {
+                        Position = UDim2.new((i - 1) / 3, 0, 0, 0), Size = UDim2.new(1 / 3, 0, 1, 0),
+                        BackgroundTransparency = 1, ZIndex = 10,
+                    }, stats)
+                    for j, value in ipairs({exact(profile[pair[1]]), pair[2]}) do
+                        create("TextLabel", {
+                            Position = UDim2.fromOffset(0, j == 1 and 1 or 18), Size = UDim2.new(1, 0, 0, 16),
+                            Text = value, BackgroundTransparency = 1, FontFace = Theme.Font,
+                            TextColor3 = j == 1 and Theme.Text or Theme.Text:Lerp(Theme.Window, 0.38),
+                            TextSize = j == 1 and 13 or 10, ZIndex = 11,
+                        }, cell)
+                    end
                 end
-                bio:GetPropertyChangedSignal("AbsoluteSize"):Connect(resizeAbout)
-                task.defer(resizeAbout)
-            end
-            if profile.platformBadges and #profile.platformBadges > 0 then
-                local badges = section("RobloxBadges", 42, order)
-                order += 1
-                text(badges, "Title", "Roblox badges", 9, 3, 18, 12, false)
-                local badgeText = text(badges, "Names", table.concat(profile.platformBadges, "  ·  "), 9, 22, 0, 11, true)
-                badgeText.TextWrapped = true
-                badgeText.TextTruncate = Enum.TextTruncate.None
-                badgeText.AutomaticSize = Enum.AutomaticSize.Y
-                local function resizeBadges()
-                    if badges.Parent then badges.Size = UDim2.new(1, -5, 0, math.max(42, 28 + badgeText.AbsoluteSize.Y)) end
+                line(info, "AccountHeading", "Account", 13, false, 5)
+                local count = profile.gameCount ~= nil and (exact(profile.gameCount) .. (profile.gamesPartial and "+" or "")) or "Unavailable"
+                local visits = profile.gameVisits ~= nil and (exact(profile.gameVisits) .. (profile.gamesPartial and "+" or "")) or "Unavailable"
+                local values = {
+                    {"Joined", profile.created and profile.created:sub(1, 10) or "Unavailable"},
+                    {"Account age", profile.accountDays and (exact(profile.accountDays) .. " days") or "Unavailable"},
+                    {"Verified badge", flag(profile.verified, "Yes", "No")},
+                    {"Moderation", flag(profile.isBanned, "Banned", "Not banned")},
+                    {"Public experiences", count},
+                    {profile.gamesPartial and "Loaded game visits" or "Public game visits", visits},
+                }
+                local fields = create("Frame", {
+                    Name = "AccountFields", LayoutOrder = 6, Size = UDim2.new(1, 0, 0, #values * 18),
+                    BackgroundTransparency = 1, ZIndex = 9,
+                }, info)
+                for i, pair in ipairs(values) do
+                    local y = (i - 1) * 18
+                    for j, value in ipairs(pair) do
+                        create("TextLabel", {
+                            Position = UDim2.new((j - 1) * 0.5, 0, 0, y), Size = UDim2.new(0.5, -2, 0, 18),
+                            BackgroundTransparency = 1, Text = value, FontFace = Theme.Font, TextSize = 11,
+                            TextColor3 = j == 1 and Theme.Text:Lerp(Theme.Window, 0.38) or Theme.Text,
+                            TextXAlignment = j == 1 and Enum.TextXAlignment.Left or Enum.TextXAlignment.Right,
+                            TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 10,
+                        }, fields)
+                    end
                 end
-                badgeText:GetPropertyChangedSignal("AbsoluteSize"):Connect(resizeBadges)
-                task.defer(resizeBadges)
-            end
-            if profile.publicGames and #profile.publicGames > 0 then
-                local games = section("PublicExperiences", 25 + #profile.publicGames * 38, order)
-                text(games, "Title", "Public experiences" .. (profile.gameCount > #profile.publicGames and " · Preview" or ""), 9, 3, 19, 12, false)
-                for i, entry in ipairs(profile.publicGames) do
-                    local row = create("Frame", {
-                        Position = UDim2.fromOffset(9, 23 + (i - 1) * 38), Size = UDim2.new(1, -18, 0, 35),
-                        BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 8,
-                    }, games)
-                    round(row, 5)
-                    local icon = create("ImageLabel", {
-                        Position = UDim2.fromOffset(3, 3), Size = UDim2.fromOffset(29, 29),
-                        BackgroundTransparency = 1, Image = entry.thumbnail, ZIndex = 9,
-                    }, row)
-                    round(icon, 4)
-                    text(row, "Name", entry.name, 40, 2, 16, 11, false).ZIndex = 9
-                    text(row, "Visits", entry.visits ~= nil and (exact(entry.visits) .. " visits") or "Visits unavailable", 40, 17, 15, 10, true).ZIndex = 9
+                if profile.description and profile.description:match("%S") then
+                    line(info, "AboutHeading", "About", 13, false, 7)
+                    line(info, "About", profile.description, 12, true, 8)
+                end
+                if profile.platformBadges and #profile.platformBadges > 0 then
+                    line(info, "BadgesHeading", "Roblox badges", 13, false, 9)
+                    line(info, "Badges", table.concat(profile.platformBadges, ", "), 11, true, 10)
+                end
+                if profile.publicGames and #profile.publicGames > 0 then
+                    line(preview, "ExperiencesHeading", "Public experiences", 12, false, 3)
+                    for i, entry in ipairs(profile.publicGames) do
+                        local row = create("Frame", {
+                            Name = "Experience", LayoutOrder = 3 + i, Size = UDim2.new(1, 0, 0, 32),
+                            BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 9,
+                        }, preview)
+                        round(row, 5)
+                        local image = create("ImageLabel", {
+                            Position = UDim2.fromOffset(3, 3), Size = UDim2.fromOffset(26, 26),
+                            BackgroundTransparency = 1, Image = entry.thumbnail, ZIndex = 10,
+                        }, row)
+                        round(image, 4)
+                        for j, value in ipairs({entry.name, entry.visits ~= nil and (exact(entry.visits) .. " visits") or "Visits unavailable"}) do
+                            create("TextLabel", {
+                                Position = UDim2.fromOffset(34, j == 1 and 2 or 16), Size = UDim2.new(1, -37, 0, 14),
+                                BackgroundTransparency = 1, Text = value, FontFace = Theme.Font, TextSize = j == 1 and 11 or 10,
+                                TextColor3 = j == 1 and Theme.Text or Theme.Text:Lerp(Theme.Window, 0.38),
+                                TextTruncate = Enum.TextTruncate.AtEnd, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 10,
+                            }, row)
+                        end
+                    end
                 end
             end
+            local function resize()
+                if not left.Parent or not right.Parent then return end
+                local width = math.max(1, math.floor(body.AbsoluteSize.X))
+                local gap = width >= 450 and 12 or 8
+                local leftWidth = math.max(1, math.floor((width - gap) * 0.38))
+                left.Position = UDim2.fromOffset(0, 0)
+                left.Size = UDim2.new(0, leftWidth, 1, 0)
+                right.Position = UDim2.fromOffset(leftWidth + gap, 0)
+                right.Size = UDim2.new(0, math.max(1, width - leftWidth - gap), 1, 0)
+                local side = math.max(36, math.min(116, leftWidth - 24))
+                picture.Size = UDim2.new(1, 0, 0, side + 4)
+                avatar.Size = UDim2.fromOffset(side, side)
+            end
+            local connection = body:GetPropertyChangedSignal("AbsoluteSize"):Connect(resize)
+            left.Destroying:Once(function() connection:Disconnect() end)
+            resize()
         end
         updatePagination()
         render(item, "Loading profile...")
