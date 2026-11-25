@@ -847,234 +847,6 @@ do
     end
 end
 
-local People = {}
-
-function People.summary(raw)
-    if type(raw) ~= "table" then return nil end
-    local id = numericId(raw.id)
-    local username = plainText(raw.name, 64)
-    if not id or not username then return nil end
-    return {
-        id = "person_" .. id, userId = id, isPersonCard = true,
-        username = username, title = plainText(raw.displayName, 80) or username,
-        thumbnail = "rbxthumb://type=AvatarHeadShot&id=" .. id .. "&w=150&h=150",
-        verified = if type(raw.hasVerifiedBadge) == "boolean" then raw.hasVerifiedBadge else nil,
-        presence = "Unknown",
-    }
-end
-
-function People.presence(items)
-    if #items == 0 then return end
-    local ids, indexed = {}, {}
-    for _, item in ipairs(items) do
-        table.insert(ids, tonumber(item.userId))
-        indexed[item.userId] = item
-    end
-    local ok, response = pcall(function()
-        local body = HttpService:JSONEncode({userIds = ids})
-        local url = "https://presence.roblox.com/v1/presence/users"
-        local payload
-        if RunService:IsServer() then
-            payload = HttpService:PostAsync(url, body, Enum.HttpContentType.ApplicationJson, false)
-        else
-            local send = type(request) == "function" and request
-                or (type(http_request) == "function" and http_request)
-                or (syn and type(syn.request) == "function" and syn.request)
-            if not send then return nil end
-            local reply = send({
-                Url = url, Method = "POST", Headers = {["Content-Type"] = "application/json", Accept = "application/json"},
-                Body = body,
-            })
-            if type(reply) ~= "table" then return nil end
-            local status = tonumber(reply.StatusCode or reply.Status or reply.status_code)
-            if status and (status < 200 or status >= 300) then return nil end
-            payload = reply.Body or reply.body
-        end
-        if type(payload) ~= "string" then return nil end
-        return HttpService:JSONDecode(payload)
-    end)
-    if not ok or type(response) ~= "table" or type(response.userPresences) ~= "table" then return end
-    for _, record in ipairs(response.userPresences) do
-        if type(record) == "table" then
-            local item = indexed[numericId(record.userId) or ""]
-            if item then
-                local kind = tonumber(record.userPresenceType)
-                item.presence = ({[0] = "Offline", [1] = "Online", [2] = "In game", [3] = "In Studio", [4] = "Unknown"})[kind or -1] or "Unknown"
-                if kind == 2 then
-                    item.visibleUniverse = numericId(record.universeId)
-                    local location = plainText(record.lastLocation, 120)
-                    if location and location:match("%S") then
-                        local normalized = location:lower():match("^%s*(.-)%s*$")
-                        local generic = {["playing"] = true, ["in game"] = true, ["in-game"] = true,
-                            ["website"] = true, ["roblox"] = true, ["unknown"] = true,
-                            ["playing a game"] = true, ["playing an experience"] = true,
-                            ["private"] = true, ["hidden"] = true, ["offline"] = true}
-                        if not generic[normalized] then item.currentGame = location end
-                    end
-                    if not item.visibleUniverse and not item.currentGame then
-                        item.visiblePlace = numericId(record.rootPlaceId) or numericId(record.placeId)
-                    end
-                end
-            end
-        end
-    end
-    local resolvedPlaces, pendingPlaces = {}, {}
-    local pending = 0
-    for _, item in ipairs(items) do
-        local place = item.visiblePlace
-        if place and not pendingPlaces[place] then
-            pendingPlaces[place] = true
-            pending += 1
-            task.spawn(function()
-                local ok, response = pcall(readResponse, "https://apis.roblox.com/universes/v1/places/" .. place .. "/universe", true)
-                if ok and type(response) == "table" then
-                    resolvedPlaces[place] = numericId(response.universeId)
-                end
-                pending -= 1
-            end)
-        end
-    end
-    local deadline = os.clock() + 3
-    while pending > 0 and os.clock() < deadline do task.wait(0.05) end
-    local universes, seen = {}, {}
-    for _, item in ipairs(items) do
-        item.visibleUniverse = item.visibleUniverse or (item.visiblePlace and resolvedPlaces[item.visiblePlace])
-        item.visiblePlace = nil
-        local id = item.visibleUniverse
-        if id and not seen[id] then
-            seen[id] = true
-            table.insert(universes, id)
-        end
-    end
-    if #universes > 0 then
-        local success, games = pcall(readResponse, "https://games.roblox.com/v1/games?universeIds=" .. table.concat(universes, ","), true)
-        if success and type(games) == "table" and type(games.data) == "table" then
-            local names = {}
-            for _, entry in ipairs(games.data) do
-                if type(entry) == "table" then
-                    local id = numericId(entry.id)
-                    if id and seen[id] then names[id] = plainText(entry.name, 140) end
-                end
-            end
-            for _, item in ipairs(items) do
-                if item.visibleUniverse and names[item.visibleUniverse] then
-                    item.currentGame = names[item.visibleUniverse]
-                end
-            end
-        end
-    end
-    -- No location or server identifiers are retained for other users.
-    for _, item in ipairs(items) do item.visibleUniverse = nil end
-end
-
-function People.search(query, cursor)
-    query = normalizeSearch(query)
-    if query == "" then return {items = {}, nextCursor = ""} end
-    if type(cursor) ~= "string" or #cursor > 2048 then error("Invalid people search cursor", 0) end
-    local url = "https://users.roblox.com/v1/users/search?limit=25&keyword=" .. HttpService:UrlEncode(query)
-    if cursor ~= "" then url ..= "&cursor=" .. HttpService:UrlEncode(cursor) end
-    local data = readResponse(url, true)
-    if type(data.data) ~= "table" then error("Invalid Roblox user search response", 0) end
-    local items, seen = {}, {}
-    for _, raw in ipairs(data.data) do
-        if #items >= 25 then break end
-        local item = People.summary(raw)
-        if item and not seen[item.userId] then
-            seen[item.userId] = true
-            table.insert(items, item)
-        end
-    end
-    People.presence(items)
-    local nextCursor = data.nextPageCursor
-    return {items = items, nextCursor = type(nextCursor) == "string" and #nextCursor <= 2048 and nextCursor or ""}
-end
-
-function People.profile(userId)
-    local id = numericId(userId)
-    if not id then error("Invalid user ID", 0) end
-    local raw = readResponse("https://users.roblox.com/v1/users/" .. id, true)
-    local item = People.summary(raw)
-    if not item or item.userId ~= id then error("Invalid Roblox profile", 0) end
-    item.description = plainText(raw.description, 5000) or ""
-    item.created = plainText(raw.created, 64)
-    item.isBanned = if type(raw.isBanned) == "boolean" then raw.isBanned else nil
-    if item.created then
-        local ok, date = pcall(DateTime.fromIsoDate, item.created)
-        if ok and date then
-            local days = math.floor((DateTime.now().UnixTimestamp - date.UnixTimestamp) / 86400)
-            if days >= 0 then item.accountDays = days end
-        end
-    end
-    local routes = {connections = "friends", followers = "followers", following = "followings"}
-    local remaining = 0
-    local function run(callback)
-        remaining += 1
-        task.spawn(function()
-            pcall(callback)
-            remaining -= 1
-        end)
-    end
-    run(function() People.presence({item}) end)
-    for field, route in pairs(routes) do
-        run(function()
-            local data = readResponse("https://friends.roblox.com/v1/users/" .. id .. "/" .. route .. "/count", true)
-            if type(data) == "table" then item[field] = counter(data.count) end
-        end)
-    end
-    run(function()
-        local data = readResponse("https://games.roblox.com/v2/users/" .. id .. "/games?accessFilter=Public&limit=50&sortOrder=Desc", true)
-        if type(data.data) ~= "table" then return end
-        local games, count, visits, completeVisits = {}, 0, 0, true
-        for _, entry in ipairs(data.data) do
-            if type(entry) == "table" then
-                local universe, name = numericId(entry.id), plainText(entry.name, 140)
-                if universe and name then
-                    count += 1
-                    local value = counter(entry.placeVisits)
-                    if value == nil then completeVisits = false else visits += value end
-                    if #games < 6 then table.insert(games, {name = name, visits = value,
-                        thumbnail = "rbxthumb://type=GameIcon&id=" .. universe .. "&w=150&h=150"}) end
-                end
-            end
-        end
-        item.publicGames = games
-        item.gameCount = count
-        item.gamesPartial = type(data.nextPageCursor) == "string" and data.nextPageCursor ~= ""
-        if completeVisits then item.gameVisits = visits end
-    end)
-    run(function()
-        local data = readResponse("https://accountinformation.roblox.com/v1/users/" .. id .. "/roblox-badges", true)
-        if type(data) ~= "table" or data.errors then return end
-        local badges = {}
-        for _, badge in ipairs(data) do
-            if type(badge) == "table" then
-                local name = plainText(badge.name, 80)
-                if name then table.insert(badges, name) end
-            end
-            if #badges >= 20 then break end
-        end
-        item.platformBadges = badges
-    end)
-    local deadline = os.clock() + 8
-    while remaining > 0 and os.clock() < deadline do task.wait(0.05) end
-    return table.clone(item)
-end
-
-function People.statusText(item)
-    if item.presence == "In game" then
-        return item.currentGame or "In game (game unavailable)"
-    end
-    if item.presence == "Offline" then return "Offline / hidden" end
-    return item.presence == "Unknown" and "Status unavailable" or (item.presence or "Status unavailable")
-end
-
-function People.statusColor(item)
-    if item.presence == "In game" then return Color3.fromRGB(2, 183, 87) end
-    if item.presence == "Online" then return Color3.fromRGB(0, 162, 255) end
-    if item.presence == "In Studio" then return Color3.fromRGB(228, 174, 83) end
-    return Color3.fromRGB(148, 148, 148)
-end
-
 if RunService:IsServer() then
     local remote = ReplicatedStorage:FindFirstChild(CatalogRemote)
     if not remote then
@@ -1087,8 +859,6 @@ if RunService:IsServer() then
     local windowStart, requests = os.clock(), 0
     remote.OnServerInvoke = function(player, target)
         local isRobloxGames = type(target) == "table" and target.action == "robloxGames"
-        local isPeople = type(target) == "table" and target.action == "peopleSearch"
-        local isProfile = type(target) == "table" and target.action == "peopleProfile"
         local isComments = type(target) == "table" and target.action == "comments"
         local isCode = type(target) == "table" and target.action == "code"
         local isGame = type(target) == "table" and target.action == "game"
@@ -1103,14 +873,7 @@ if RunService:IsServer() then
         local filters = isFiltered and Filters.normalize(target.filters) or nil
         local haxhellFilters = isHaxHell and Filters.normalize(target.filters) or nil
         local isDetail = type(target) == "string"
-        if isPeople then
-            if type(target.query) ~= "string" or #target.query > 480 or target.query == ""
-                or normalizeSearch(target.query) ~= target.query or type(target.cursor) ~= "string" or #target.cursor > 2048 then
-                return {error = "Invalid people search"}
-            end
-        elseif isProfile then
-            if not numericId(target.userId) then return {error = "Invalid user ID"} end
-        elseif isRobloxGames then
+        if isRobloxGames then
             if type(target.page) ~= "number" or target.page < 1 or target.page > 5
                 or target.page ~= math.floor(target.page) or type(target.query) ~= "string"
                 or #target.query > 480 or normalizeSearch(target.query) ~= target.query then
@@ -1178,9 +941,7 @@ if RunService:IsServer() then
         elseif type(target) ~= "number" or target ~= target or target < 1 or target > 1000000 or target ~= math.floor(target) then
             return {error = "Invalid page"}
         end
-        local key = (isPeople and ("people:" .. target.query .. ":" .. target.cursor))
-            or (isProfile and ("profile:" .. numericId(target.userId)))
-            or (isRobloxGames and ("robloxGames:" .. target.page .. ":" .. target.query))
+        local key = (isRobloxGames and ("robloxGames:" .. target.page .. ":" .. target.query))
             or (isRScripts and ("rscripts:" .. tostring(target.page) .. ":"
                 .. tostring(target.gameOnly) .. ":" .. Filters.key(rsFilters) .. ":" .. target.query))
             or (isRScriptsDetail and ("rscriptsDetail:" .. target.slug))
@@ -1198,7 +959,7 @@ if RunService:IsServer() then
         local now = os.clock()
         local activity = recent[player] or {}
         recent[player] = activity
-        local kind = isPeople and "people" or isProfile and "profile" or isRobloxGames and "robloxGames" or isRScripts and "rscripts" or (isRScriptsDetail and "rscriptsDetail")
+        local kind = isRobloxGames and "robloxGames" or isRScripts and "rscripts" or (isRScriptsDetail and "rscriptsDetail")
             or isHaxHell and "haxhell" or ((isHaxHellDetail or isHaxHellCode) and "haxhellDetail")
             or ((isSearch or isFiltered) and "search" or (isCode and "code" or (isComments and "comments" or (isDetail and "detail" or (isGame and "game" or "page")))))
         if now - (activity[kind] or -math.huge) < (isCode and 0.6 or (isDetail and 0.25 or 0.5)) then
@@ -1221,11 +982,7 @@ if RunService:IsServer() then
         requests += 1
         pending[key] = true
         local ok, data
-        if isPeople then
-            ok, data = pcall(People.search, target.query, target.cursor)
-        elseif isProfile then
-            ok, data = pcall(People.profile, target.userId)
-        elseif isRobloxGames then
+        if isRobloxGames then
             ok, data = pcall(fetchRobloxGames, target.page, target.query)
         elseif isRScripts then
             ok, data = pcall(fetchRScriptsCatalogue, target.page, target.query, rsFilters, target.gameOnly)
@@ -1893,21 +1650,6 @@ local gameShortcut, gameShortcutButton = shortcut("Game", "gamepad-2")
 do
     local _, button = shortcut("Games", "play")
     filterState.gamesButton = button
-    local _, people = shortcut("People", "")
-    filterState.peopleButton = people
-    filterState.peopleCursors = {[1] = ""}
-    local icon = people:FindFirstChild("Icon")
-    for _, piece in ipairs({
-        {x = 5, y = 1, w = 8, h = 8},
-        {x = 2, y = 10, w = 14, h = 7},
-    }) do
-        local shape = create("Frame", {
-            Position = UDim2.fromOffset(piece.x, piece.y), Size = UDim2.fromOffset(piece.w, piece.h),
-            BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 7,
-        }, icon)
-        round(shape, 4)
-        create("UIStroke", {Color = Theme.Text, Thickness = 1.5}, shape)
-    end
 end
 
 do
@@ -2074,7 +1816,7 @@ bind(scopeBack.MouseEnter, function() hover(scopeBack, 0.24) end)
 bind(scopeBack.MouseLeave, function() hover(scopeBack, 0) end)
 
 local function updateShortcuts()
-    for _, entry in ipairs({{favoriteShortcutButton, "favorites"}, {gameShortcutButton, "game"}, {filterState.gamesButton, "games"}, {filterState.peopleButton, "people"}}) do
+    for _, entry in ipairs({{favoriteShortcutButton, "favorites"}, {gameShortcutButton, "game"}, {filterState.gamesButton, "games"}}) do
         local button, scope = entry[1], entry[2]
         local selected = selectedProvider >= 1 and catalogueScope == scope
         local color = selected and Theme.Accent or Theme.Text
@@ -2088,7 +1830,7 @@ local function updateShortcuts()
             button.BackgroundTransparency = selected and 0 or 1
         end
     end
-    filterState.button.Active = selectedProvider >= 1 and catalogueScope ~= "games" and catalogueScope ~= "people"
+    filterState.button.Active = selectedProvider >= 1 and catalogueScope ~= "games"
 end
 
 local results = create("Frame", {
@@ -2488,18 +2230,18 @@ local function updatePagination()
     updateShortcuts()
     local enabled = selectedProvider >= 1 and not detailView
     scopeBack.Visible = enabled and (catalogueScope ~= "all" or searchState.query ~= "" or Filters.count(filterState.values) > 0)
-    navigation.Visible = not detailView and (catalogueScope ~= "people" or searchState.query ~= "")
-    selector.Visible = not detailView and catalogueScope ~= "games" and catalogueScope ~= "people"
+    navigation.Visible = not detailView
+    selector.Visible = not detailView and catalogueScope ~= "games"
     if detailView then
         searchPill.Visible = false
         shortcuts.Visible = false
     end
     pageLabel.Visible = enabled
     attribution.Visible = true
-    attribution.Text = (catalogueScope == "games" or catalogueScope == "people") and "Roblox" or selectedProvider == 1 and "Powered by Rscripts.net"
+    attribution.Text = catalogueScope == "games" and "Roblox" or selectedProvider == 1 and "Powered by Rscripts.net"
         or (selectedProvider == 2 and "Powered by HaxHell.com" or "Powered by ScriptBlox.com")
     results.Visible = enabled
-    pageLabel.Text = totalPages and (catalogueScope == "people" and tostring(page) or (tostring(page) .. "/" .. tostring(totalPages))) or ""
+    pageLabel.Text = totalPages and (tostring(page) .. "/" .. tostring(totalPages)) or ""
     local previousEnabled = enabled and not loading and page > 1
     local nextEnabled = enabled and not loading and totalPages ~= nil and page < totalPages
     for _, item in ipairs({{previousPageButton, previousEnabled}, {nextPageButton, nextEnabled}}) do
@@ -3051,91 +2793,7 @@ local function makeMetrics(parent, item, layer)
     return pill, counters
 end
 
-function People.paintStatusIcon(icon, item)
-    local name = ({["In game"] = "controller", ["Online"] = "person", ["In Studio"] = "studio"})[item.presence]
-    icon.Visible = name ~= nil
-    icon.TextColor3 = People.statusColor(item)
-    icon.Text = name and ('<font family="rbxasset://LuaPackages/Packages/_Index/BuilderIcons/BuilderIcons/BuilderIcons.json"><b>' .. name .. '</b></font>') or ""
-end
-
-function People.statusIcon(parent, item, x, y, layer)
-    local icon = create("TextLabel", {
-        Name = "PresenceIcon", Position = UDim2.fromOffset(x, y),
-        Size = UDim2.fromOffset(16, 16), BackgroundTransparency = 1,
-        BorderSizePixel = 0, TextSize = 15, RichText = true, Text = "",
-        TextXAlignment = Enum.TextXAlignment.Center, TextYAlignment = Enum.TextYAlignment.Center,
-        ZIndex = layer,
-    }, parent)
-    People.paintStatusIcon(icon, item)
-    return icon
-end
-
-function People.applyLocalPresence(item)
-    -- The local player's own session is known without querying anyone's hidden location.
-    if item.userId ~= numericId(player.UserId) then return end
-    item.presence = "In game"
-    if filterState.localGameName then
-        item.currentGame = filterState.localGameName
-        return
-    end
-    local ok, info = pcall(function()
-        return MarketplaceService:GetProductInfo(game.PlaceId, Enum.InfoType.Asset)
-    end)
-    if ok and type(info) == "table" then
-        filterState.localGameName = plainText(info.Name, 140)
-        item.currentGame = filterState.localGameName or item.currentGame
-    end
-end
-
 local function makeCard(scroller, item, index)
-    if item.isPersonCard then
-        local card = create("Frame", {
-            Name = "PersonCard", LayoutOrder = index, BackgroundColor3 = Theme.Raised,
-            BorderSizePixel = 0, ClipsDescendants = true, ZIndex = 3,
-        }, scroller)
-        round(card, 8)
-        local image = create("ImageLabel", {
-            Name = "Avatar", Position = UDim2.fromOffset(8, 8), Size = UDim2.fromOffset(46, 46),
-            BackgroundColor3 = Theme.Window, BorderSizePixel = 0, Image = item.thumbnail,
-            ScaleType = Enum.ScaleType.Fit, ZIndex = 4,
-        }, card)
-        round(image, 23)
-        local title = create("TextLabel", {
-            Name = "DisplayName", Position = UDim2.fromOffset(62, 8), Size = UDim2.new(1, -70, 0, 19),
-            BackgroundTransparency = 1, Text = item.title, TextColor3 = Theme.Text,
-            FontFace = Theme.Font, TextSize = 14, TextTruncate = Enum.TextTruncate.AtEnd,
-            TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
-        }, card)
-        local username = create("TextLabel", {
-            Name = "Username", Position = UDim2.fromOffset(62, 27), Size = UDim2.new(1, -70, 0, 17),
-            BackgroundTransparency = 1, Text = "@" .. item.username,
-            TextColor3 = Theme.Text:Lerp(Theme.Window, 0.35), FontFace = Theme.Font,
-            TextSize = 11, TextTruncate = Enum.TextTruncate.AtEnd,
-            TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
-        }, card)
-        local pill = create("Frame", {
-            Name = "Presence", Position = UDim2.fromOffset(8, 59), Size = UDim2.new(1, -16, 0, 20),
-            BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 4,
-        }, card)
-        round(pill, 6)
-        local presenceIcon = People.statusIcon(pill, item, 4, 2, 5)
-        local presence = create("TextLabel", {
-            Name = "Status", Position = UDim2.fromOffset(22, 0), Size = UDim2.new(1, -27, 1, 0),
-            BackgroundTransparency = 1, Text = People.statusText(item),
-            TextColor3 = Theme.Text, FontFace = Theme.Font, TextSize = 10,
-            TextTruncate = Enum.TextTruncate.AtEnd, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
-        }, pill)
-        local hit = create("TextButton", {
-            Name = "OpenProfile", Size = UDim2.fromScale(1, 1), Text = "",
-            AutoButtonColor = false, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 8,
-        }, card)
-        local view = {card = card, image = image, title = title, username = username,
-            presence = presence, presenceIcon = presenceIcon, counters = {}, item = item}
-        hit.Activated:Connect(function()
-            if filterState.openPerson then filterState.openPerson(view.item) end
-        end)
-        return view
-    end
     if item.isGameCard then
         local card = create("Frame", {
             Name = "GameCard", LayoutOrder = index, BackgroundColor3 = Theme.Raised,
@@ -3270,11 +2928,6 @@ local function reconcileCards(scroller, items)
                     end
                 end
                 view.item = item
-                if item.isPersonCard then
-                    view.username.Text = "@" .. item.username
-                    view.presence.Text = People.statusText(item)
-                    People.paintStatusIcon(view.presenceIcon, item)
-                end
                 for name, label in pairs(view.counters) do
                     local value = formatCounter(item[name])
                     if label.Text ~= value then
@@ -3293,7 +2946,6 @@ local function reconcileCards(scroller, items)
 end
 
 local function makePage(items)
-    local peoplePage = catalogueScope == "people"
     local group = create("Frame", {
         Name = "Page",
         BackgroundTransparency = 1,
@@ -3323,9 +2975,9 @@ local function makePage(items)
     }, scroller)
     local function layoutCards()
         local width = math.max(0, scroller.AbsoluteSize.X - 5)
-        local columns = math.max(1, math.min(6, math.floor((width + 10) / (peoplePage and 205 or 180))))
+        local columns = math.max(1, math.min(6, math.floor((width + 10) / 180)))
         local cellWidth = math.max(1, math.floor((width - (columns - 1) * 10) / columns))
-        grid.CellSize = UDim2.fromOffset(cellWidth, peoplePage and 86 or (math.floor(cellWidth * 9 / 16) + 48))
+        grid.CellSize = UDim2.fromOffset(cellWidth, math.floor(cellWidth * 9 / 16) + 48)
         grid.FillDirectionMaxCells = columns
     end
     scroller:GetPropertyChangedSignal("AbsoluteSize"):Connect(layoutCards)
@@ -3395,12 +3047,6 @@ local function requestData(target)
     end
     if type(target) == "table" and target.action == "robloxGames" then
         return fetchRobloxGames(target.page, target.query)
-    end
-    if type(target) == "table" and target.action == "peopleSearch" then
-        return People.search(target.query, target.cursor)
-    end
-    if type(target) == "table" and target.action == "peopleProfile" then
-        return People.profile(target.userId)
     end
     if type(target) == "table" and target.action == "comments" then
         return fetchComments(target.id, target.page)
@@ -3529,7 +3175,7 @@ end
 local function hydrateCards(items, token)
     local queue = {}
     for _, item in ipairs(items) do
-        if not item.isGameCard and not item.isPersonCard then
+        if not item.isGameCard then
             local needsMetrics = item.missingMetrics and next(item.missingMetrics) ~= nil
             if needsMetrics or (item.thumbnail == "" and not item.thumbnailSource) then
                 table.insert(queue, item)
@@ -4099,214 +3745,8 @@ closeDetails = function()
         table.insert(pageMotion, tween)
         tween:Play()
     end
-    if requestFreshCatalogue and catalogueScope ~= "people" then
+    if requestFreshCatalogue then
         task.defer(requestFreshCatalogue, catalogueScope == "favorites" and 0 or 2)
-    end
-end
-
-do
-    function filterState.openPerson(item)
-        if not alive or detailView or not item or not numericId(item.userId) then return end
-        clearPageMotion()
-        detailGeneration += 1
-        local token = detailGeneration
-        local view = create("Frame", {
-            Name = "PersonProfile", Position = UDim2.fromOffset(14, 12), Size = UDim2.new(1, -28, 1, -38),
-            BackgroundColor3 = Theme.Window, ClipsDescendants = true, BorderSizePixel = 0, ZIndex = 6,
-        }, content)
-        detailView = view
-        if filterState.close then filterState.close(false) end
-        local back = create("TextButton", {
-            Name = "Back", Size = UDim2.fromOffset(32, 32), Text = "", AutoButtonColor = false,
-            BackgroundColor3 = Theme.Raised, BorderSizePixel = 0, ZIndex = 8,
-        }, view)
-        round(back, 7)
-        lucideIcon(back, "arrow-left", 18, Theme.Text, 9)
-        back.Activated:Connect(closeDetails)
-        local heading = create("TextLabel", {
-            Name = "Heading", Position = UDim2.fromOffset(42, 0), Size = UDim2.new(1, -42, 0, 32),
-            BackgroundTransparency = 1, Text = "Profile", FontFace = Theme.Font,
-            TextColor3 = Theme.Text, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 8,
-        }, view)
-        local body = create("Frame", {
-            Name = "ProfileContent", Position = UDim2.fromOffset(0, 40), Size = UDim2.new(1, 0, 1, -40),
-            BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 7,
-        }, view)
-        local function valid()
-            return alive and detailView == view and detailGeneration == token
-        end
-        local function render(profile, message)
-            if not valid() then return end
-            body:ClearAllChildren()
-            local function card(name)
-                local frame = create("Frame", {
-                    Name = name, BackgroundColor3 = Theme.Raised, BorderSizePixel = 0,
-                    ClipsDescendants = true, ZIndex = 7,
-                }, body)
-                round(frame, 8)
-                local scroll = create("ScrollingFrame", {
-                    Name = "Content", Position = UDim2.fromOffset(10, 9),
-                    Size = UDim2.new(1, -20, 1, -18), BackgroundTransparency = 1,
-                    BorderSizePixel = 0, CanvasSize = UDim2.fromOffset(0, 0),
-                    AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
-                    ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Divider,
-                    VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar, ZIndex = 8,
-                }, frame)
-                create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 5)}, scroll)
-                return frame, scroll
-            end
-            local left, preview = card("PreviewColumn")
-            local right, info = card("InformationCard")
-            local function line(parent, name, value, size, muted, order)
-                local label = detailText(parent, name, value, size, muted, order)
-                label.ZIndex = 9
-                return label
-            end
-            local function exact(value)
-                if value == nil then return "—" end
-                local str = tostring(value)
-                local result = str:reverse():gsub("(%d%d%d)", "%1,"):reverse()
-                return (result:gsub("^,", ""))
-            end
-            local function flag(value, yes, no)
-                if value == nil then return "Unavailable" end
-                return value and yes or no
-            end
-            local picture = create("Frame", {
-                Name = "AvatarPreview", LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 100),
-                BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 9,
-            }, preview)
-            round(picture, 6)
-            local avatar = create("ImageLabel", {
-                Name = "Avatar", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-                Size = UDim2.fromOffset(100, 100), Image = "rbxthumb://type=Avatar&id=" .. profile.userId .. "&w=420&h=420",
-                BackgroundTransparency = 1, BorderSizePixel = 0, ScaleType = Enum.ScaleType.Fit, ZIndex = 10,
-            }, picture)
-            local pill = create("Frame", {
-                Name = "Presence", LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 24),
-                BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 9,
-            }, preview)
-            round(pill, 6)
-            People.statusIcon(pill, profile, 4, 4, 10)
-            local status = create("TextLabel", {
-                Position = UDim2.fromOffset(24, 0), Size = UDim2.new(1, -28, 1, 0),
-                Text = People.statusText(profile), BackgroundTransparency = 1, FontFace = Theme.Font,
-                TextColor3 = Theme.Text, TextSize = 11, TextTruncate = Enum.TextTruncate.AtEnd,
-                TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 10,
-            }, pill)
-            line(info, "DisplayName", profile.title, 17, false, 1)
-            line(info, "Username", "@" .. profile.username, 12, true, 2)
-            line(info, "UserId", "ID: " .. profile.userId, 11, true, 3)
-            if message then
-                line(info, "Message", message, 12, true, 4)
-            else
-                local stats = create("Frame", {
-                    Name = "Statistics", LayoutOrder = 4, Size = UDim2.new(1, 0, 0, 35),
-                    BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 9,
-                }, info)
-                round(stats, 6)
-                for i, pair in ipairs({{"connections", "Connections"}, {"followers", "Followers"}, {"following", "Following"}}) do
-                    local cell = create("Frame", {
-                        Position = UDim2.new((i - 1) / 3, 0, 0, 0), Size = UDim2.new(1 / 3, 0, 1, 0),
-                        BackgroundTransparency = 1, ZIndex = 10,
-                    }, stats)
-                    for j, value in ipairs({exact(profile[pair[1]]), pair[2]}) do
-                        create("TextLabel", {
-                            Position = UDim2.fromOffset(0, j == 1 and 1 or 18), Size = UDim2.new(1, 0, 0, 16),
-                            Text = value, BackgroundTransparency = 1, FontFace = Theme.Font,
-                            TextColor3 = j == 1 and Theme.Text or Theme.Text:Lerp(Theme.Window, 0.38),
-                            TextSize = j == 1 and 13 or 10, ZIndex = 11,
-                        }, cell)
-                    end
-                end
-                line(info, "AccountHeading", "Account", 13, false, 5)
-                local count = profile.gameCount ~= nil and (exact(profile.gameCount) .. (profile.gamesPartial and "+" or "")) or "Unavailable"
-                local visits = profile.gameVisits ~= nil and (exact(profile.gameVisits) .. (profile.gamesPartial and "+" or "")) or "Unavailable"
-                local values = {
-                    {"Joined", profile.created and profile.created:sub(1, 10) or "Unavailable"},
-                    {"Account age", profile.accountDays and (exact(profile.accountDays) .. " days") or "Unavailable"},
-                    {"Verified badge", flag(profile.verified, "Yes", "No")},
-                    {"Moderation", flag(profile.isBanned, "Banned", "Not banned")},
-                    {"Public experiences", count},
-                    {profile.gamesPartial and "Loaded game visits" or "Public game visits", visits},
-                }
-                local fields = create("Frame", {
-                    Name = "AccountFields", LayoutOrder = 6, Size = UDim2.new(1, 0, 0, #values * 18),
-                    BackgroundTransparency = 1, ZIndex = 9,
-                }, info)
-                for i, pair in ipairs(values) do
-                    local y = (i - 1) * 18
-                    for j, value in ipairs(pair) do
-                        create("TextLabel", {
-                            Position = UDim2.new((j - 1) * 0.5, 0, 0, y), Size = UDim2.new(0.5, -2, 0, 18),
-                            BackgroundTransparency = 1, Text = value, FontFace = Theme.Font, TextSize = 11,
-                            TextColor3 = j == 1 and Theme.Text:Lerp(Theme.Window, 0.38) or Theme.Text,
-                            TextXAlignment = j == 1 and Enum.TextXAlignment.Left or Enum.TextXAlignment.Right,
-                            TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 10,
-                        }, fields)
-                    end
-                end
-                if profile.description and profile.description:match("%S") then
-                    line(info, "AboutHeading", "About", 13, false, 7)
-                    line(info, "About", profile.description, 12, true, 8)
-                end
-                if profile.platformBadges and #profile.platformBadges > 0 then
-                    line(info, "BadgesHeading", "Roblox badges", 13, false, 9)
-                    line(info, "Badges", table.concat(profile.platformBadges, ", "), 11, true, 10)
-                end
-                if profile.publicGames and #profile.publicGames > 0 then
-                    line(preview, "ExperiencesHeading", "Public experiences", 12, false, 3)
-                    for i, entry in ipairs(profile.publicGames) do
-                        local row = create("Frame", {
-                            Name = "Experience", LayoutOrder = 3 + i, Size = UDim2.new(1, 0, 0, 32),
-                            BackgroundColor3 = Theme.Window, BorderSizePixel = 0, ZIndex = 9,
-                        }, preview)
-                        round(row, 5)
-                        local image = create("ImageLabel", {
-                            Position = UDim2.fromOffset(3, 3), Size = UDim2.fromOffset(26, 26),
-                            BackgroundTransparency = 1, Image = entry.thumbnail, ZIndex = 10,
-                        }, row)
-                        round(image, 4)
-                        for j, value in ipairs({entry.name, entry.visits ~= nil and (exact(entry.visits) .. " visits") or "Visits unavailable"}) do
-                            create("TextLabel", {
-                                Position = UDim2.fromOffset(34, j == 1 and 2 or 16), Size = UDim2.new(1, -37, 0, 14),
-                                BackgroundTransparency = 1, Text = value, FontFace = Theme.Font, TextSize = j == 1 and 11 or 10,
-                                TextColor3 = j == 1 and Theme.Text or Theme.Text:Lerp(Theme.Window, 0.38),
-                                TextTruncate = Enum.TextTruncate.AtEnd, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 10,
-                            }, row)
-                        end
-                    end
-                end
-            end
-            local function resize()
-                if not left.Parent or not right.Parent then return end
-                local width = math.max(1, math.floor(body.AbsoluteSize.X))
-                local gap = width >= 450 and 12 or 8
-                local leftWidth = math.max(1, math.floor((width - gap) * 0.38))
-                left.Position = UDim2.fromOffset(0, 0)
-                left.Size = UDim2.new(0, leftWidth, 1, 0)
-                right.Position = UDim2.fromOffset(leftWidth + gap, 0)
-                right.Size = UDim2.new(0, math.max(1, width - leftWidth - gap), 1, 0)
-                local side = math.max(36, math.min(116, leftWidth - 24))
-                picture.Size = UDim2.new(1, 0, 0, side + 4)
-                avatar.Size = UDim2.fromOffset(side, side)
-            end
-            local connection = body:GetPropertyChangedSignal("AbsoluteSize"):Connect(resize)
-            left.Destroying:Once(function() connection:Disconnect() end)
-            resize()
-        end
-        updatePagination()
-        render(item, "Loading profile...")
-        task.spawn(function()
-            local ok, profile = pcall(requestData, {action = "peopleProfile", userId = item.userId})
-            if not valid() then return end
-            if not ok or type(profile) ~= "table" or profile.userId ~= item.userId then
-                render(item, "Profile unavailable.")
-                return
-            end
-            People.applyLocalPresence(profile)
-            if valid() then render(profile) end
-        end)
     end
 end
 
@@ -4436,17 +3876,7 @@ local function loadCatalogue(target, direction, background)
     task.spawn(function()
         lastCatalogueRequest = os.clock()
         local ok, data
-        if scope == "people" then
-            ok, data = pcall(requestData, {action = "peopleSearch", query = query,
-                cursor = filterState.peopleCursors[target] or ""})
-            if ok and type(data) == "table" and type(data.items) == "table" then
-                for _, person in ipairs(data.items) do People.applyLocalPresence(person) end
-                local nextCursor = data.nextCursor
-                local hasNext = type(nextCursor) == "string" and nextCursor ~= ""
-                    and nextCursor ~= filterState.peopleCursors[target]
-                data.totalPages = target + (hasNext and 1 or 0)
-            end
-        elseif scope == "games" then
+        if scope == "games" then
             ok, data = pcall(requestData, {action = "robloxGames", page = target, query = query})
         elseif scope == "favorites" then
             ok, data = pcall(favorites.page, target, query, filters, provider)
@@ -4467,9 +3897,9 @@ local function loadCatalogue(target, direction, background)
             ok, data = pcall(requestData, target)
         end
         if not alive or token ~= generation
-            or (scope ~= "games" and scope ~= "people" and selectedProvider ~= provider)
+            or (scope ~= "games" and selectedProvider ~= provider)
             or scope ~= catalogueScope or query ~= searchState.query
-            or (scope ~= "games" and scope ~= "people" and filterKey ~= Filters.key(filterState.values)) then
+            or (scope ~= "games" and filterKey ~= Filters.key(filterState.values)) then
             return
         end
         loading = false
@@ -4478,7 +3908,7 @@ local function loadCatalogue(target, direction, background)
             local reason = not ok and tostring(data) or (type(data) == "table" and data.error or "Invalid catalogue response")
             reason = tostring(reason):gsub("[%c]", " ")
             warn("ScriptFinder catalogue: " .. reason)
-            feedback.Text = ((scope == "games" or scope == "people") and "Roblox: " or scope == "favorites" and "Favorites: "
+            feedback.Text = (scope == "games" and "Roblox: " or scope == "favorites" and "Favorites: "
                 or (provider == 1 and "RScripts: " or (provider == 2 and "HaxHell: " or "ScriptBlox: ")))
                 .. string.sub(reason, 1, 180)
             feedback.Visible = not background or not activePageView
@@ -4494,9 +3924,6 @@ local function loadCatalogue(target, direction, background)
             return
         end
         page = target
-        if scope == "people" then
-            filterState.peopleCursors[target + 1] = data.totalPages > target and data.nextCursor or nil
-        end
         if scope == "favorites" then favorites.dirty = false end
         hasLoaded = true
         gui:SetAttribute("Page", page)
@@ -4504,7 +3931,6 @@ local function loadCatalogue(target, direction, background)
         feedback.Visible = #data.items == 0
         local empty = data.insufficientQuery and "Enter at least two characters to search HaxHell."
             or (scope == "games" and "No games found.")
-            or (scope == "people" and "No people found.")
             or (query ~= "" and "No matching scripts.")
             or (scope == "favorites" and "No favorites yet.")
             or (scope == "game" and "No scripts found for this game." or "No scripts on this page.")
@@ -4516,7 +3942,6 @@ local function loadCatalogue(target, direction, background)
 end
 
 requestFreshCatalogue = function(interval)
-    if catalogueScope == "people" then return end
     if not alive or loading or detailView
         or not content.Visible or not results.Visible
         or filterState.pending or normalizeSearch(searchInput.Text) ~= searchState.query then
@@ -4592,7 +4017,7 @@ local function switchCatalogue(scope, preserveSearch)
     generation += 1
     loading, hasLoaded, retryPage = false, false, nil
     clearPageMotion()
-    if not preserveSearch or catalogueScope == "people" then
+    if not preserveSearch then
         if activePageView then
             activePageView:Destroy()
             activePageView = nil
@@ -4606,15 +4031,6 @@ local function switchCatalogue(scope, preserveSearch)
     gui:SetAttribute("TotalPages", nil)
     updatePagination()
     if layoutSearchBar then layoutSearchBar() end
-    if catalogueScope == "people" then
-        filterState.peopleCursors = {[1] = ""}
-        if searchState.query == "" then
-            feedback.Text = "Search for people"
-            feedback.BackgroundTransparency = 1
-            feedback.Visible = true
-            return
-        end
-    end
     if selectedProvider >= 1 then
         loadCatalogue(1, 0)
     end
@@ -4670,36 +4086,29 @@ bind(filterState.gamesButton.Activated, function()
     end
 end)
 
-bind(filterState.peopleButton.Activated, function()
-    if selectedProvider >= 1 and not detailView then switchCatalogue("people") end
-end)
-
 layoutSearchBar = function(animate)
     animate = animate == true
     local width = content.AbsoluteSize.X
     local hasBack = selectedProvider >= 1 and (catalogueScope ~= "all" or searchState.query ~= "" or Filters.count(filterState.values) > 0)
     local inset = hasBack and 40 or 0
     local games = catalogueScope == "games"
-    local people = catalogueScope == "people"
-    local independent = games or people
-    local stacked = width < (independent and 300 or 596) + inset
-    local available = math.max(0, width - (stacked and 28 or (independent and 152 or 286)) - inset)
-    searchInput.PlaceholderText = people and "Search people" or (games and "Search games" or "Search")
-    local expanded = not independent and filterState.expanded and selectedProvider >= 1 and not detailView
-    local filterWidth = expanded and math.clamp(available - 64 - 8 - 76, 94, 144) or 32
+    local stacked = width < (games and 300 or 558) + inset
+    local available = math.max(0, width - (stacked and 28 or (games and 152 or 286)) - inset)
+    searchInput.PlaceholderText = games and "Search games" or "Search"
+    local expanded = not games and filterState.expanded and selectedProvider >= 1 and not detailView
+    local filterWidth = expanded and math.clamp(available - 64 - 8 - 38, 94, 144) or 32
     local minSearch = available >= 250 and 108 or 64
     local visibleIcons = 2
-    if available < minSearch + 8 + filterWidth + 152 then visibleIcons = 1 end
-    if available < minSearch + 8 + filterWidth + 114 then visibleIcons = 0 end
-    if independent then visibleIcons = 0 end
-    local shortcutsWidth = independent and 0 or (visibleIcons * 38 + filterWidth + 76)
-    filterState.button.Visible = not independent
-    filterState.gamesButton.Visible = not independent
-    filterState.peopleButton.Visible = not independent
-    local searchWidth = math.max(0, math.min(280, available - (independent and 0 or 8) - shortcutsWidth))
+    if available < minSearch + 8 + filterWidth + 114 then visibleIcons = 1 end
+    if available < minSearch + 8 + filterWidth + 76 then visibleIcons = 0 end
+    if games then visibleIcons = 0 end
+    local shortcutsWidth = games and 0 or (visibleIcons * 38 + filterWidth + 38)
+    filterState.button.Visible = not games
+    filterState.gamesButton.Visible = not games
+    local searchWidth = math.max(0, math.min(280, available - (games and 0 or 8) - shortcutsWidth))
     scopeBack.Visible = hasBack and not detailView
     searchPill.Visible = searchWidth >= 64 and not detailView
-    shortcuts.Visible = not detailView and not independent
+    shortcuts.Visible = not detailView and not games
     filterState.motion(searchPill, {Position = UDim2.fromOffset(14 + inset, 12), Size = UDim2.fromOffset(searchWidth, 38)}, animate)
     filterState.motion(shortcuts, {Position = UDim2.fromOffset(14 + inset + searchWidth + 8, 12), Size = UDim2.fromOffset(shortcutsWidth, 38)}, animate)
     filterState.layoutTicket += 1
@@ -4737,20 +4146,17 @@ layoutSearchBar = function(animate)
     filterState.motion(filterState.gamesButton, {
         Position = UDim2.fromOffset(visibleIcons * 38 + filterWidth + 6, 0),
     }, animate)
-    filterState.motion(filterState.peopleButton, {
-        Position = UDim2.fromOffset(visibleIcons * 38 + filterWidth + 44, 0),
-    }, animate)
     filterState.motion(filterState.label, {TextTransparency = expanded and 0 or 1}, animate)
     filterState.motion(filterState.chevron, {ImageTransparency = expanded and 0 or 1}, animate)
 
     local row = stacked and 60 or 12
     selector.Position = UDim2.new(1, -14, 0, row)
-    navigation.Position = UDim2.new(1, independent and -14 or -148, 0, row)
+    navigation.Position = UDim2.new(1, games and -14 or -148, 0, row)
     local top = row + 50
     results.Position = UDim2.fromOffset(14, top)
     results.Size = UDim2.new(1, -28, 1, -top - 26)
     local menuWidth = math.min(216, math.max(1, width - 28))
-    local menuX = math.clamp(14 + inset + searchWidth + 8 + shortcutsWidth - 76 - menuWidth, 14, math.max(14, width - menuWidth - 14))
+    local menuX = math.clamp(14 + inset + searchWidth + 8 + shortcutsWidth - 38 - menuWidth, 14, math.max(14, width - menuWidth - 14))
     local menuHeight = math.max(0, math.min(358, content.AbsoluteSize.Y - 70))
     local menuOpen = expanded and filterState.menuOpen and menuHeight >= 60 and content.Visible
     local menu = filterState.menu
@@ -4807,7 +4213,7 @@ function filterState.select(key, value)
 end
 
 bind(filterState.button.Activated, function()
-    if detailView or catalogueScope == "games" or catalogueScope == "people" then return end
+    if detailView or catalogueScope == "games" then return end
     if not filterState.expanded then
         filterState.expanded = true
     else
@@ -4868,7 +4274,7 @@ local function selectProvider(index, animated)
             filterState.values.sort = "all"
         end
         filterState.updateRows()
-        if catalogueScope ~= "games" and catalogueScope ~= "people" then switchCatalogue() end
+        if catalogueScope ~= "games" then switchCatalogue() end
     end
     stopSelectorTween()
     local target = UDim2.fromOffset(3 + (selectedProvider - 1) * 40, 3)
@@ -5317,8 +4723,7 @@ end)
 
 bind(dotButton.Activated, function()
     setMode(restoreMode)
-    if selectedProvider >= 1 and not loading and not detailView
-        and (catalogueScope ~= "people" or searchState.query ~= "") then
+    if selectedProvider >= 1 and not loading and not detailView then
         loadCatalogue(page, 0)
     end
 end)
