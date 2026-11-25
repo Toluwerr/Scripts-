@@ -216,8 +216,11 @@ local Lucide48 = table.freeze({
     ["minus"] = {Image = "rbxassetid://16898613613", Offset = Vector2.new(771, 196)},
     ["square"] = {Image = "rbxassetid://16898613777", Offset = Vector2.new(869, 710)},
     ["chevron-down"] = {Image = "rbxassetid://16898612819", Offset = Vector2.new(196, 918)},
-    ["image"] = {Image = "rbxassetid://16898613353", Offset = Vector2.new(563, 869)},
-    ["code"] = {Image = "rbxassetid://16898612819", Offset = Vector2.new(355, 563)},
+    ["code"] = {Image = "rbxassetid://16898613044", Offset = Vector2.new(355, 869)},
+    ["link"] = {Image = "rbxassetid://16898613509", Offset = Vector2.new(918, 453)},
+    ["reply"] = {Image = "rbxassetid://16898613699", Offset = Vector2.new(612, 918)},
+    ["maximize"] = {Image = "rbxassetid://16898613613", Offset = Vector2.new(771, 563)},
+    ["minimize"] = {Image = "rbxassetid://16898613613", Offset = Vector2.new(918, 49)},
 })
 local function lucideIcon(parent, name, size, color, zIndex)
     local data = Lucide48[name]
@@ -314,7 +317,7 @@ local function windowControl(name, order, glyph)
     return button, image
 end
 local minBtn, minIcon = windowControl("Minimize", 1, "minus")
-local maximizeBtn, maximizeIcon = windowControl("Maximize", 2, "square")
+local maximizeBtn, maximizeIcon = windowControl("Maximize", 2, "maximize")
 local closeBtn = windowControl("Close", 3, "x")
 
 local body = new("Frame", {
@@ -545,13 +548,35 @@ local boxBg = new("Frame", {
     BackgroundColor3 = C.panel, BorderSizePixel = 0, ZIndex = 4,
 }, row)
 round(boxBg, 8)
+local codeButton = new("TextButton", {
+    Name = "CodeBlock", Position = UDim2.fromOffset(7, 6),
+    Size = UDim2.fromOffset(29, 28),
+    BackgroundColor3 = C.btn, BackgroundTransparency = 1,
+    BorderSizePixel = 0, AutoButtonColor = false, Text = "",
+    ZIndex = 5,
+}, boxBg)
+round(codeButton, 7)
+lucideIcon(codeButton, "code", 16, C.text, 6)
+bind(codeButton.MouseEnter, function() hover(codeButton, 0) end)
+bind(codeButton.MouseLeave, function() hover(codeButton, 1) end)
+local linkButton = new("TextButton", {
+    Name = "ShareLink", Position = UDim2.fromOffset(39, 6),
+    Size = UDim2.fromOffset(29, 28),
+    BackgroundColor3 = C.btn, BackgroundTransparency = 1,
+    BorderSizePixel = 0, AutoButtonColor = false, Text = "",
+    ZIndex = 5,
+}, boxBg)
+round(linkButton, 7)
+lucideIcon(linkButton, "link", 16, C.text, 6)
+bind(linkButton.MouseEnter, function() hover(linkButton, 0) end)
+bind(linkButton.MouseLeave, function() hover(linkButton, 1) end)
 local boxStroke = new("UIStroke", {
     Color = C.accent, Thickness = 1, Transparency = 1,
     ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 }, boxBg)
 local box = new("TextBox", {
-    Name = "Message", Position = UDim2.fromOffset(12, 0),
-    Size = UDim2.new(1, -66, 1, 0),
+    Name = "Message", Position = UDim2.fromOffset(78, 0),
+    Size = UDim2.new(1, -132, 1, 0),
     BackgroundTransparency = 1,
     Text = "", PlaceholderText = "Message #main",
     PlaceholderColor3 = C.dim, ClearTextOnFocus = false,
@@ -846,14 +871,14 @@ bind(maximizeBtn.Activated, function()
         win.Position = UDim2.fromOffset(7, 7)
         maximized = true
         grip.Visible = false
-        maximizeIcon.ImageRectOffset = Lucide48.copy.Offset
-        maximizeIcon.Image = Lucide48.copy.Image
+        maximizeIcon.ImageRectOffset = Lucide48.minimize.Offset
+        maximizeIcon.Image = Lucide48.minimize.Image
     else
         maximized = false
         win.Size, win.Position = fullSize, fullPosition
         grip.Visible = true
-        maximizeIcon.ImageRectOffset = Lucide48.square.Offset
-        maximizeIcon.Image = Lucide48.square.Image
+        maximizeIcon.ImageRectOffset = Lucide48.maximize.Offset
+        maximizeIcon.Image = Lucide48.maximize.Image
     end
     layoutWorkspace()
 end)
