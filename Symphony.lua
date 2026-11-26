@@ -230,7 +230,7 @@ end
 local built, widget = pcall(function()
     local ui = library:CreateWidget({
         Title = "Symphony",
-        Width = 170,
+        Width = 185,
         MinWidth = 140,
         OnClose = cleanup
     })
