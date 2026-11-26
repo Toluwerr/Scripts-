@@ -2977,10 +2977,38 @@ local Walkfling = (function()
     local viewName = "PoopWalkflingView"
     local replay = module(client, "InstantReplay")
     local pending
+    local function ownsBall(ball, character, pid)
+        local ownId = character:GetAttribute("DribbleId")
+        return player.Character == character and Ball.getBall() == ball and ball.Parent ~= nil
+            and finite(ownId) and ownId > 0 and finite(pid)
+            and ball:GetAttribute("Possessor") == ownId and ball:GetAttribute("PossessionId") == pid
+    end
+    local function pulseBall(saved, pulse)
+        local ball = Ball.getBall()
+        if typeof(ball) ~= "Instance" or not ball:IsA("BasePart") then return end
+        local pid = ball:GetAttribute("PossessionId")
+        if not ownsBall(ball, saved.character, pid) then return end
+        if ball.Anchored or not isnetworkowner(ball) or ball.AssemblyRootPart == saved.root.AssemblyRootPart then
+            M.lastBallReason = "Ball is not a separate controllable assembly"
+            return
+        end
+        local velocity = ball.AssemblyLinearVelocity
+        saved.ball = {part = ball, pid = pid, velocity = velocity, assembly = ball.AssemblyRootPart}
+        ball.AssemblyLinearVelocity = pulse
+        M.ballPulses = (M.ballPulses or 0) + 1
+        M.lastBallReason = "Pulse"
+    end
     function M.restore()
         local saved = pending
         pending = nil
-        if saved and saved.root.Parent == saved.character then
+        if not saved then return nil, nil end
+        local ball = saved.ball
+        if ball and ownsBall(ball.part, saved.character, ball.pid) and not ball.part.Anchored
+            and ball.part.AssemblyRootPart == ball.assembly and isnetworkowner(ball.part) then
+            local ok, err = pcall(function() ball.part.AssemblyLinearVelocity = ball.velocity end)
+            if not ok then M.ballError = tostring(err) end
+        end
+        if saved.root.Parent == saved.character then
             saved.root.AssemblyLinearVelocity = saved.velocity
             return saved.root, saved.velocity
         end
@@ -3086,6 +3114,8 @@ local Walkfling = (function()
         local pulse = motion * M.scale + Vector3.new(0, M.lift, 0)
         pending = {root = r, character = character, velocity = velocity}
         r.AssemblyLinearVelocity = pulse
+        local ok, err = pcall(pulseBall, pending, pulse)
+        if not ok then M.ballError = tostring(err) end
         M.pulses += 1
         M.lastReason = "Pulse"
         M.lastInterval = M.lastPulseAt and at - M.lastPulseAt
