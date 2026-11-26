@@ -641,7 +641,8 @@ local function beginKickMotion(sample, plan)
     if remaining <= (family.plantAt or 0.12) then
         return nil, nil, "Shot calculation exceeded the windup; try F again"
     end
-    if player.Character ~= character or Ball.getBall() ~= sample.ball or possessionId() ~= sample.pid then
+    local current = ballSample()
+    if player.Character ~= character or not current or current.ball ~= sample.ball or current.pid ~= sample.pid then
         return nil, nil, "Possession changed before the kick"
     end
     local direction = plan.velocity * Vector3.new(1, 0, 1)
