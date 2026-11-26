@@ -1299,99 +1299,6 @@ end)()
 S.grasp = Grasp
 
 
-local Magnet = {range = 32, cooldown = 0.35, lastAt = -math.huge, bindings = {}}
-local MagnetSim = module(gameModules, "BallSim")
-local magnetRemote = Net:RemoteEvent("DribbleKnock")
-function Magnet.allowed(context)
-    return context.alive and not context.busy and not context.owned and not context.typing and not context.menu
-        and context.animated and context.onPitch and context.playing and context.loose and context.free
-        and finite(context.distance) and context.distance > 1 and context.distance <= math.min(Magnet.range, tonumber(cfg.ballGrabRange) or Magnet.range)
-        and finite(context.height) and context.height <= 2.4 and finite(context.pid) and context.pid > 0
-        and context.sinceLast >= Magnet.cooldown and not context.justShot
-end
-function Magnet.velocity(position, target)
-    local offset = Vector3.new(target.X - position.X, 0, target.Z - position.Z)
-    if offset.Magnitude < 0.01 then return Vector3.zero end
-    return offset.Unit * math.clamp(offset.Magnitude * 5, 10, 24)
-end
-function Magnet.matches(record, event)
-    return event ~= nil and event.pid > record.pid and event.by == record.ownId and event.kind == "knock"
-        and math.abs(event.t - record.clock) < 0.1 and (event.pos - record.position).Magnitude < 0.15
-        and (event.vel - record.velocity).Magnitude < 0.1
-end
-function Magnet.pull(silent)
-    local character, r = player.Character, root()
-    local ball = Ball.getBall()
-    local position = Ball.getPosition()
-    if not character or not r or not ball or not position then return false end
-    local phase = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
-    local floor = Ball.groundBallY(position)
-    local own = character:GetAttribute("DribbleId")
-    local source = Ball.getSource()
-    local context = {
-        alive = life.alive(), busy = S.busy, owned = ownState() ~= nil,
-        typing = Input:GetFocusedTextBox() ~= nil, menu = GuiService.MenuIsOpen,
-        animated = character:GetAttribute("BodyState") == "Animated",
-        onPitch = character:GetAttribute("Team") == "Blue" or character:GetAttribute("Team") == "Red",
-        playing = not phase or phase:GetAttribute("Phase") == "Play",
-        loose = ball:GetAttribute("Possessor") == 0, free = source == "free" or source == "released" or source == "server",
-        distance = ((position - r.Position) * Vector3.new(1, 0, 1)).Magnitude,
-        height = math.abs(position.Y - floor), pid = ball:GetAttribute("PossessionId"),
-        sinceLast = os.clock() - Magnet.lastAt, justShot = S.lastShot and now() - S.lastShot.at < 0.8,
-    }
-    if not Magnet.allowed(context) or type(own) ~= "number" or own <= 0 then
-        if not silent then notify("Ball magnet", "No loose ball in reach.") end
-        return false
-    end
-    if Grasp.request() then Magnet.lastAt = os.clock(); Magnet.last = Grasp.pending; return true end
-    if context.distance > 8 then return false end
-    local target = r.Position + r.CFrame.LookVector * 0.9
-    local velocity = Magnet.velocity(position, target)
-    Magnet.lastAt = os.clock()
-    local record = {at = now(), clock = Ball.drawnTime(), position = position, velocity = velocity,
-        ownId = own, pid = context.pid, distance = context.distance, ball = ball, accepted = false, owned = false}
-    Magnet.last = record
-    magnetRemote:FireServer(record.pid, position, velocity, record.clock)
-    task.spawn(function()
-        local began = os.clock()
-        while life.alive() and Magnet.last == record and ball.Parent and os.clock() - began < 0.9 do
-            local event = MagnetSim.decode(ball:GetAttribute("BallSim"))
-            if Magnet.matches(record, event) then
-                record.accepted = true
-                record.receipt = {pid = event.pid, at = event.t, by = event.by, position = event.pos, velocity = event.vel,
-                    positionError = (event.pos - position).Magnitude, velocityError = (event.vel - velocity).Magnitude}
-            end
-            if player.Character == character and ball:GetAttribute("Possessor") == own then record.owned = true end
-            if record.accepted and record.owned then break end
-            task.wait(0.03)
-        end
-    end)
-    return true
-end
-local function reserveMagnetKey(binding)
-    if not binding:IsA("InputBinding") or Magnet.bindings[binding] then return end
-    local action = binding.Parent
-    if not action or not action:IsA("InputAction") or (action.Name ~= "SkillRight" and action.Name ~= "LowDiveRight" and action.Name ~= "SimpleLow") then return end
-    local record = {}
-    Magnet.bindings[binding] = record
-    local function update()
-        if binding.KeyCode == Enum.KeyCode.C then
-            record.original = Enum.KeyCode.C
-            binding.KeyCode = Enum.KeyCode.Unknown
-        end
-    end
-    life.connect(binding:GetPropertyChangedSignal("KeyCode"), update)
-    life.onCleanup(function()
-        if record.original and binding.Parent and binding.KeyCode == Enum.KeyCode.Unknown then binding.KeyCode = record.original end
-    end)
-    update()
-end
-for _, binding in ipairs(player.PlayerScripts:GetDescendants()) do reserveMagnetKey(binding) end
-life.connect(player.PlayerScripts.DescendantAdded, function(binding)
-    task.defer(function() if life.alive() and binding.Parent then reserveMagnetKey(binding) end end)
-end)
-S.magnet = Magnet
-
 local RestartAccess = {reads = 0, installed = false}
 function RestartAccess.allowed(phase, kind, taker)
     return (phase == "Dead" or phase == "Restart") and (kind == "FreeKick" or kind == "IndirectFreeKick" or kind == "ThrowIn" or kind == "Throw-in" or kind == "Throw" or kind == "Penalty" or kind == "GoalKick" or kind == "Corner" or kind == "KickOff")
@@ -3313,7 +3220,7 @@ local Hitboxes = (function()
         if not ball or not position or not character or not r then return end
         local ownId = character:GetAttribute("DribbleId")
         if ball:GetAttribute("Possessor") ~= 0 or ball:GetAttribute("ReleasedBy") == ownId then return end
-        local radius = math.clamp(tonumber(cfg.ballHitboxRadius) or 4, 1, Magnet.range)
+        local radius = math.clamp(tonumber(cfg.ballHitboxRadius) or 4, 1, Grasp.maxRange)
         local gap = math.huge
         for _, name in ipairs({"LeftFoot", "RightFoot", "LeftShin", "RightShin"}) do
             local part = character:FindFirstChild(name)
@@ -3321,10 +3228,11 @@ local Hitboxes = (function()
                 gap = math.min(gap, (Contacts.closestOnBox(part.CFrame, part.Size, position) - position).Magnitude)
             end
         end
-        if gap > radius then return end
-        if Magnet.pull(true) then
+        if gap > radius or math.abs(position.Y - Ball.groundBallY(position)) > 2.4 then return end
+        if S.lastShot and now() - S.lastShot.at < 0.8 then return end
+        if Grasp.request() then
             M.ballRequests += 1
-            M.ballRecord = Magnet.last
+            M.ballRecord = Grasp.pending
         end
     end
     function M.apply()
@@ -4065,7 +3973,6 @@ end})
 local ball = playerTab:Section("Ball")
 toggle(ball, "Auto poke", "autoPoke")
 ball:Button({Text = "Poke", Callback = function() S.pokeCarrier(false) end})
-S.controls.ballMagnet = ball:Button({Text = "Ball magnet (C)", Callback = function() Magnet.pull(false) end})
 toggle(ball, "Freeze loose ball", "freezeBall", function(enabled) if enabled then if S.controls.ballOrbit then S.controls.ballOrbit:Set(false, true) end; if S.controls.ballGlue then S.controls.ballGlue:Set(false, true) end end; Freeze.setEnabled(enabled) end)
 local tricks = playerTab:Section("Tricks")
 toggle(tricks, "Walkfling", "walkfling", Walkfling.setEnabled)
@@ -4083,7 +3990,6 @@ local jumping = playerTab:Section("Jump")
 toggle(jumping, "Jump (Space)", "jumpEnabled")
 toggle(jumping, "Infinite jump", "infiniteJump")
 slider(jumping, "Jump height", "jumpHeight", 1, 60, 1)
-jumping:Button({Text = "Jump", Callback = function() Jump.fire() end})
 local hitboxesSection = playerTab:Section("Player boxes")
 toggle(hitboxesSection, "Player boxes", "playerHitboxes", function(value) cfg.hitboxVisuals = value; Hitboxes.apply() end)
 slider(hitboxesSection, "Box size", "playerHitboxSize", 4, 50, 1, Hitboxes.apply)
@@ -4113,8 +4019,7 @@ local function onKeyInput(key, processed)
     if processed or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
     if key.KeyCode == Enum.KeyCode.RightShift then window:Toggle(); return end
     if key.KeyCode == Enum.KeyCode.Space and cfg.jumpEnabled then Jump.fire(); return end
-    if key.KeyCode == Enum.KeyCode.F or key.KeyCode == Enum.KeyCode.C then Orbit.suspendUntil = os.clock() + 0.9; Glue.suspendUntil = os.clock() + 0.9 end
-    if key.KeyCode == Enum.KeyCode.C then Magnet.pull(false); return end
+    if key.KeyCode == Enum.KeyCode.F then Orbit.suspendUntil = os.clock() + 0.9; Glue.suspendUntil = os.clock() + 0.9 end
     if key.KeyCode == Enum.KeyCode.H then
         changed("autoGK", not cfg.autoGK)
         S.controls.autoGK:Set(cfg.autoGK, false)
