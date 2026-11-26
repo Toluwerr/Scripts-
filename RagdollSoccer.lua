@@ -380,6 +380,9 @@ local function fitShot(sample, target, goal, family, speed, side, back, attempts
     for _ = 1, attempts or 3 do
         local velocity, spin, flightTime, miss = Flight.solve(sample.from, aim, speed, side, back, params, groundY, math.rad(70))
         if not finite(flightTime) or not finite(miss) or miss > 1.1 then return nil end
+        local acceptedVelocity, acceptedSpin = KickRules.checkStrike(family, velocity, spin)
+        if not acceptedVelocity or not acceptedSpin then return nil end
+        velocity, spin = acceptedVelocity, acceptedSpin
         local simulation = Flight.simulate(sample.from, velocity, spin, 0, params, groundY, math.min(flightTime + 1, 10))
         local passage = goalPassage(simulation, goal, radius)
         if not passage then return nil end
@@ -1669,6 +1672,9 @@ local Visual = (function()
             for _ = 1, attempts or 3 do
                 local velocity, spin, flightTime, miss = Flight.solve(sample.from, aim, speed, side, back, params, groundY, math.rad(70))
                 if not finite(flightTime) or not finite(miss) or miss > 1.1 then return nil end
+                local acceptedVelocity, acceptedSpin = KickRules.checkStrike(family, velocity, spin)
+                if not acceptedVelocity or not acceptedSpin then return nil end
+                velocity, spin = acceptedVelocity, acceptedSpin
                 local simulation = Flight.simulate(sample.from, velocity, spin, 0, params, groundY, math.min(flightTime + 1, 10))
                 local passage = goalPassage(simulation, goal, radius)
                 if not passage then return nil end
@@ -1808,11 +1814,10 @@ local Visual = (function()
                 if fresh and fresh.ball == sample.ball and fresh.pid == sample.pid and (fresh.from - sample.from).Magnitude > 0.1 then
                     if cancelled() then error("Preview superseded", 0) end
                     local adjusted = plan.refit(fresh)
-                    if adjusted then plan, sample = adjusted, fresh end
+                    if not adjusted then return nil end
+                    plan, sample = adjusted, fresh
                 end
-                local velocity, spin = KickRules.checkStrike(plan.family, plan.velocity, plan.spin)
-                if not velocity then return nil end
-                local trace = V.trace(sample.from, velocity, spin, math.min(plan.flightTime + 0.1, 6), workerBudget(cancelled))
+                local trace = V.trace(sample.from, plan.velocity, plan.spin, math.min(plan.flightTime + 0.1, 6), workerBudget(cancelled))
                 if not trace then return nil end
                 return {trace = trace, plan = plan, from = sample.from, at = now(), key = key, pid = sample.pid, ball = sample.ball}
             end)
@@ -1822,7 +1827,13 @@ local Visual = (function()
                 V.preview = result
                 V.forecastCount += 1
                 V.error = nil
-            elseif not ok and not tostring(result):find("Preview superseded", 1, true) then V.error = tostring(result); S.guideError = V.error end
+            elseif not cancelled() then
+                V.preview = nil
+                if not ok and not tostring(result):find("Preview superseded", 1, true) then
+                    V.error = tostring(result)
+                    S.guideError = V.error
+                end
+            end
             S.previewCostMs = (os.clock() - began) * 1000
             V.nextAt = os.clock() + math.clamp((V.planWorkMs or 0) * 0.003, 0.2, 0.75)
         end)
