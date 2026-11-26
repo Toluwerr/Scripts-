@@ -711,6 +711,7 @@ local function trackShot(plan, before, style, motion)
     table.insert(S.shots, entry)
     if #S.shots > 30 then table.remove(S.shots, 1) end
     S.lastShot = entry
+    S.lastShotBall = plan.sample.ball
     task.spawn(function()
         local finishAt = os.clock() + math.clamp(plan.flightTime + 3.5, 4, 12)
         local b = plan.sample.ball
@@ -1463,6 +1464,7 @@ local Visual = (function()
     local green = Color3.fromRGB(104, 211, 171)
     for i = 1, 48 do parts[i] = guidePart("Flight", Vector3.new(0.055, 0.055, 1), green) end
     local hidden = true
+    local drawnPhase
     local function validVector(value)
         return typeof(value) == "Vector3" and finite(value.X) and finite(value.Y) and finite(value.Z)
     end
@@ -1476,6 +1478,7 @@ local Visual = (function()
             targetMarker.Transparency = 1
         end
         hidden = true
+        drawnPhase = nil
         table.clear(drawn); table.clear(velocities); table.clear(shown)
     end
     V.hide = hide
@@ -1817,7 +1820,7 @@ local Visual = (function()
         V.planning = true
         V.nextAt = os.clock() + 0.1
         local function cancelled()
-            return not life.alive() or V.generation ~= generation or Ball.getBall() ~= sample.ball
+            return not life.alive() or not cfg.trajectory or V.generation ~= generation or Ball.getBall() ~= sample.ball
                 or player.Character ~= character or currentPid() ~= sample.pid or choiceKey(cfg) ~= key or S.busy
         end
         task.defer(function()
@@ -1826,7 +1829,8 @@ local Visual = (function()
                 local plan = calculateVisual(sample, options, cancelled, false)
                 if not plan then return nil end
                 local fresh = ballSample()
-                if fresh and fresh.ball == sample.ball and fresh.pid == sample.pid and (fresh.from - sample.from).Magnitude > 0.1 then
+                if not fresh or fresh.ball ~= sample.ball or fresh.pid ~= sample.pid then return nil end
+                if (fresh.from - sample.from).Magnitude > 0.1 then
                     if cancelled() then error("Preview superseded", 0) end
                     local adjusted = plan.refit(fresh)
                     if not adjusted then return nil end
@@ -1834,7 +1838,7 @@ local Visual = (function()
                 end
                 local trace = V.trace(sample.from, plan.velocity, plan.spin, math.min(plan.flightTime + 0.1, 6), workerBudget(cancelled))
                 if not trace then return nil end
-                return {trace = trace, plan = plan, from = sample.from, at = now(), key = key, pid = sample.pid, ball = sample.ball}
+                return {trace = trace, plan = plan, from = sample.from, at = now(), key = key, pid = sample.pid, ball = sample.ball, character = character}
             end)
             V.planning = false
             if not life.alive() then return end
@@ -1850,7 +1854,7 @@ local Visual = (function()
                 end
             end
             S.previewCostMs = (os.clock() - began) * 1000
-            V.nextAt = os.clock() + math.clamp((V.planWorkMs or 0) * 0.003, 0.2, 0.75)
+            V.nextAt = if cancelled() then 0 else os.clock() + math.clamp((V.planWorkMs or 0) * 0.003, 0.2, 0.75)
         end)
     end
     local function vectorText(text)
@@ -1861,46 +1865,75 @@ local Visual = (function()
         return nil
     end
     local lastReleasedKey
-    local function releaseForecast(ball, pid)
+    local function clearReleased()
+        if V.released or lastReleasedKey then V.releaseGeneration = (V.releaseGeneration or 0) + 1 end
+        V.released, lastReleasedKey = nil, nil
+    end
+
+    local function releaseForecast(ball, pid, state)
         local shot = S.lastShot
-        if not shot or now() - shot.at > 12 or not finite(shot.pid) or not finite(shot.expectedTime)
-            or (pid ~= shot.pid and pid ~= shot.pid + 1) or not Ball.freeSim() then
-            if V.released or lastReleasedKey then V.releaseGeneration = (V.releaseGeneration or 0) + 1 end
-            V.released, lastReleasedKey = nil, nil
-            return
+        if not shot or S.lastShotBall ~= ball or now() - shot.at > 12 or not finite(shot.pid) or not finite(shot.expectedTime)
+            or (pid ~= shot.pid and pid ~= shot.pid + 1) then
+            clearReleased()
+            return false
         end
-        local event = Flight.decode(ball:GetAttribute("KickFlight"))
+        if state or not Ball.freeSim() then
+            clearReleased()
+            return now() - shot.at < 0.35
+        end
+        local raw = ball:GetAttribute("KickFlight")
+        local event = type(raw) == "string" and Flight.decode(raw)
         local server = event and event.pid == shot.pid + 1 and event.by == shot.characterId and event.family == shot.family
-            and math.abs(event.t - shot.expectedTime) < 1
-        local key = if server then ball:GetAttribute("KickFlight") else tostring(shot)
-        if key == lastReleasedKey then return end
+            and finite(event.t) and math.abs(event.t - shot.expectedTime) < 1
+        local key = if server then raw else tostring(shot)
+        if key == lastReleasedKey then return true end
         local from = if server then event.pos else vectorText(shot.from)
         local velocity = if server then event.vel else vectorText(shot.velocity)
         local spin = if server then event.spin else vectorText(shot.spin)
-        if not from or not velocity or not spin then return end
+        if not validVector(from) or not validVector(velocity) or not validVector(spin) then return true end
         lastReleasedKey = key
+        V.released = nil
         V.releaseGeneration = (V.releaseGeneration or 0) + 1
         local generation = V.releaseGeneration
         task.defer(function()
-            local ok, trace = pcall(V.trace, from, velocity, spin, 6, workerBudget(function()
-                return not life.alive() or generation ~= V.releaseGeneration or Ball.getBall() ~= ball
-            end))
-            if ok and trace and life.alive() and generation == V.releaseGeneration then
+            local function cancelled()
+                return not life.alive() or not cfg.trajectory or generation ~= V.releaseGeneration
+                    or Ball.getBall() ~= ball or S.lastShot ~= shot
+            end
+            local ok, trace = pcall(V.trace, from, velocity, spin, 6, workerBudget(cancelled))
+            if ok and trace and not cancelled() then
                 V.released = {trace = trace, from = from, time = if server then event.t else shot.expectedTime, wall = shot.at, pid = shot.pid,
                     server = server == true, key = key}
             end
         end)
+        return true
     end
     life.connect(Net:RemoteEvent("KickPlanRelay").OnClientEvent, function(sender, packet)
         local motion = S.lastKickMotion
         if sender ~= player or type(packet) ~= "table" or not motion or packet.id ~= motion.id
             or not S.busy or not S.status:find("Planting foot", 1, true) then return end
-        if not validVector(packet.ball) or not validVector(packet.vel) or not validVector(packet.spin) then return end
+        if not cfg.trajectory or not validVector(packet.ball) or not validVector(packet.vel) or not validVector(packet.spin) then return end
+        local generation, ball = V.generation, Ball.getBall()
+        local function cancelled()
+            return not life.alive() or not cfg.trajectory or V.generation ~= generation or Ball.getBall() ~= ball
+                or not S.busy or kickMotion ~= motion or motion.released
+        end
         task.defer(function()
-            local ok, trace = pcall(V.trace, packet.ball, packet.vel, packet.spin, 6, workerBudget(function() return not life.alive() end))
-            if ok and life.alive() and trace then V.windup = {trace = trace, from = packet.ball, id = motion.id, at = now()} end
+            local ok, trace = pcall(V.trace, packet.ball, packet.vel, packet.spin, 6, workerBudget(cancelled))
+            if ok and trace and not cancelled() then
+                V.windup = {trace = trace, from = packet.ball, id = motion.id, at = now()}
+            end
         end)
     end)
+
+    local activeBall, activeCharacter, activeKey
+    local function resetForecasts()
+        V.generation += 1
+        V.preview, V.windup, V.nextAt = nil, nil, 0
+        clearReleased()
+        hide()
+    end
+
     local renderName = "PoopSoccerVisualPath"
     Run:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 2, function(dt)
         if not life.alive() then return end
@@ -1908,22 +1941,60 @@ local Visual = (function()
         local ball, position = Ball.getBall(), Ball.getPosition()
         ballMarker.Transparency = if cfg.marker and position then 0.2 else 1
         if position then ballMarker.CFrame = CFrame.new(position + Vector3.new(0, 2.7, 0)) * CFrame.Angles(0, 0, math.pi / 2) end
-        if not cfg.trajectory or not ball or not validVector(position) then hide(); return end
-        V.request()
+        if not cfg.trajectory or not ball or not validVector(position) then
+            if activeBall then
+                resetForecasts()
+                activeBall, activeCharacter, activeKey = nil, nil, nil
+            else
+                hide()
+            end
+            return
+        end
+        local character, key = player.Character, choiceKey(cfg)
+        if ball ~= activeBall or character ~= activeCharacter then
+            resetForecasts()
+            activeBall, activeCharacter, activeKey = ball, character, key
+        elseif key ~= activeKey then
+            V.generation += 1
+            V.preview, V.nextAt = nil, 0
+            activeKey = key
+            hide()
+        end
+
         local state = ownState()
         local pid = if state then state.pid else Ball.pendingPid() or possessionId()
-        releaseForecast(ball, pid)
-        local forecast, elapsed, released = V.preview, 0, false
-        if V.windup and S.busy and S.lastKickMotion and S.lastKickMotion.id == V.windup.id and now() - V.windup.at < 1 then forecast = V.windup end
-        local flight = V.released
-        if flight then
-            local clock = Ball.drawnTime()
-            if not finite(clock) or clock < flight.time - 0.05 then clock = now() end
-            elapsed = math.max(clock - flight.time, 0)
-            if elapsed < flight.trace.horizon then forecast, released = flight, true else V.released = nil end
+        local forecast, elapsed, phase
+        if releaseForecast(ball, pid, state) then
+            V.preview, V.windup = nil, nil
+            local flight = V.released
+            if flight then
+                local clock = Ball.drawnTime()
+                if not finite(clock) or clock < flight.time - 0.05 then clock = now() end
+                elapsed = math.max(clock - flight.time, 0)
+                if elapsed < flight.trace.horizon then forecast, phase = flight, "released" else V.released = nil end
+            end
+        elseif S.busy then
+            local motion = kickMotion
+            if V.windup and motion and V.windup.id == motion.id and not motion.released and now() - V.windup.at < 1 then
+                forecast, elapsed, phase = V.windup, 0, "windup"
+            end
+        else
+            V.windup = nil
+            V.request()
+            local preview = V.preview
+            local lifetime = math.clamp(0.5 + (S.previewCostMs or 0) * 0.002, 1.1, 3)
+            if preview and preview.ball == ball and preview.character == character and preview.key == key
+                and preview.pid == currentPid() and now() - preview.at <= lifetime then
+                forecast, elapsed, phase = preview, 0, "aim"
+            end
         end
-        local lifetime = math.clamp(0.5 + (S.previewCostMs or 0) * 0.002, 1.1, 3)
-        if not forecast or (not released and forecast ~= V.windup and (forecast.pid ~= currentPid() or now() - forecast.at > lifetime)) then hide(); return end
+        if not forecast then hide(); return end
+        if drawnPhase ~= phase then
+            table.clear(drawn)
+            table.clear(velocities)
+            drawnPhase = phase
+        end
+        local released = phase == "released"
         local trace = forecast.trace
         local anchor = V.sample(trace, elapsed)
         local offset = position - anchor
