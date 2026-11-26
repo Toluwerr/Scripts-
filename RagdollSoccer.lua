@@ -379,6 +379,14 @@ local function goalPassage(simulation, goal, radius)
         minZ, maxZ = math.min(minZ, point.Z), math.max(maxZ, point.Z)
         minY, maxY = math.min(minY, point.Y), math.max(maxY, point.Y)
     end
+    local function correction(minimum, maximum, lower, upper)
+        local lowError = math.max(0, lower - minimum)
+        local highError = math.min(0, upper - maximum)
+        if lowError > 0 and highError < 0 then
+            return (lowError + highError) * 0.5
+        end
+        return lowError + highError
+    end
     if entered then include(simulation.pos[1]) end
     for i = 2, simulation.n do
         local a, b = simulation.pos[i - 1], simulation.pos[i]
@@ -393,14 +401,14 @@ local function goalPassage(simulation, goal, radius)
             if da < radius and db >= radius then
                 local exit = a:Lerp(b, (radius - da) / (db - da))
                 include(exit)
-                local dz = if minZ < lowerZ then lowerZ - minZ elseif maxZ > upperZ then upperZ - maxZ else 0
-                local dy = if maxY > upperY then upperY - maxY elseif minY < lowerY then lowerY - minY else 0
+                local margin = math.min(minZ - lowerZ, upperZ - maxZ, minY - lowerY, upperY - maxY)
                 return {
-                    valid = dz == 0 and dy == 0,
-                    shiftZ = dz, shiftY = dy,
+                    valid = margin >= 0,
+                    shiftZ = correction(minZ, maxZ, lowerZ, upperZ),
+                    shiftY = correction(minY, maxY, lowerY, upperY),
                     position = exit, centre = centre,
                     time = (i - 2 + (radius - da) / (db - da)) * Flight.STEP,
-                    margin = math.min(minZ - lowerZ, upperZ - maxZ, minY - lowerY, upperY - maxY),
+                    margin = margin,
                     minZ = minZ, maxZ = maxZ, minY = minY, maxY = maxY,
                 }
             end
@@ -469,7 +477,11 @@ local function makeShotPlanner(Flight, budget)
         local radius = goal.radius or sample.ball.Size.X * 0.5
         context = context or physicsContext(sample)
         local params, groundY = context.params, context.groundY
-        local aim = target
+        local startDepth = (sample.from.X - goal.x) * goal.out
+        if startDepth >= radius then return nil end
+        local closeRange = startDepth >= -radius
+        local solveX = if closeRange then goal.x + goal.out * (radius + 0.25) else goal.x
+        local aim = Vector3.new(solveX, target.Y, target.Z)
         local best, bestError
         for _ = 1, attempts or 3 do
             local velocity, spin, flightTime, miss = Flight.solve(sample.from, aim, speed, side, back, params, groundY, math.rad(70))
@@ -484,8 +496,8 @@ local function makeShotPlanner(Flight, budget)
 
             local shiftY, shiftZ = passage.shiftY, passage.shiftZ
             if passage.valid then
-                local crossing = passage.centre
-                local placementError = if crossing then (crossing - target).Magnitude else miss
+                local crossing = if closeRange then passage.position else passage.centre or passage.position
+                local placementError = Vector2.new(crossing.Y - target.Y, crossing.Z - target.Z).Magnitude
                 if (miss <= 1.1 or placementError <= 1.1) and (not bestError or placementError < bestError) then
                     bestError = placementError
                     best = {
@@ -496,11 +508,11 @@ local function makeShotPlanner(Flight, budget)
                         groundY = groundY,
                     }
                 end
-                if not crossing or placementError <= 0.35 then break end
+                if placementError <= 0.35 then break end
                 shiftY, shiftZ = target.Y - crossing.Y, target.Z - crossing.Z
             end
 
-            local nextAim = Vector3.new(goal.x,
+            local nextAim = Vector3.new(solveX,
                 math.clamp(aim.Y + shiftY * 1.12, goal.ground + radius + 0.2, goal.top - radius - 0.3),
                 math.clamp(aim.Z + shiftZ * 1.12, goal.z - goal.width + radius + 0.3, goal.z + goal.width - radius - 0.3))
             if (nextAim - aim).Magnitude < 0.01 then break end
@@ -555,6 +567,9 @@ local function makeShotPlanner(Flight, budget)
         if not goal then return nil, "No opponent goal is loaded" end
         if goal.width <= goal.radius + 0.4 or goal.top - goal.ground <= 2 * goal.radius + 0.5 then
             return nil, "Goal opening is too small for the ball"
+        end
+        if (sample.from.X - goal.x) * goal.out >= goal.radius then
+            return nil, "Ball is already behind the goal line"
         end
         local target, ranked = targetFor(goal, sample.from, options)
         local points = ranked or {target}
