@@ -412,16 +412,49 @@ local function choiceKey(options)
 end
 
 local function makeShotPlanner(Flight, budget)
+    local function validVector(value)
+        return typeof(value) == "Vector3" and finite(value.X) and finite(value.Y) and finite(value.Z)
+    end
+
+    local function constrainInputs(familyName, from, target, speed, side, back)
+        if not finite(speed) or speed <= 0 or not finite(side) or not finite(back) then return nil end
+        local family = Families[familyName]
+        if not family then return nil end
+
+        local maximum = math.max(family.speed[2], family.shotSpeed and family.shotSpeed[2] or 0)
+            * KickRules.Server.SpeedSlack * KickRules.KickButton.FullPower
+        if finite(maximum) and maximum > 0 then
+            speed = math.min(speed, maximum * 0.9999)
+        end
+
+        local flat = (target - from) * Vector3.new(1, 0, 1)
+        if flat.Magnitude > 0.001 then
+            local spin = Flight.spinFrom(flat.Unit, side, back)
+            local maxSpin = KickRules.Server.MaxSpin
+            if not validVector(spin) then return nil end
+            if finite(maxSpin) and maxSpin > 0 and spin.Magnitude > maxSpin then
+                local scale = maxSpin * 0.9999 / spin.Magnitude
+                side, back = side * scale, back * scale
+            end
+        end
+
+        return speed, side, back
+    end
+
     local function fitShot(sample, target, goal, family, speed, side, back, attempts)
+        if not validVector(sample.from) or not validVector(target) then return nil end
+        speed, side, back = constrainInputs(family, sample.from, target, speed, side, back)
+        if not speed then return nil end
         local radius = goal.radius or sample.ball.Size.X * 0.5
         local params = Flight.params(sample.ball)
         local groundY = Ball.groundBallY()
         local aim = target
         for _ = 1, attempts or 3 do
             local velocity, spin, flightTime, miss = Flight.solve(sample.from, aim, speed, side, back, params, groundY, math.rad(70))
-            if not finite(flightTime) or not finite(miss) or miss > 1.1 then return nil end
+            if not finite(flightTime) or flightTime <= 0 or not finite(miss) or miss > 1.1
+                or not validVector(velocity) or not validVector(spin) then return nil end
             local acceptedVelocity, acceptedSpin = KickRules.checkStrike(family, velocity, spin)
-            if not acceptedVelocity or not acceptedSpin then return nil end
+            if not validVector(acceptedVelocity) or not validVector(acceptedSpin) then return nil end
             velocity, spin = acceptedVelocity, acceptedSpin
             local simulation = Flight.simulate(sample.from, velocity, spin, 0, params, groundY, math.min(flightTime + 1, 10))
             local passage = goalPassage(simulation, goal, radius)
@@ -569,7 +602,8 @@ local function trackShot(plan, before, style, motion)
         trackingVersion = "0.3",
         expectedTime = plan.sample.time,
         passageMargin = plan.passage.margin, planningVersion = "0.4",
-        side = plan.side, spin = tostring(plan.spin),
+        plannedSpeed = plan.speed, releaseSpeed = plan.velocity.Magnitude,
+        side = plan.side, spin = tostring(plan.spin), spinMagnitude = plan.spin.Magnitude,
         samples = {},
         sampleAge = now() - plan.sample.time,
         contactOffset = motion and motion.contactOffset,
