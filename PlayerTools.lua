@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "0.4"
+local VERSION = "0.5"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -4243,6 +4243,33 @@ do
                 end
         end
 
+        local function releasePullRoot(root)
+                local rec = claimedRoots[root]
+                if not rec then return end
+                claimedRoots[root] = nil
+
+                for _, key in ipairs({"align", "orient", "attachment", "target"}) do
+                        local object = rec[key]
+                        if object then
+                                pcall(function() object:Destroy() end)
+                        end
+                end
+
+                for _, part in ipairs(rec.parts) do
+                        local saved = claimedParts[part]
+                        if saved then
+                                saved.refs -= 1
+                                if saved.refs <= 0 then
+                                        claimedParts[part] = nil
+                                        if part.Parent then
+                                                pcall(function() part.CanCollide = saved.canCollide end)
+                                                pcall(function() part.CustomPhysicalProperties = saved.physics end)
+                                        end
+                                end
+                        end
+                end
+        end
+
         local function claimPullRoot(root)
                 if claimedRoots[root] then
                         return
@@ -4279,125 +4306,104 @@ do
                         end
                 end)
 
-                local list = {}
+                local rec = {parts = {}, rotation = root.CFrame - root.CFrame.Position}
+                claimedRoots[root] = rec
+                local list = rec.parts
+                local seen = {}
+                local ok, err = pcall(function()
+                        for _, part in ipairs(parts) do
+                                local inCharacter = false
 
-                for _, part in ipairs(parts) do
-                        local inCharacter = false
-
-                        for _, character in ipairs(characters) do
-                                if part:IsDescendantOf(character) then
-                                        inCharacter = true
-                                        break
+                                for _, character in ipairs(characters) do
+                                        if part:IsDescendantOf(character) then
+                                                inCharacter = true
+                                                break
+                                        end
                                 end
-                        end
 
-                        if not inCharacter then
-                                if claimedParts[part] == nil then
-                                        claimedParts[part] = {
-                                                canCollide = part.CanCollide,
-                                                physics = part.CustomPhysicalProperties or false
-                                        }
+                                if not inCharacter and not seen[part] then
+                                        seen[part] = true
+                                        local saved = claimedParts[part]
+                                        if not saved then
+                                                saved = {
+                                                        canCollide = part.CanCollide,
+                                                        physics = part.CustomPhysicalProperties,
+                                                        refs = 0
+                                                }
+                                                claimedParts[part] = saved
+                                        end
 
-                                        pcall(function()
+                                        saved.refs += 1
+                                        table.insert(list, part)
+
+                                        if saved.refs == 1 then
                                                 part.CanCollide = false
                                                 part.CustomPhysicalProperties = LIGHT_PHYSICS
-                                        end)
+                                        end
                                 end
-
-                                table.insert(list, part)
                         end
-                end
 
-                -- The puppet: an invisible anchored target the assembly
-                -- is strung to with unlimited-force aligns. Moving the
-                -- target IS the pull - the engine's constraint solver
-                -- does the acceleration, braking and gravity fighting on
-                -- every physics substep, and on an assembly we do not
-                -- simulate the constraints simply do nothing, so nothing
-                -- ever fakes.
-                local target = Instance.new("Part")
-                target.Name = "PullTarget"
-                target.Size = Vector3.new(0.2, 0.2, 0.2)
-                target.Transparency = 1
-                target.Anchored = true
-                target.CanCollide = false
-                target.CanTouch = false
-                target.CanQuery = false
-                target.CastShadow = false
-                target.CFrame = root.CFrame
-                target.Parent = pullFolder
+                        -- The puppet: an invisible anchored target the assembly
+                        -- is strung to with unlimited-force aligns. Moving the
+                        -- target IS the pull - the engine's constraint solver
+                        -- does the acceleration, braking and gravity fighting on
+                        -- every physics substep, and on an assembly we do not
+                        -- simulate the constraints simply do nothing, so nothing
+                        -- ever fakes.
+                        local target = Instance.new("Part")
+                        rec.target = target
+                        target.Name = "PullTarget"
+                        target.Size = Vector3.new(0.2, 0.2, 0.2)
+                        target.Transparency = 1
+                        target.Anchored = true
+                        target.CanCollide = false
+                        target.CanTouch = false
+                        target.CanQuery = false
+                        target.CastShadow = false
+                        target.CFrame = root.CFrame
+                        target.Parent = pullFolder
 
-                local targetAttachment = Instance.new("Attachment")
-                targetAttachment.Parent = target
+                        local targetAttachment = Instance.new("Attachment")
+                        targetAttachment.Parent = target
 
-                local attachment = Instance.new("Attachment")
-                attachment.Parent = root
+                        local attachment = Instance.new("Attachment")
+                        rec.attachment = attachment
+                        attachment.Parent = root
 
-                local align = Instance.new("AlignPosition")
-                -- Singular "TwoAttachment" - the live API enum is
-                -- PositionAlignmentMode.TwoAttachment, and the plural
-                -- spelling would nil-index and kill every claim.
-                align.Mode = Enum.PositionAlignmentMode.TwoAttachment
-                align.Attachment0 = attachment
-                align.Attachment1 = targetAttachment
-                align.MaxForce = math.huge
-                align.MaxVelocity = ALIGN_MAX_VELOCITY
-                align.Responsiveness = ALIGN_RESPONSIVENESS
-                align.ApplyAtCenterOfMass = true
-                align.RigidityEnabled = false
-                align.Parent = root
+                        local align = Instance.new("AlignPosition")
+                        rec.align = align
+                        -- Singular "TwoAttachment" - the live API enum is
+                        -- PositionAlignmentMode.TwoAttachment, and the plural
+                        -- spelling would nil-index and kill every claim.
+                        align.Mode = Enum.PositionAlignmentMode.TwoAttachment
+                        align.Attachment0 = attachment
+                        align.Attachment1 = targetAttachment
+                        align.MaxForce = math.huge
+                        align.MaxVelocity = ALIGN_MAX_VELOCITY
+                        align.Responsiveness = ALIGN_RESPONSIVENESS
+                        align.ApplyAtCenterOfMass = true
+                        align.RigidityEnabled = false
+                        align.Parent = root
 
-                local orient = Instance.new("AlignOrientation")
-                orient.Mode = Enum.OrientationAlignmentMode.TwoAttachment
-                orient.Attachment0 = attachment
-                orient.Attachment1 = targetAttachment
-                orient.MaxTorque = math.huge
-                orient.MaxAngularVelocity = math.huge
-                orient.Responsiveness = ALIGN_RESPONSIVENESS
-                orient.RigidityEnabled = false
-                orient.Parent = root
+                        local orient = Instance.new("AlignOrientation")
+                        rec.orient = orient
+                        orient.Mode = Enum.OrientationAlignmentMode.TwoAttachment
+                        orient.Attachment0 = attachment
+                        orient.Attachment1 = targetAttachment
+                        orient.MaxTorque = math.huge
+                        orient.MaxAngularVelocity = math.huge
+                        orient.Responsiveness = ALIGN_RESPONSIVENESS
+                        orient.RigidityEnabled = false
+                        orient.Parent = root
 
-                claimedRoots[root] = {
-                        target = target,
-                        attachment = attachment,
-                        align = align,
-                        orient = orient,
-                        parts = list,
-                        rotation = root.CFrame - root.CFrame.Position
-                }
-        end
-
-        local function releasePullRoot(root)
-                local rec = claimedRoots[root]
-
-                if not rec then
-                        return
-                end
-
-                claimedRoots[root] = nil
-
-                pcall(function()
-                        rec.align:Destroy()
-                        rec.orient:Destroy()
-                        rec.attachment:Destroy()
-                        rec.target:Destroy()
                 end)
 
-                for _, part in ipairs(rec.parts) do
-                        local saved = claimedParts[part]
-
-                        if saved then
-                                claimedParts[part] = nil
-
-                                if part and part.Parent then
-                                        pcall(function()
-                                                part.CanCollide = saved.canCollide
-                                                part.CustomPhysicalProperties =
-                                                        saved.physics == false and nil or saved.physics
-                                        end)
-                                end
-                        end
+                if not ok then
+                        releasePullRoot(root)
+                        updatePullStatus("Object setup failed: " .. tostring(err):sub(1, 80))
+                        return false
                 end
+                return true
         end
 
         local function isPullableRoot(root)
@@ -4652,10 +4658,11 @@ do
                 for root, rec in pairs(claimedRoots) do
                         if not root.Parent then
                                 releasePullRoot(root)
-                        elseif not rec.target.Parent then
-                                -- A destroyed puppet (some games sweep the
-                                -- workspace client-side) must not be allowed
-                                -- to abort the whole servo through an error.
+                        elseif root.Anchored or root.AssemblyRootPart ~= root
+                                or not rec.target.Parent
+                                or rec.align.Parent ~= root
+                                or rec.orient.Parent ~= root
+                                or rec.attachment.Parent ~= root then
                                 releasePullRoot(root)
                         else
                                 local toPlayer = center - root.Position
@@ -4685,6 +4692,8 @@ do
                         releasePullRoot(root)
                 end
 
+                frameTick = 0
+                ObjectPullSettings.SimBoost = false
                 table.clear(walkStack)
                 table.clear(walkSeen)
 
@@ -4709,6 +4718,13 @@ do
         ObjectPull.setEnabled = function(value)
                 local enabled = value and true or false
 
+                if enabled and not running then return end
+                if enabled and ObjectPullSettings.Enabled
+                        and ObjectPullSettings.Connection and ObjectPullSettings.Connection.Connected then
+                        return
+                end
+
+                ObjectPullSettings.Enabled = false
                 stopObjectPull()
                 ObjectPullSettings.Enabled = enabled
 
