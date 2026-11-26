@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "1.0"
+local VERSION = "1.1"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -3262,7 +3262,85 @@ local function setAntiFlingEnabled(value)
         end
 end
 
-local PhysicsRig = {}
+local PhysicsRig = {
+        partStates = setmetatable({}, {__mode = "k"})
+}
+
+function PhysicsRig.assemblyParts(root)
+        local parts = {root}
+        local seen = {[root] = true}
+        pcall(function()
+                for _, part in ipairs(root:GetConnectedParts(true)) do
+                        if part:IsA("BasePart") and part.Parent and not seen[part] then
+                                seen[part] = true
+                                table.insert(parts, part)
+                        end
+                end
+        end)
+        return parts
+end
+
+function PhysicsRig.captureParts(record, root, physicalProperties)
+        local characters = {}
+        for _, player in ipairs(Players:GetPlayers()) do
+                if player.Character then
+                        table.insert(characters, player.Character)
+                end
+        end
+
+        record.lightened = physicalProperties ~= nil
+        for _, part in ipairs(PhysicsRig.assemblyParts(root)) do
+                if not part.Parent then continue end
+                local inCharacter = false
+                for _, character in ipairs(characters) do
+                        if part:IsDescendantOf(character) then
+                                inCharacter = true
+                                break
+                        end
+                end
+                if inCharacter then continue end
+
+                local saved = PhysicsRig.partStates[part]
+                if not saved then
+                        saved = {canCollide = part.CanCollide, refs = 0, physicsRefs = 0}
+                        PhysicsRig.partStates[part] = saved
+                end
+
+                if record.lightened and saved.physicsRefs == 0 then
+                        saved.physics = part.CustomPhysicalProperties
+                end
+                saved.refs += 1
+                if record.lightened then saved.physicsRefs += 1 end
+                table.insert(record.parts, part)
+
+                if saved.refs == 1 then part.CanCollide = false end
+                if record.lightened and saved.physicsRefs == 1 then
+                        part.CustomPhysicalProperties = physicalProperties
+                end
+        end
+end
+
+function PhysicsRig.restoreParts(record)
+        for _, part in ipairs(record.parts) do
+                local saved = PhysicsRig.partStates[part]
+                if not saved then continue end
+                saved.refs -= 1
+                if record.lightened then
+                        saved.physicsRefs -= 1
+                        if saved.physicsRefs == 0 and part.Parent then
+                                pcall(function() part.CustomPhysicalProperties = saved.physics end)
+                                saved.physics = nil
+                        end
+                end
+                if saved.refs <= 0 then
+                        PhysicsRig.partStates[part] = nil
+                        if part.Parent then
+                                pcall(function() part.CanCollide = saved.canCollide end)
+                        end
+                end
+        end
+        table.clear(record.parts)
+end
 
 function PhysicsRig.destroy(rig)
         if not rig then return end
@@ -3439,24 +3517,6 @@ do
                 return true
         end
 
-        local function getHoldAssemblyParts(root)
-                local parts = { root }
-                local seen = { [root] = true }
-
-                pcall(function()
-                        for _, part in ipairs(root:GetConnectedParts(true)) do
-                                if part:IsA("BasePart")
-                                        and part.Parent
-                                        and not seen[part] then
-                                        seen[part] = true
-                                        table.insert(parts, part)
-                                end
-                        end
-                end)
-
-                return parts
-        end
-
         -- Cap well under the engine's 31-live-Highlight rendering
         -- limit (hold glow + picker glow together): going over it
         -- makes highlights drop out and churns render cost.
@@ -3507,7 +3567,7 @@ do
         end
 
         local function refreshHoldGlow(root)
-                local parts = getHoldAssemblyParts(root)
+                local parts = PhysicsRig.assemblyParts(root)
                 ObjectHoldSettings.HeldParts = parts
 
                 -- Project each oriented part's half-extents onto the vertical axis.
@@ -3986,7 +4046,7 @@ do
                         if ObjectHoldSettings.PickerRoot ~= root then
                                 ObjectHoldSettings.PickerRoot = root
                                 syncGlow(
-                                        getHoldAssemblyParts(root),
+                                        PhysicsRig.assemblyParts(root),
                                         ObjectHoldSettings.PickerHighlights,
                                         "__PlayerToolsHoldPick",
                                         Color3.fromRGB(64, 205, 98),
@@ -4239,7 +4299,6 @@ do
         }
 
         local claimedRoots = setmetatable({}, { __mode = "k" })
-        local claimedParts = setmetatable({}, { __mode = "k" })
         local envOriginals = setmetatable({}, { __mode = "k" })
         local allowSleepSaved = nil
         local pullFolder = nil
@@ -4401,19 +4460,7 @@ do
 
                 PhysicsRig.destroy(rec)
 
-                for _, part in ipairs(rec.parts) do
-                        local saved = claimedParts[part]
-                        if saved then
-                                saved.refs -= 1
-                                if saved.refs <= 0 then
-                                        claimedParts[part] = nil
-                                        if part.Parent then
-                                                pcall(function() part.CanCollide = saved.canCollide end)
-                                                pcall(function() part.CustomPhysicalProperties = saved.physics end)
-                                        end
-                                end
-                        end
-                end
+                PhysicsRig.restoreParts(rec)
         end
 
         local function claimPullRoot(root)
@@ -4427,67 +4474,10 @@ do
                         pullFolder.Parent = Workspace
                 end
 
-                -- The whole assembly is claimed, not just the root:
-                -- welded structures flow in as one piece. GetConnectedParts
-                -- never includes the root itself, so it is added first -
-                -- the old version skipped it, which left solo debris (most
-                -- of a disaster) unfeathered and collidable. Player
-                -- character parts are skipped - never theirs to touch,
-                -- even when a seat welds a driver into the assembly.
-                local characters = {}
-
-                for _, player in ipairs(Players:GetPlayers()) do
-                        if player.Character then
-                                table.insert(characters, player.Character)
-                        end
-                end
-
-                local parts = { root }
-
-                pcall(function()
-                        for _, part in ipairs(root:GetConnectedParts(true)) do
-                                if part and part:IsA("BasePart") and part.Parent then
-                                        table.insert(parts, part)
-                                end
-                        end
-                end)
-
                 local rec = {parts = {}, rotation = root.CFrame - root.CFrame.Position}
                 claimedRoots[root] = rec
-                local list = rec.parts
-                local seen = {}
                 local ok, err = pcall(function()
-                        for _, part in ipairs(parts) do
-                                local inCharacter = false
-
-                                for _, character in ipairs(characters) do
-                                        if part:IsDescendantOf(character) then
-                                                inCharacter = true
-                                                break
-                                        end
-                                end
-
-                                if not inCharacter and not seen[part] then
-                                        seen[part] = true
-                                        local saved = claimedParts[part]
-                                        if not saved then
-                                                saved = {
-                                                        canCollide = part.CanCollide,
-                                                        physics = part.CustomPhysicalProperties,
-                                                        refs = 0
-                                                }
-                                                claimedParts[part] = saved
-                                        end
-
-                                        saved.refs += 1
-                                        table.insert(list, part)
-
-                                        if saved.refs == 1 then
-                                                part.CanCollide = false
-                                                part.CustomPhysicalProperties = LIGHT_PHYSICS
-                                        end
-                                end
-                        end
+                        PhysicsRig.captureParts(rec, root, LIGHT_PHYSICS)
 
                         PhysicsRig.create(rec, root, {
                                 folder = pullFolder,
@@ -4928,7 +4918,6 @@ do
         }
 
         local claimedRoots = setmetatable({}, { __mode = "k" })
-        local claimedParts = setmetatable({}, { __mode = "k" })
         local envOriginals = setmetatable({}, { __mode = "k" })
         local allowSleepSaved = nil
         local shakerFolder = nil
@@ -5120,18 +5109,7 @@ do
 
                 PhysicsRig.destroy(rec)
 
-                for _, part in ipairs(rec.parts) do
-                        local saved = claimedParts[part]
-                        if saved then
-                                saved.refs -= 1
-                                if saved.refs <= 0 then
-                                        claimedParts[part] = nil
-                                        if part.Parent then
-                                                pcall(function() part.CanCollide = saved.canCollide end)
-                                        end
-                                end
-                        end
-                end
+                PhysicsRig.restoreParts(rec)
         end
 
         local function claimShakeRoot(root)
@@ -5145,56 +5123,10 @@ do
                         shakerFolder.Parent = Workspace
                 end
 
-                -- The whole assembly is claimed, not just the root, so
-                -- welded structures flail as one connected piece. Player
-                -- character parts are skipped - never theirs to touch,
-                -- even when a seat welds a driver into the assembly.
-                local characters = {}
-
-                for _, player in ipairs(Players:GetPlayers()) do
-                        if player.Character then
-                                table.insert(characters, player.Character)
-                        end
-                end
-
-                local parts = { root }
-
-                pcall(function()
-                        for _, part in ipairs(root:GetConnectedParts(true)) do
-                                if part and part:IsA("BasePart") and part.Parent then
-                                        table.insert(parts, part)
-                                end
-                        end
-                end)
-
                 local rec = {parts = {}}
                 claimedRoots[root] = rec
-                local seen = {}
                 local ok, err = pcall(function()
-                        for _, part in ipairs(parts) do
-                                local inCharacter = false
-
-                                for _, character in ipairs(characters) do
-                                        if part:IsDescendantOf(character) then
-                                                inCharacter = true
-                                                break
-                                        end
-                                end
-
-                                if not inCharacter and not seen[part] then
-                                        seen[part] = true
-                                        local saved = claimedParts[part]
-                                        if not saved then
-                                                saved = {canCollide = part.CanCollide, refs = 0}
-                                                claimedParts[part] = saved
-                                        end
-                                        saved.refs += 1
-                                        table.insert(rec.parts, part)
-                                        if saved.refs == 1 then
-                                                part.CanCollide = false
-                                        end
-                                end
-                        end
+                        PhysicsRig.captureParts(rec, root)
 
                         PhysicsRig.create(rec, root, {
                                 folder = shakerFolder,
