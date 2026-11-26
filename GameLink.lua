@@ -25,15 +25,46 @@ do
         Reborn = library
 end
 
-local TOKEN = ""
-if type(Global.GameLinkToken) == "string" then
-        TOKEN = Global.GameLinkToken:gsub("^[%s]+", ""):gsub("[%s]+$", "")
+local BASE_PATH = "GameLink.base.txt"
+
+local function trim(value)
+        if type(value) ~= "string" then return "" end
+        return value:gsub("^%s+", ""):gsub("%s+$", "")
 end
 
-local BASE = ""
-if type(Global.GameLinkBase) == "string" then
-        BASE = Global.GameLinkBase:gsub("[%s]+$", ""):gsub("[/\\]+$", "")
+local function normalizeBase(value)
+        local base = trim(value):gsub("[/\\]+$", "")
+        if not base:match("^https?://[^/%s]+") or base:find("[%s?#]") then
+                return ""
+        end
+        local authority = base:match("^https?://([^/]+)")
+        if not authority or authority:find("@", 1, true) then return "" end
+        return base
 end
+
+local function readBase()
+        local base = normalizeBase(Global.GameLinkBase)
+        if base ~= "" then return base end
+        if type(readfile) == "function" then
+                local ok, saved = pcall(readfile, BASE_PATH)
+                if ok then return normalizeBase(saved) end
+        end
+        return ""
+end
+
+local BASE = readBase()
+local TOKEN = trim(Global.GameLinkToken)
+
+local function rememberBase()
+        if BASE == "" then return end
+        Global.GameLinkBase = BASE
+        if type(writefile) == "function" then
+                pcall(writefile, BASE_PATH, BASE)
+        end
+end
+
+rememberBase()
+Global.GameLinkAuto = false
 
 local sid = nil
 local stats = {
@@ -514,8 +545,17 @@ local function publicPlaceName()
 end
 
 local function connect()
-        if linked or stopping then
+        if linked or stopping or not running then
                 return
+        end
+
+        BASE = readBase()
+        TOKEN = trim(Global.GameLinkToken)
+        rememberBase()
+        if baseUrlLabel then
+                pcall(function()
+                        baseUrlLabel:Set("URL: " .. (#BASE > 0 and BASE or "unset") .. " | token: " .. (#TOKEN > 0 and "set" or "unset"))
+                end)
         end
 
         if #BASE == 0 then
@@ -643,7 +683,6 @@ LinkSection:Button({
         Text = "Connect",
         Primary = true,
         Callback = function()
-                Global.GameLinkAuto = true
                 connect()
         end
 })
@@ -664,19 +703,6 @@ LinkSection:Button({
                 end
         end
 })
-
--- auto-connect when the snippet already provided base + token; also re-runs
--- after a teleport (queue_on_teleport below), so the session always matches
--- the place the player is actually in
-if #BASE > 0 and #TOKEN > 0 and Global.GameLinkAuto ~= false then
-        task.defer(connect)
-end
-
-local queueTeleport = queue_on_teleport or (syn and syn.queue_on_teleport)
-
-if type(queueTeleport) == "function" then
-        pcall(queueTeleport, 'loadstring(game:HttpGet("https://raw.githubusercontent.com/Toluwerr/Scripts-/main/GameLink.lua"))()')
-end
 
 local function cleanup()
         if not running then
