@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "0.2"
+local VERSION = "0.3"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -3633,6 +3633,60 @@ do
                 return true
         end
 
+        local function finiteNumber(value)
+                return type(value) == "number" and value == value and math.abs(value) < math.huge
+        end
+
+        local function finiteVector(value)
+                return typeof(value) == "Vector3"
+                        and finiteNumber(value.X) and finiteNumber(value.Y) and finiteNumber(value.Z)
+        end
+
+        local function updateFollowVelocity(position, deltaTime)
+                local previous = ObjectHoldSettings.LastHeadPosition
+                ObjectHoldSettings.LastHeadPosition = position
+                if not finiteVector(previous) or not finiteVector(position)
+                        or not finiteNumber(deltaTime) or deltaTime <= 0 or deltaTime >= 0.5 then
+                        ObjectHoldSettings.FollowVelocity = nil
+                        return Vector3.zero
+                end
+
+                local delta = position - previous
+                if delta.Magnitude >= 100 then
+                        ObjectHoldSettings.FollowVelocity = nil
+                        return Vector3.zero
+                end
+
+                local measured = delta / deltaTime
+                if not finiteVector(measured) then
+                        ObjectHoldSettings.FollowVelocity = nil
+                        return Vector3.zero
+                end
+
+                local prior = ObjectHoldSettings.FollowVelocity
+                -- Match the previous 0.35 smoothing at 60 FPS.
+                local alpha = 1 - math.exp(-25.8469749655 * deltaTime)
+                local velocity = if finiteVector(prior) then prior:Lerp(measured, alpha) else measured
+                ObjectHoldSettings.FollowVelocity = velocity
+                return velocity
+        end
+
+        local function computeHoldGoal(root, head, responsiveness, velocity)
+                local lead = velocity * math.clamp(2 / responsiveness, 0.02, 0.12)
+                if lead.Magnitude > 15 then
+                        lead = lead.Unit * 15
+                end
+
+                local bottomOffset = ObjectHoldSettings.HoldBottomOffset
+                if not finiteNumber(bottomOffset) then
+                        bottomOffset = -root.Size.Y / 2
+                end
+
+                local slotOffset = if MovementSettings.Noclip then 0
+                        else math.clamp(head.Size.Y / 2 + 1 - math.clamp(bottomOffset, -40, 5), 1, 45)
+                return head.Position + Vector3.new(0, slotOffset, 0) + lead
+        end
+
         local function updateObjectHold(stepTime)
                 if not running or not ObjectHoldSettings.Enabled then
                         return
@@ -3671,107 +3725,15 @@ do
                         return
                 end
 
-                local headPosition = head.Position
-
-                -- Speed matching, part one: measure how fast the
-                -- character is actually moving from frame-to-frame
-                -- head positions. This works the same whether the
-                -- player walks, sprints, uses Fly or rides a vehicle
-                -- - no matter what moves the character, the measured
-                -- velocity is the truth.
-                local step = tonumber(stepTime)
-
-                if step and step > 0 and step < 0.5 then
-                        local last = ObjectHoldSettings.LastHeadPosition
-
-                        if last then
-                                local delta = headPosition - last
-
-                                if delta.Magnitude < 100 then
-                                        local instant = delta / step
-                                        local smoothed =
-                                                ObjectHoldSettings.FollowVelocity
-
-                                        if smoothed then
-                                                ObjectHoldSettings.FollowVelocity =
-                                                        smoothed:Lerp(instant, 0.35)
-                                        else
-                                                ObjectHoldSettings.FollowVelocity =
-                                                        instant
-                                        end
-                                else
-                                        -- Position jumped (teleport):
-                                        -- no honest velocity this frame.
-                                        ObjectHoldSettings.FollowVelocity = nil
-                                end
-                        end
+                local velocity = updateFollowVelocity(head.Position, stepTime)
+                local responsiveness = rig.AlignPosition.Responsiveness
+                if not finiteNumber(responsiveness) or responsiveness <= 0 then
+                        releaseObject("Invalid hold responsiveness")
+                        return
                 end
 
-                ObjectHoldSettings.LastHeadPosition = headPosition
-
-                -- Speed matching, part two: a critically damped
-                -- AlignPosition trails a moving goal by roughly
-                -- 2 * speed / responsiveness studs. Leading the goal
-                -- by exactly that cancels the trail at ANY speed, so
-                -- the object rides level with the player instead of
-                -- perpetually catching up. No slider, no cap - it
-                -- just matches whatever speed the player goes.
-                local responsiveness = tonumber(rig.AlignPosition.Responsiveness)
-                        or 35
-                local lead = Vector3.zero
-                local velocity = ObjectHoldSettings.FollowVelocity
-
-                if velocity then
-                        local leadTime = math.clamp(
-                                2 / responsiveness,
-                                0.02,
-                                0.12
-                        )
-
-                        lead = velocity * leadTime
-
-                        if lead.Magnitude > 15 then
-                                lead = lead.Unit * 15
-                        end
-                end
-
-                -- Auto slot - no height setting. Auto ownership
-                -- follows proximity, so the slot rides as close to
-                -- the player as physics allows. With Noclip on,
-                -- character parts are non-collidable and the object
-                -- can sit right in the head at zero distance,
-                -- unbeatable in the proximity contest. With Noclip
-                -- off, the object's bottom edge is parked a fixed
-                -- clearance above the head top - the shortest
-                -- distance that never snags on the character.
-                -- Flips live, so toggling Noclip mid-hold just
-                -- glides the object between the two slots.
-                local bottomOffset = ObjectHoldSettings.HoldBottomOffset
-
-                if type(bottomOffset) ~= "number"
-                        or bottomOffset ~= bottomOffset then
-                        bottomOffset = -(root.Size.Y / 2)
-                end
-
-                bottomOffset = math.clamp(bottomOffset, -40, 5)
-
-                local slotOffset
-
-                if MovementSettings.Noclip then
-                        slotOffset = 0
-                else
-                        slotOffset = math.clamp(
-                                head.Size.Y / 2 + 1 - bottomOffset,
-                                1,
-                                45
-                        )
-                end
-
-                local goal = headPosition
-                        + Vector3.new(0, slotOffset, 0)
-                        + lead
-
-                if goal.X ~= goal.X or goal.Y ~= goal.Y or goal.Z ~= goal.Z then
+                local goal = computeHoldGoal(root, head, responsiveness, velocity)
+                if not finiteVector(goal) then
                         return
                 end
 
@@ -3802,7 +3764,7 @@ do
                 -- far grab, bounded enough that a hard displacement
                 -- (a rider landing on the object) glides back to the
                 -- slot instead of rocketing through it.
-                local followSpeed = velocity and velocity.Magnitude or 0
+                local followSpeed = velocity.Magnitude
                 local wantedCap = math.clamp(
                         math.max(
                                 followSpeed * 2.5 + 60,
