@@ -2422,6 +2422,18 @@ local Passing = (function()
         if mode.kind then return bounded(velocity, Hands.MAX_SPEED[mode.kind]), bounded(spin, KickRules.Server.MaxSpin) end
         return KickRules.checkStrike(mode.family, velocity, spin)
     end
+    local function passSpeed(mode, paceScale)
+        local family = mode.family and Families[mode.family]
+        if not mode.kind and not family then return nil, "Unknown pass family" end
+        local maximum = if mode.kind then Hands.MAX_SPEED[mode.kind] else math.max(family.speed[2], family.shotSpeed and family.shotSpeed[2] or 0)
+            * KickRules.Server.SpeedSlack * KickRules.KickButton.FullPower
+        if not finite(maximum) or maximum <= 0 or not finite(paceScale) or paceScale <= 0
+            or not finite(mode.pace) or mode.pace <= 0 then
+            return nil, "Invalid pass speed"
+        end
+        return math.min(mode.pace * paceScale, maximum), maximum
+    end
+
     local function solveDuration(scene, receiver, mode, space, pace, maximum, timeScale)
         local initialDistance = flat(receiver.pos - scene.from).Magnitude
         if initialDistance < 4 then return nil, "Receiver is too close" end
@@ -2447,13 +2459,13 @@ local Passing = (function()
         local velocity = delta / duration
         if mode.ground then velocity = flat(velocity) + Vector3.new(0, if mode.kind == "roll" then Hands.ROLL_DOWN else 0, 0)
         else velocity += Vector3.new(0, scene.params.gravity * duration * 0.5, 0) end
-        if not mode.ground and velocity.Magnitude > maximum * 1.12 then return nil, "Launch exceeds available speed" end
         local spin
         local best, bestError = nil, math.huge
         for _ = 1, 6 do
+            velocity = bounded(velocity, maximum)
             spin = if mode.ground then Flight.rollingSpin(velocity) else Flight.spinFrom(unit(flat(velocity)), mode.curve or 0, 0)
             velocity, spin = accepted(mode, velocity, spin)
-            if not velocity then return nil end
+            if not velocity or not spin then break end
             local endpoint = simulate(scene, from, velocity, spin, duration, false)
             local errorVector = point - endpoint.pos
             local error = errorVector.Magnitude
@@ -2470,18 +2482,12 @@ local Passing = (function()
         return {receiver = receiver, mode = mode, space = space, from = from, velocity = best.vel,
             spin = best.spin, time = duration, windup = windup, direction = direction,
             point = point, rows = rows, error = bestError, arrivalVelocity = endpoint.vel,
-            timeScale = timeScale}
+            timeScale = timeScale, requestedPace = pace, maximumSpeed = maximum}
     end
 
     local function solve(scene, receiver, mode, space, paceScale)
-        local family = mode.family and Families[mode.family]
-        if not mode.kind and not family then return nil, "Unknown pass family" end
-        local maximum = if mode.kind then Hands.MAX_SPEED[mode.kind] else math.max(family.speed[2], family.shotSpeed and family.shotSpeed[2] or 0)
-            * KickRules.Server.SpeedSlack * KickRules.KickButton.FullPower
-        if not finite(maximum) or maximum <= 0 or not finite(paceScale) or paceScale <= 0 then
-            return nil, "Invalid pass speed"
-        end
-        local pace = math.min(mode.pace * paceScale, maximum * 0.84)
+        local pace, maximum = passSpeed(mode, paceScale)
+        if not pace then return nil, maximum end
         local plan, reason = solveDuration(scene, receiver, mode, space, pace, maximum, 1)
         if plan then return plan end
         if reason == "Receiver is too close" or reason == "Offside" then return nil, reason end
@@ -2503,11 +2509,16 @@ local Passing = (function()
     local function coarseSolve(scene, receiver, mode, space, paceScale)
         if scene.held or paceScale ~= 1 or math.abs(scene.from.Y - scene.world.groundY) > 0.2
             or cacheKey ~= physicsKey(scene.params) then return solve(scene, receiver, mode, space, paceScale) end
-        local duration = math.max(flat(receiver.pos - scene.from).Magnitude / mode.pace, mode.minimum or 0.18)
+        local pace, maximum = passSpeed(mode, paceScale)
+        if not pace then return nil, maximum end
+        local function travelTime(distance)
+            return math.clamp(distance / pace, mode.minimum or 0.18, 5)
+        end
+        local duration = travelTime(flat(receiver.pos - scene.from).Magnitude)
         local point
         for _ = 1, 3 do
             point = predict(receiver, duration) + scene.attack * space
-            duration = math.max(flat(point - scene.from).Magnitude / mode.pace, mode.minimum or 0.18)
+            duration = travelTime(flat(point - scene.from).Magnitude)
         end
         point = predict(receiver, duration) + scene.attack * space
         point = Vector3.new(point.X, scene.world.groundY + (if mode.ground then 0 else 1.2), point.Z)
@@ -2534,10 +2545,18 @@ local Passing = (function()
         for _, row in ipairs(template.rows) do
             table.insert(rows, {t = row.t * timeScale, p = position(row.p), v = velocity(row.v)})
         end
+        local launchVelocity = velocity(template.velocity)
+        local launchSpin = basis:VectorToWorldSpace(template.spin)
+        local checkedVelocity, checkedSpin = accepted(mode, launchVelocity, launchSpin)
         local arrivalVelocity = velocity(template.arrivalVelocity)
-        if not Rules.takeable(arrivalVelocity, receiver.vel) then return nil end
+        if launchVelocity.Magnitude > maximum or not checkedVelocity or not checkedSpin
+            or (checkedVelocity - launchVelocity).Magnitude > 0.001
+            or (checkedSpin - launchSpin).Magnitude > 0.001
+            or not Rules.takeable(arrivalVelocity, receiver.vel) then
+            return solve(scene, receiver, mode, space, paceScale)
+        end
         return {receiver = receiver, mode = mode, space = space, from = scene.from,
-            velocity = velocity(template.velocity), spin = basis:VectorToWorldSpace(template.spin),
+            velocity = checkedVelocity, spin = checkedSpin,
             time = duration, windup = 0, direction = direction, point = point, rows = rows,
             error = template.error * scale + 0.15, arrivalVelocity = arrivalVelocity, approximate = true}
     end
@@ -2685,7 +2704,9 @@ local Passing = (function()
             local record = {at = now(), pid = scene.pid, ball = scene.ball, ownId = scene.ownId,
                 receiverId = plan.receiver.id, receiver = plan.receiver.player.DisplayName, receiverModel = plan.receiver.model,
                 style = plan.mode.name, point = plan.point, margin = plan.margin, score = plan.score,
-                time = plan.time, windup = plan.windup, requestedVelocity = plan.velocity, state = "Sent"}
+                time = plan.time, windup = plan.windup, requestedVelocity = plan.velocity,
+                requestedPace = plan.requestedPace, maximumSpeed = plan.maximumSpeed,
+                launchSpeed = plan.velocity.Magnitude, state = "Sent"}
             M.active = record
             push(record)
             M.status = "Passing to " .. record.receiver .. " | " .. record.style
