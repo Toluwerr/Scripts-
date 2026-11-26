@@ -2434,7 +2434,13 @@ local Passing = (function()
         return math.min(mode.pace * paceScale, maximum), maximum
     end
 
-    local function solveDuration(scene, receiver, mode, space, pace, maximum, timeScale)
+    local function receivingHeight(scene, mode, offset)
+        if mode.ground then return scene.world.groundY end
+        local limit = math.max(0, Rules.Pickup.MaxHeight - 0.15)
+        return scene.world.groundY + math.clamp(offset or 1.2, 0, limit)
+    end
+
+    local function solveDuration(scene, receiver, mode, space, pace, maximum, timeScale, heightOffset)
         local initialDistance = flat(receiver.pos - scene.from).Magnitude
         if initialDistance < 4 then return nil, "Receiver is too close" end
         local minimum = mode.minimum or 0.18
@@ -2442,7 +2448,7 @@ local Passing = (function()
             return math.clamp(distance / pace * timeScale, minimum, 5)
         end
         local duration = travelTime(initialDistance)
-        local receiveHeight = scene.floor + scene.params.radius + (if mode.ground then 0 else 1.2)
+        local receiveHeight = receivingHeight(scene, mode, heightOffset)
         local point, from, windup, direction
         for _ = 1, 2 do
             point = predict(receiver, duration + (windup or 0)) + scene.attack * space
@@ -2482,7 +2488,8 @@ local Passing = (function()
         return {receiver = receiver, mode = mode, space = space, from = from, velocity = best.vel,
             spin = best.spin, time = duration, windup = windup, direction = direction,
             point = point, rows = rows, error = bestError, arrivalVelocity = endpoint.vel,
-            timeScale = timeScale, requestedPace = pace, maximumSpeed = maximum}
+            timeScale = timeScale, heightOffset = receiveHeight - scene.world.groundY,
+            requestedPace = pace, maximumSpeed = maximum}
     end
 
     local function solve(scene, receiver, mode, space, paceScale)
@@ -2496,6 +2503,20 @@ local Passing = (function()
         for _, factor in ipairs(factors) do
             local candidate = solveDuration(scene, receiver, mode, space, pace, maximum, factor)
             if candidate then return candidate end
+        end
+        if not mode.ground then
+            local distance = flat(receiver.pos - scene.from).Magnitude
+            local gravity = scene.params.gravity
+            local factor = 1
+            if finite(gravity) and gravity > 0 and distance > 0 then
+                local efficientTime = math.sqrt(2 * distance / gravity)
+                factor = math.clamp(efficientTime / (distance / pace), 0.45, 1.6)
+            end
+            local high = math.min(2.4, math.max(0, Rules.Pickup.MaxHeight - 0.15))
+            for _, height in ipairs({0.35, high}) do
+                local candidate = solveDuration(scene, receiver, mode, space, pace, maximum, factor, height)
+                if candidate then return candidate end
+            end
         end
         return nil, reason
     end
@@ -2521,15 +2542,20 @@ local Passing = (function()
             duration = travelTime(flat(point - scene.from).Magnitude)
         end
         point = predict(receiver, duration) + scene.attack * space
-        point = Vector3.new(point.X, scene.world.groundY + (if mode.ground then 0 else 1.2), point.Z)
+        point = Vector3.new(point.X, receivingHeight(scene, mode), point.Z)
         local delta = flat(point - scene.from)
         local distance = delta.Magnitude
         local bucket = math.max(8, math.floor(distance / 8 + 0.5) * 8)
         local template = trajectoryCache[mode.name .. ":" .. bucket]
         if template == nil then return solve(scene, receiver, mode, space, paceScale) end
-        if template == false or template.timeScale ~= 1 then return solve(scene, receiver, mode, space, paceScale) end
+        if template == false or template.timeScale ~= 1
+            or math.abs((template.heightOffset or 0) - (point.Y - scene.world.groundY)) > 0.001 then
+            return solve(scene, receiver, mode, space, paceScale)
+        end
         if distance < 4 or not inPitch(point, scene.bounds, 2) or not onside(scene, receiver, 0) then return nil end
-        if reachTime(receiver, point, Rules.Pickup.CushionReach, 0.14) > duration then return nil end
+        if reachTime(receiver, point, Rules.Pickup.CushionReach, 0.14) > duration then
+            return solve(scene, receiver, mode, space, paceScale)
+        end
         local scale = distance / bucket
         local timeScale = duration / template.time
         local direction = unit(delta)
@@ -2558,7 +2584,8 @@ local Passing = (function()
         return {receiver = receiver, mode = mode, space = space, from = scene.from,
             velocity = checkedVelocity, spin = checkedSpin,
             time = duration, windup = 0, direction = direction, point = point, rows = rows,
-            error = template.error * scale + 0.15, arrivalVelocity = arrivalVelocity, approximate = true}
+            error = template.error * scale + 0.15, arrivalVelocity = arrivalVelocity, approximate = true,
+            requestedPace = pace, maximumSpeed = maximum}
     end
     M.coarseSolve = coarseSolve
     task.spawn(function()
@@ -2628,7 +2655,7 @@ local Passing = (function()
     M.assess = assess
     function M.plan(scene, options)
         options = options or {}
-        local ranked = {}
+        local ranked, rejected = {}, {}
         local sliceAt = os.clock()
         for _, receiver in ipairs(scene.teammates) do
             if options.receiverId and receiver.id ~= options.receiverId then continue end
@@ -2636,11 +2663,20 @@ local Passing = (function()
                 if options.type and options.type ~= "Automatic" and options.type ~= mode.name
                     and not (options.type == "Curved" and mode.curve) then continue end
                 for _, space in ipairs({0, 5}) do
-                    local plan = if options.exact then solve(scene, receiver, mode, space, options.paceScale or 1)
-                        else coarseSolve(scene, receiver, mode, space, options.paceScale or 1)
+                    local plan, reason
+                    if options.exact then
+                        plan, reason = solve(scene, receiver, mode, space, options.paceScale or 1)
+                    else
+                        plan, reason = coarseSolve(scene, receiver, mode, space, options.paceScale or 1)
+                    end
                     if plan then
                         plan = assess(scene, plan, options.look)
-                        if plan then table.insert(ranked, plan) end
+                        if plan then table.insert(ranked, plan) else reason = "Trajectory leaves pitch" end
+                    end
+                    if not plan then
+                        local label = if type(reason) == "table" then reason.reason else reason
+                        label = label or "No valid trajectory"
+                        rejected[label] = (rejected[label] or 0) + 1
                     end
                     if options.yield and os.clock() - sliceAt > 0.003 then
                         options.yield()
@@ -2651,6 +2687,7 @@ local Passing = (function()
             end
         end
         table.sort(ranked, function(a, b) return a.score > b.score end)
+        M.rejected = rejected
         return ranked[1], ranked
     end
     local function minimumMargin()
@@ -2772,7 +2809,11 @@ local Passing = (function()
         if not scene then M.status = reason; M.choice = nil; return false end
         if fromRestart and (not scene.restart or scene.restart.kind ~= "GoalKick" or scene.restart.taker ~= player.UserId) then return false end
         local receiver = if fromRestart then nil else M.lookTarget(scene)
-        if not fromRestart and not receiver then M.status = "Look at a teammate"; return false end
+        if not fromRestart and not receiver then
+            M.status = "Look at a teammate"
+            notify("Pass unavailable", M.status)
+            return false
+        end
         local receiverId = receiver and receiver.id
         if scene.held and M.heldPid ~= scene.pid then M.heldPid, M.heldSince = scene.pid, now() end
         if M.active and M.active.pid == scene.pid then return false end
@@ -2787,6 +2828,10 @@ local Passing = (function()
                 options.receiverId = receiverId
                 options.look = if fromRestart then nil else unit(flat(workspace.CurrentCamera.CFrame.LookVector))
                 local _, ranked = M.plan(scene, options)
+                if #ranked == 0 and not fromRestart and stillOwn(scene) then
+                    options.exact = true
+                    _, ranked = M.plan(scene, options)
+                end
                 M.planMs = (os.clock() - began) * 1000
                 if not stillOwn(scene) then return end
                 local fresh = M.snapshot(true)
@@ -2813,8 +2858,22 @@ local Passing = (function()
                     if choice then choice = assess(finalScene, choice, options.look) end
                 end
                 M.ranked, M.choice = ranked, choice
-                if M.safe(choice) or (choice and scene.held and now() - M.heldSince > Hands.HOLD_MAX - 1.25) then release(finalScene, choice)
-                else M.status = if #fresh.teammates == 0 then "No teammate available" else "Waiting for an opening" end
+                local manual = not fromRestart and cfg.passDecision ~= "Safe"
+                if choice and (manual or M.safe(choice) or (scene.held and now() - M.heldSince > Hands.HOLD_MAX - 1.25)) then
+                    if not release(finalScene, choice) then
+                        M.status = "Ball changed before release"
+                        if not fromRestart then notify("Pass unavailable", M.status) end
+                    end
+                else
+                    M.status = if choice then "Passing lane blocked" elseif #fresh.teammates == 0 then "No teammate available" else "No valid trajectory"
+                    if not choice and M.rejected then
+                        local count = 0
+                        for reason, total in pairs(M.rejected) do
+                            if total > count then M.status, count = reason, total end
+                        end
+                    end
+                    if not fromRestart then notify("Pass unavailable", M.status) end
+                end
             end)
             M.planning = false
             if not ok then M.error = tostring(err); M.status = "Could not plan a pass" end
