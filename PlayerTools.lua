@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "1.6"
+local VERSION = "1.7"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -107,8 +107,9 @@ local FlingSettings = {
         PartCooldowns = setmetatable({}, {__mode = "k"}),
         NextPartScan = 0,
         DensitySaved = setmetatable({}, { __mode = "k" }),
-        LastTouchAt = 0,
+        BurstStartedAt = 0,
         CooldownUntil = 0,
+        Generation = 0,
         AntiFling = false,
         AntiFlingConnections = {},
         StripStates = setmetatable({}, { __mode = "k" }),
@@ -352,13 +353,16 @@ do
                                 changed = true
                         end
                 end
-                if not changed then return end
-                Global.__PlayerToolsPreferences = snapshot
-                Preferences.lastSaved = snapshot
-                if type(writefile) == "function" then
-                        pcall(function()
-                                writefile(Preferences.path, http:JSONEncode(snapshot))
+                if changed then
+                        Global.__PlayerToolsPreferences = snapshot
+                        Preferences.lastSaved = snapshot
+                        Preferences.diskPending = true
+                end
+                if Preferences.diskPending and type(writefile) == "function" then
+                        local ok = pcall(function()
+                                writefile(Preferences.path, http:JSONEncode(Preferences.lastSaved))
                         end)
+                        if ok then Preferences.diskPending = false end
                 end
         end
 end
@@ -2900,7 +2904,7 @@ local function applyFlingCharacterSetup(character)
                 if part:IsA("BasePart") then
                         if FlingSettings.DensitySaved[part] == nil then
                                 FlingSettings.DensitySaved[part] = {
-                                        physics = part.CustomPhysicalProperties or false,
+                                        physics = part.CustomPhysicalProperties,
                                         canCollide = part.CanCollide
                                 }
                         end
@@ -3036,6 +3040,9 @@ end
 
 local function stopFling()
         FlingSettings.Enabled = false
+        FlingSettings.Generation += 1
+        FlingSettings.BurstStartedAt = 0
+        FlingSettings.CooldownUntil = 0
         FlingSettings.NextPartScan = 0
         table.clear(FlingSettings.PartCooldowns)
         disconnect(FlingSettings.RespawnConnection)
@@ -3048,13 +3055,8 @@ local function stopFling()
         destroyFlingMover()
 
         for part, saved in pairs(FlingSettings.DensitySaved) do
-                if part and part.Parent then
-                        pcall(function()
-                                part.CustomPhysicalProperties =
-                                        saved.physics == false and nil or saved.physics
-                                part.CanCollide = saved.canCollide
-                        end)
-                end
+                pcall(function() part.CustomPhysicalProperties = saved.physics end)
+                pcall(function() part.CanCollide = saved.canCollide end)
         end
 
         table.clear(FlingSettings.DensitySaved)
@@ -3073,19 +3075,19 @@ end
 local function startFling()
         stopFling()
         FlingSettings.Enabled = true
-        FlingSettings.LastTouchAt = 0
-        FlingSettings.CooldownUntil = 0
+        local generation = FlingSettings.Generation
         applyFlingCharacterSetup(LocalPlayer.Character)
 
         FlingSettings.RespawnConnection = LocalPlayer.CharacterAdded:Connect(
                 function(character)
-                        if not FlingSettings.Enabled then
+                        if not running or not FlingSettings.Enabled or FlingSettings.Generation ~= generation then
                                 return
                         end
 
                         local root = character:WaitForChild("HumanoidRootPart", 10)
 
-                        if root and root.Parent then
+                        if running and FlingSettings.Enabled and FlingSettings.Generation == generation
+                                and LocalPlayer.Character == character and root and root.Parent == character then
                                 applyFlingCharacterSetup(character)
                         end
                 end
@@ -3104,6 +3106,12 @@ local function startFling()
                 for _, part in ipairs(character:GetDescendants()) do
                         if part:IsA("BasePart") and part.CanCollide then
                                 pcall(function()
+                                        if FlingSettings.DensitySaved[part] == nil then
+                                                FlingSettings.DensitySaved[part] = {
+                                                        physics = part.CustomPhysicalProperties,
+                                                        canCollide = part.CanCollide
+                                                }
+                                        end
                                         part.CanCollide = false
                                 end)
                         end
@@ -3131,19 +3139,16 @@ local function startFling()
                 local touching = findFlingTouch(root)
                 pcall(flingNearbyParts, root, now)
 
-                if touching then
-                        FlingSettings.LastTouchAt = now
-                end
-
-                if touching and now >= (FlingSettings.CooldownUntil or 0) then
-                        if not FlingSettings.Mover then
-                                createFlingMover(root)
+                if FlingSettings.Mover then
+                        if FlingSettings.Mover.Parent ~= root or not touching
+                                or now - FlingSettings.BurstStartedAt >= FLING_BURST_CAP then
+                                destroyFlingMover()
+                                FlingSettings.BurstStartedAt = 0
+                                FlingSettings.CooldownUntil = now + FLING_COOLDOWN
                         end
-                elseif FlingSettings.Mover
-                        and (not touching
-                                or now - (FlingSettings.LastTouchAt or 0) >= FLING_BURST_CAP) then
-                        destroyFlingMover()
-                        FlingSettings.CooldownUntil = now + FLING_COOLDOWN
+                elseif touching and now >= FlingSettings.CooldownUntil then
+                        createFlingMover(root)
+                        FlingSettings.BurstStartedAt = now
                 end
         end
         )
@@ -3490,16 +3495,14 @@ function PhysicsRig.restoreParts(record)
                 saved.refs -= 1
                 if record.lightened then
                         saved.physicsRefs -= 1
-                        if saved.physicsRefs == 0 and part.Parent then
+                        if saved.physicsRefs == 0 then
                                 pcall(function() part.CustomPhysicalProperties = saved.physics end)
                                 saved.physics = nil
                         end
                 end
                 if saved.refs <= 0 then
                         PhysicsRig.partStates[part] = nil
-                        if part.Parent then
-                                pcall(function() part.CanCollide = saved.canCollide end)
-                        end
+                        pcall(function() part.CanCollide = saved.canCollide end)
                 end
         end
         table.clear(record.parts)
