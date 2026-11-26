@@ -224,21 +224,49 @@ local function possessionId()
     local b = Ball.getBall()
     return b and b:GetAttribute("PossessionId")
 end
-local function mouth()
+local function mouth(ball)
     local lines = Contacts.goalLines()
     local char = player.Character
     if not lines or not char then return nil end
     local area = module(gameModules, "KeeperRules").area(char:GetAttribute("Team"))
-    if not area then return nil end
+    if not area or (area.side ~= -1 and area.side ~= 1) then return nil end
     local out = -area.side
+    local line = lines[if out == 1 then 2 else 1]
+    if not finite(line) then return nil end
+
+    local radius = if ball then ball.Size.X * 0.5 else 0.84
+    local ok, params = pcall(function()
+        return module(gameModules.BallSim, "World").params()
+    end)
+    if ok and params and finite(params.radius) and params.radius > 0 then
+        radius = params.radius
+    end
+
+    local boundsOk, bounds = pcall(function()
+        return module(gameModules, "PitchBounds").get()
+    end)
+    if boundsOk and bounds and type(bounds.goals) == "table" then
+        for _, goal in ipairs(bounds.goals) do
+            if goal.side == out and typeof(goal.lo) == "Vector3" and typeof(goal.hi) == "Vector3"
+                and finite(goal.lo.Y) and finite(goal.hi.Y) and finite(goal.lo.Z) and finite(goal.hi.Z)
+                and goal.hi.Y > goal.lo.Y and goal.hi.Z > goal.lo.Z then
+                return {
+                    x = line, z = (goal.lo.Z + goal.hi.Z) * 0.5,
+                    out = out, width = (goal.hi.Z - goal.lo.Z) * 0.5,
+                    ground = goal.lo.Y, top = goal.hi.Y, radius = radius,
+                }
+            end
+        end
+    end
+
     for _, frame in ipairs(Tags:GetTagged("SoccerGoalFrame")) do
         if frame:IsA("BasePart") and frame:IsDescendantOf(workspace) and (frame.Position.X - area.centre.X) * out > 0 then
             local scale = frame.Size.Y / 9.142857142857142
             local ground = frame.Position.Y - frame.Size.Y / 2
             return {
-                x = if out == 1 then lines[2] else lines[1], z = frame.Position.Z,
+                x = line, z = frame.Position.Z,
                 out = out, width = 13.071428571428571 * scale,
-                ground = ground, top = ground + 8.714285714285714 * scale,
+                ground = ground, top = ground + 8.714285714285714 * scale, radius = radius,
             }
         end
     end
@@ -284,10 +312,14 @@ local function opponents(includeAllies)
 end
 local function targetFor(goal, from, configuration)
     local options = configuration or cfg
-    local radius = 0.84
-    local side = goal.width - radius - 1.25
+    local radius = goal.radius or 0.84
+    local side = math.max(0, goal.width - radius - 1.25)
     local top = goal.top - radius - 1.1
     local low = goal.ground + radius + 1.15
+    if low > top then
+        low = (goal.ground + goal.top) * 0.5
+        top = low
+    end
     local function point(left, high)
         return Vector3.new(goal.x, if high then top else low, goal.z + (if left then -1 else 1) * goal.out * side)
     end
@@ -335,8 +367,11 @@ local function goalPassage(simulation, goal, radius)
     local upperZ = goal.z + goal.width - radius - 0.4
     local lowerY = goal.ground + radius - 0.12
     local upperY = goal.top - radius - 0.4
+    if lowerZ > upperZ or lowerY > upperY or not simulation.pos[1] then
+        return nil, "Invalid goal passage"
+    end
     local firstDepth = (simulation.pos[1].X - goal.x) * goal.out
-    if firstDepth > radius then return nil, "Ball is already behind the goal line" end
+    if firstDepth >= radius then return nil, "Ball is already behind the goal line" end
     local entered = firstDepth >= -radius
     local minZ, maxZ, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
     local function include(point)
@@ -378,7 +413,7 @@ end
 
 local function makeShotPlanner(Flight, budget)
     local function fitShot(sample, target, goal, family, speed, side, back, attempts)
-        local radius = sample.ball.Size.X * 0.5
+        local radius = goal.radius or sample.ball.Size.X * 0.5
         local params = Flight.params(sample.ball)
         local groundY = Ball.groundBallY()
         local aim = target
@@ -437,8 +472,11 @@ local function makeShotPlanner(Flight, budget)
     local previewChoice
     local function calculate(sample, preview, configuration)
         local options = configuration or cfg
-        local goal = mouth()
+        local goal = mouth(sample.ball)
         if not goal then return nil, "No opponent goal is loaded" end
+        if goal.width <= goal.radius + 0.4 or goal.top - goal.ground <= 2 * goal.radius + 0.5 then
+            return nil, "Goal opening is too small for the ball"
+        end
         local target, ranked = targetFor(goal, sample.from, options)
         local points = ranked or {target}
         if not preview and options.corner == "Auto" then
@@ -649,7 +687,7 @@ local function beginKickMotion(sample, plan)
     if direction.Magnitude < 0.01 then direction = r.CFrame.LookVector * Vector3.new(1, 0, 1) end
     direction = direction.Unit
     local leg = if r.CFrame:PointToObjectSpace(contact).X < -0.4 then 1 else 2
-    local ground = Ball.groundBallY(contact) - 0.84
+    local ground = Ball.groundBallY(contact) - (plan.goal.radius or 0.84)
     local _, plant, plantYaw = KickPlan.spots(contact, direction, leg, family, ground, 1, r.CFrame.LookVector)
     env.__PoopSoccerKickId = (env.__PoopSoccerKickId or 1000000) + 1
     local id = env.__PoopSoccerKickId
@@ -1317,11 +1355,13 @@ local Visual = (function()
         return target + (delta + term * time) * decay, (velocity - term * (frequency * time)) * decay
     end
     function V.goalCrossing(previous, current, bounds, lines, radius)
+        if not lines then return nil end
         local earliest, point
         for _, goal in ipairs(bounds and bounds.goals or {}) do
             local side = goal.side
+            if side ~= -1 and side ~= 1 then continue end
             local line = lines[if side == -1 then 1 else 2]
-            if (side ~= -1 and side ~= 1) or not finite(line) then continue end
+            if not finite(line) then continue end
             local a, b = (previous.X - line) * side, (current.X - line) * side
             if a < radius and b >= radius then
                 local fraction = (radius - a) / (b - a)
