@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "0.8"
+local VERSION = "0.9"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -5395,6 +5395,38 @@ do
                 updateShakeStatus(text .. suffix)
         end
 
+        local function scanShakeRoots(center)
+                local releaseRadius = SHAKE_RADIUS + RELEASE_SLACK
+                local releaseLimit = releaseRadius * releaseRadius
+                local claimLimit = SHAKE_RADIUS * SHAKE_RADIUS
+
+                for root in pairs(claimedRoots) do
+                        if not root.Parent or root.Anchored or root.AssemblyRootPart ~= root then
+                                releaseShakeRoot(root)
+                        else
+                                local offset = root.Position - center
+                                if offset:Dot(offset) > releaseLimit or not isShakableRoot(root) then
+                                        releaseShakeRoot(root)
+                                end
+                        end
+                end
+
+                local seen = {}
+                local found = Workspace:GetPartBoundsInRadius(center, SHAKE_RADIUS, overlapParams)
+                for _, part in ipairs(found) do
+                        local root = part.Parent and part.AssemblyRootPart
+                        if root and not seen[root] then
+                                seen[root] = true
+                                if root.Parent and not root.Anchored and not claimedRoots[root] then
+                                        local offset = root.Position - center
+                                        if offset:Dot(offset) <= claimLimit and isShakableRoot(root) then
+                                                claimShakeRoot(root)
+                                        end
+                                end
+                        end
+                end
+        end
+
         local function updateObjectShaker(deltaTime)
                 if not running or not ShakerSettings.Enabled then
                         return
@@ -5410,7 +5442,11 @@ do
                 end
 
                 local now = os.clock()
-                local dt = math.clamp(tonumber(deltaTime) or 1 / 60, 0.001, 0.25)
+                local dt = tonumber(deltaTime)
+                if not dt or dt ~= dt or dt <= 0 or dt == math.huge then
+                        dt = 1 / 60
+                end
+                dt = math.min(dt, 0.25)
 
                 frameTick += 1
 
@@ -5426,47 +5462,7 @@ do
                 if now >= (ShakerSettings.NextScanAt or 0) then
                         ShakerSettings.NextScanAt = now + SCAN_INTERVAL
 
-                        -- Release pass first: anything destroyed or flung
-                        -- beyond the storm's edge is let go mid-flight.
-                        local limit = (SHAKE_RADIUS + RELEASE_SLACK)
-                                * (SHAKE_RADIUS + RELEASE_SLACK)
-
-                        for root in pairs(claimedRoots) do
-                                if not root.Parent then
-                                        releaseShakeRoot(root)
-                                else
-                                        local offset = root.Position - center
-
-                                        if offset:Dot(offset) > limit then
-                                                releaseShakeRoot(root)
-                                        end
-                                end
-                        end
-
-                        -- Claim pass: one spatial query over the bubble
-                        -- with a real MaxParts budget (the v40 default
-                        -- silently truncated the storm), mapped onto
-                        -- assembly roots so welded structures arrive as
-                        -- one piece each.
-                        local found = Workspace:GetPartBoundsInRadius(
-                                center,
-                                SHAKE_RADIUS,
-                                overlapParams
-                        )
-
-                        for _, part in ipairs(found) do
-                                local root = part.AssemblyRootPart
-
-                                if root
-                                        and not claimedRoots[root]
-                                        and isShakableRoot(root) then
-                                        local offset = root.Position - center
-
-                                        if offset:Dot(offset) <= SHAKE_RADIUS * SHAKE_RADIUS then
-                                                claimShakeRoot(root)
-                                        end
-                                end
-                        end
+                        scanShakeRoots(center)
 
                         updateShakeStatusCounts()
                 end
@@ -5499,7 +5495,7 @@ do
                                                 + math.random() * (WHIP_MAX_SECS - WHIP_MIN_SECS)
                                 end
 
-                                rec.spinPhase += rec.spinSpeed * dt
+                                rec.spinPhase = (rec.spinPhase + rec.spinSpeed * dt) % (2 * math.pi)
 
                                 local spin = CFrame.fromAxisAngle(rec.spinAxis, rec.spinPhase)
                                 local anchor = center + spin:VectorToWorldSpace(rec.startOffset)
