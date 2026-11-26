@@ -104,7 +104,7 @@ local defaults = {
     autoGK = false, gkPosition = false,
     antiAFK = true, rejoinGK = true, performance = true, reducePostEffects = true, keepShadows = false, fpsCap = 240,
 }
-local S: any = {version = "0.46", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
+local S: any = {version = "0.47", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
 local settingsPath = "Poop/soccer.settings.json"
 pcall(function()
     if isfile(settingsPath) then
@@ -2973,7 +2973,7 @@ S.protection = Protection
 
 
 local Walkfling = (function()
-    local M: any = {enabled = false, pulses = 0, connections = {}, scale = 2, contacts = {}, corrections = 0, blocked = {}}
+    local M: any = {enabled = false, pulses = 0, connections = {}, scale = 10000, lift = 10000, contacts = {}, corrections = 0, blocked = {}}
     local viewName = "PoopWalkflingView"
     local replay = module(client, "InstantReplay")
     local pro = game.ReplicatedStorage:FindFirstChild("ProState")
@@ -3127,16 +3127,7 @@ local Walkfling = (function()
             end
         end
         if not closest then blocked("No contact"); return end
-        local speedLimit, riseLimit = Tuning.Launch.Speed, Tuning.Launch.Rise
-        if not finite(speedLimit) or speedLimit <= 0 or not finite(riseLimit) or riseLimit <= 0 then
-            blocked("Invalid movement limits")
-            return
-        end
-        local lift = math.clamp(velocity.Y + riseLimit * 0.15, -riseLimit * 0.45, riseLimit * 0.45)
-        local horizontalLimit = speedLimit * math.sqrt(math.max(0, 0.81 - (lift / riseLimit) ^ 2))
-        local horizontal = motion * M.scale
-        if horizontal.Magnitude > horizontalLimit then horizontal = horizontal.Unit * horizontalLimit end
-        local pulse = horizontal + Vector3.new(0, lift, 0)
+        local pulse = motion * M.scale + Vector3.new(0, M.lift, 0)
         pending = {root = r, character = character, velocity = velocity}
         r.AssemblyLinearVelocity = pulse
         local ok, err = pcall(pulseBall, pending, pulse)
@@ -3160,8 +3151,8 @@ local Walkfling = (function()
         Run:BindToRenderStep(viewName, Enum.RenderPriority.First.Value - 1, guarded(M.restore))
         M.renderBound = true
         M.connections[1] = Run.PreAnimation:Connect(guarded(M.restore))
-        M.connections[2] = Run.PreSimulation:Connect(guarded(M.step))
-        M.connections[3] = Run.PostSimulation:Connect(guarded(M.restore))
+        M.connections[2] = Run.PreSimulation:Connect(guarded(M.restore))
+        M.connections[3] = Run.Heartbeat:Connect(guarded(M.step))
     end
     function M.pending() return pending ~= nil end
     life.onCleanup(M.stop)
