@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "0.6"
+local VERSION = "0.7"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -4620,16 +4620,20 @@ do
                         walkStack[#walkStack] = nil
                         processed += 1
 
+                        if not instance.Parent or instance == pullFolder then
+                                continue
+                        end
+
                         if instance:IsA("BasePart") then
                                 local root = instance.AssemblyRootPart
 
                                 if root and not walkSeen[root] then
                                         walkSeen[root] = true
 
-                                        if isPullableRoot(root) then
+                                        if not claimedRoots[root] and root.Parent and not root.Anchored then
                                                 local offset = root.Position - center
-
-                                                if offset:Dot(offset) <= SCAN_RADIUS * SCAN_RADIUS then
+                                                if offset:Dot(offset) <= SCAN_RADIUS * SCAN_RADIUS
+                                                        and isPullableRoot(root) then
                                                         claimPullRoot(root)
                                                 end
                                         end
@@ -4652,12 +4656,11 @@ do
                 local limit = (SCAN_RADIUS + 100) * (SCAN_RADIUS + 100)
 
                 for root in pairs(claimedRoots) do
-                        if not root.Parent then
+                        if not root.Parent or root.Anchored or root.AssemblyRootPart ~= root then
                                 releasePullRoot(root)
                         else
                                 local offset = root.Position - center
-
-                                if offset:Dot(offset) > limit then
+                                if offset:Dot(offset) > limit or not isPullableRoot(root) then
                                         releasePullRoot(root)
                                 end
                         end
@@ -4778,7 +4781,11 @@ do
 
                                 if gap == gap and gap > 0.01 then
                                         local ringPos = center - toPlayer.Unit * keep
-                                        rec.target.CFrame = CFrame.new(ringPos) * rec.rotation
+                                        local current = rec.target.Position
+                                        local shift = ringPos - current
+                                        if shift:Dot(shift) > 0.0001 then
+                                                rec.target.CFrame = CFrame.new(ringPos) * rec.rotation
+                                        end
                                 end
 
                                 if poke then
