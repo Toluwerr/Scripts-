@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "0.9"
+local VERSION = "1.0"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -3262,6 +3262,92 @@ local function setAntiFlingEnabled(value)
         end
 end
 
+local PhysicsRig = {}
+
+function PhysicsRig.destroy(rig)
+        if not rig then return end
+        for _, key in ipairs({"align", "orient", "attachment", "targetAttachment", "target"}) do
+                local object = rig[key]
+                rig[key] = nil
+                if object then
+                        pcall(function() object:Destroy() end)
+                end
+        end
+end
+
+function PhysicsRig.create(rig, root, options)
+        local targetAttachment
+        if options.folder then
+                local target = Instance.new("Part")
+                rig.target = target
+                target.Name = options.targetName
+                target.Size = Vector3.new(0.2, 0.2, 0.2)
+                target.Transparency = 1
+                target.Anchored = true
+                target.CanCollide = false
+                target.CanTouch = false
+                target.CanQuery = false
+                target.CastShadow = false
+                target.CFrame = root.CFrame
+                target.Parent = options.folder
+
+                targetAttachment = Instance.new("Attachment")
+                rig.targetAttachment = targetAttachment
+                targetAttachment.Parent = target
+        end
+
+        local attachment = Instance.new("Attachment")
+        rig.attachment = attachment
+        if options.attachmentName then attachment.Name = options.attachmentName end
+        attachment.Parent = root
+
+        local align = Instance.new("AlignPosition")
+        rig.align = align
+        if options.positionName then align.Name = options.positionName end
+        align.Mode = if targetAttachment then Enum.PositionAlignmentMode.TwoAttachment
+                else Enum.PositionAlignmentMode.OneAttachment
+        align.Attachment0 = attachment
+        if targetAttachment then align.Attachment1 = targetAttachment
+        else align.Position = root.Position end
+        align.MaxForce = math.huge
+        align.MaxVelocity = options.maxVelocity
+        align.Responsiveness = options.positionResponsiveness
+        align.ApplyAtCenterOfMass = true
+        align.RigidityEnabled = false
+        align.Parent = root
+
+        local orient = Instance.new("AlignOrientation")
+        rig.orient = orient
+        if options.orientationName then orient.Name = options.orientationName end
+        orient.Mode = if targetAttachment then Enum.OrientationAlignmentMode.TwoAttachment
+                else Enum.OrientationAlignmentMode.OneAttachment
+        orient.Attachment0 = attachment
+        if targetAttachment then orient.Attachment1 = targetAttachment
+        else orient.CFrame = options.holdCFrame end
+        orient.MaxTorque = math.huge
+        if options.maxAngularVelocity then orient.MaxAngularVelocity = options.maxAngularVelocity end
+        orient.Responsiveness = options.orientationResponsiveness
+        orient.RigidityEnabled = false
+        orient.Parent = root
+end
+
+function PhysicsRig.valid(rig, root)
+        if not rig or not rig.align or rig.align.Parent ~= root
+                or not rig.orient or rig.orient.Parent ~= root
+                or not rig.attachment or rig.attachment.Parent ~= root
+                or rig.align.Attachment0 ~= rig.attachment
+                or rig.orient.Attachment0 ~= rig.attachment then
+                return false
+        end
+        if rig.target then
+                return rig.target.Parent ~= nil and rig.targetAttachment ~= nil
+                        and rig.targetAttachment.Parent == rig.target
+                        and rig.align.Attachment1 == rig.targetAttachment
+                        and rig.orient.Attachment1 == rig.targetAttachment
+        end
+        return true
+end
+
 do
         -- ============================================================
         -- Object Hover: real-physics hold built on AlignPosition and
@@ -3554,57 +3640,19 @@ do
                 return CFrame.lookAt(Vector3.zero, horizontal.Unit)
         end
 
-        local function destroyRig(rig)
-                if not rig then return end
-                for _, key in ipairs({"AlignPosition", "AlignOrientation", "Attachment"}) do
-                        local object = rig[key]
-                        if object then
-                                pcall(function()
-                                        object:Destroy()
-                                end)
-                        end
-                end
-        end
-
         local function buildHoldRig(root, holdCFrame)
                 local rig = {}
-                local ok, err = pcall(function()
-                        local attachment = Instance.new("Attachment")
-                        rig.Attachment = attachment
-                        attachment.Name = "__PlayerToolsHoldAttachment"
-                        attachment.Parent = root
-
-                        local alignPosition = Instance.new("AlignPosition")
-                        rig.AlignPosition = alignPosition
-                        alignPosition.Name = "__PlayerToolsHoldPosition"
-                        alignPosition.Mode = Enum.PositionAlignmentMode.OneAttachment
-                        alignPosition.Attachment0 = attachment
-                        alignPosition.ApplyAtCenterOfMass = true
-                        alignPosition.MaxForce = math.huge
-                        alignPosition.MaxVelocity = 200
-                        alignPosition.Responsiveness = math.clamp(
-                                tonumber(ObjectHoldSettings.Responsiveness) or 35,
-                                5,
-                                100
-                        )
-                        alignPosition.RigidityEnabled = false
-                        alignPosition.Position = root.Position
-                        alignPosition.Parent = root
-
-                        local alignOrientation = Instance.new("AlignOrientation")
-                        rig.AlignOrientation = alignOrientation
-                        alignOrientation.Name = "__PlayerToolsHoldOrientation"
-                        alignOrientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
-                        alignOrientation.Attachment0 = attachment
-                        alignOrientation.MaxTorque = math.huge
-                        alignOrientation.Responsiveness = 25
-                        alignOrientation.RigidityEnabled = false
-                        alignOrientation.CFrame = holdCFrame
-                        alignOrientation.Parent = root
-                end)
-
+                local ok, err = pcall(PhysicsRig.create, rig, root, {
+                        attachmentName = "__PlayerToolsHoldAttachment",
+                        positionName = "__PlayerToolsHoldPosition",
+                        orientationName = "__PlayerToolsHoldOrientation",
+                        maxVelocity = 200,
+                        positionResponsiveness = math.clamp(tonumber(ObjectHoldSettings.Responsiveness) or 35, 5, 100),
+                        orientationResponsiveness = 25,
+                        holdCFrame = holdCFrame
+                })
                 if not ok then
-                        destroyRig(rig)
+                        PhysicsRig.destroy(rig)
                         return nil, err
                 end
                 return rig
@@ -3613,7 +3661,7 @@ do
         local function destroyHoldRig()
                 local rig = ObjectHoldSettings.Rig
                 ObjectHoldSettings.Rig = nil
-                destroyRig(rig)
+                PhysicsRig.destroy(rig)
         end
 
         local function releaseObject(message)
@@ -3783,18 +3831,13 @@ do
 
                 local rig = ObjectHoldSettings.Rig
 
-                if not rig
-                        or not rig.AlignPosition or rig.AlignPosition.Parent ~= root
-                        or not rig.AlignOrientation or rig.AlignOrientation.Parent ~= root
-                        or not rig.Attachment or rig.Attachment.Parent ~= root
-                        or rig.AlignPosition.Attachment0 ~= rig.Attachment
-                        or rig.AlignOrientation.Attachment0 ~= rig.Attachment then
+                if not PhysicsRig.valid(rig, root) then
                         releaseObject("Hold rig lost")
                         return
                 end
 
                 local velocity = updateFollowVelocity(head.Position, stepTime)
-                local responsiveness = rig.AlignPosition.Responsiveness
+                local responsiveness = rig.align.Responsiveness
                 if not finiteNumber(responsiveness) or responsiveness <= 0 then
                         releaseObject("Invalid hold responsiveness")
                         return
@@ -3809,7 +3852,7 @@ do
                 -- constraint chases. Force, solver, replication - the
                 -- engine does the rest.
                 local ok = pcall(function()
-                        rig.AlignPosition.Position = goal
+                        rig.align.Position = goal
                 end)
 
                 if not ok then
@@ -3843,11 +3886,11 @@ do
                 )
 
                 if math.abs(
-                        (tonumber(rig.AlignPosition.MaxVelocity) or 0)
+                        (tonumber(rig.align.MaxVelocity) or 0)
                                 - wantedCap
                 ) >= 2 then
                         pcall(function()
-                                rig.AlignPosition.MaxVelocity = wantedCap
+                                rig.align.MaxVelocity = wantedCap
                         end)
                 end
 
@@ -4356,12 +4399,7 @@ do
                 if not rec then return end
                 claimedRoots[root] = nil
 
-                for _, key in ipairs({"align", "orient", "attachment", "target"}) do
-                        local object = rec[key]
-                        if object then
-                                pcall(function() object:Destroy() end)
-                        end
-                end
+                PhysicsRig.destroy(rec)
 
                 for _, part in ipairs(rec.parts) do
                         local saved = claimedParts[part]
@@ -4451,58 +4489,14 @@ do
                                 end
                         end
 
-                        -- The puppet: an invisible anchored target the assembly
-                        -- is strung to with unlimited-force aligns. Moving the
-                        -- target IS the pull - the engine's constraint solver
-                        -- does the acceleration, braking and gravity fighting on
-                        -- every physics substep, and on an assembly we do not
-                        -- simulate the constraints simply do nothing, so nothing
-                        -- ever fakes.
-                        local target = Instance.new("Part")
-                        rec.target = target
-                        target.Name = "PullTarget"
-                        target.Size = Vector3.new(0.2, 0.2, 0.2)
-                        target.Transparency = 1
-                        target.Anchored = true
-                        target.CanCollide = false
-                        target.CanTouch = false
-                        target.CanQuery = false
-                        target.CastShadow = false
-                        target.CFrame = root.CFrame
-                        target.Parent = pullFolder
-
-                        local targetAttachment = Instance.new("Attachment")
-                        targetAttachment.Parent = target
-
-                        local attachment = Instance.new("Attachment")
-                        rec.attachment = attachment
-                        attachment.Parent = root
-
-                        local align = Instance.new("AlignPosition")
-                        rec.align = align
-                        -- Singular "TwoAttachment" - the live API enum is
-                        -- PositionAlignmentMode.TwoAttachment, and the plural
-                        -- spelling would nil-index and kill every claim.
-                        align.Mode = Enum.PositionAlignmentMode.TwoAttachment
-                        align.Attachment0 = attachment
-                        align.Attachment1 = targetAttachment
-                        align.MaxForce = math.huge
-                        align.MaxVelocity = ALIGN_MAX_VELOCITY
-                        align.Responsiveness = ALIGN_RESPONSIVENESS
-                        align.ApplyAtCenterOfMass = true
-                        align.RigidityEnabled = false
-                        align.Parent = root
-
-                        local orient = Instance.new("AlignOrientation")
-                        rec.orient = orient
-                        orient.Mode = Enum.OrientationAlignmentMode.TwoAttachment
-                        orient.Attachment0 = attachment
-                        orient.Attachment1 = targetAttachment
-                        orient.MaxTorque = math.huge
-                        orient.MaxAngularVelocity = math.huge
-                        orient.Responsiveness = ALIGN_RESPONSIVENESS
-                        orient.RigidityEnabled = false
-                        orient.Parent = root
+                        PhysicsRig.create(rec, root, {
+                                folder = pullFolder,
+                                targetName = "PullTarget",
+                                maxVelocity = ALIGN_MAX_VELOCITY,
+                                positionResponsiveness = ALIGN_RESPONSIVENESS,
+                                orientationResponsiveness = ALIGN_RESPONSIVENESS,
+                                maxAngularVelocity = math.huge
+                        })
 
                 end)
 
@@ -4770,10 +4764,7 @@ do
                         if not root.Parent then
                                 releasePullRoot(root)
                         elseif root.Anchored or root.AssemblyRootPart ~= root
-                                or not rec.target.Parent
-                                or rec.align.Parent ~= root
-                                or rec.orient.Parent ~= root
-                                or rec.attachment.Parent ~= root then
+                                or not rec.target or not PhysicsRig.valid(rec, root) then
                                 releasePullRoot(root)
                         else
                                 local toPlayer = center - root.Position
@@ -5127,12 +5118,7 @@ do
                 if not rec then return end
                 claimedRoots[root] = nil
 
-                for _, key in ipairs({"align", "orient", "attachment", "target"}) do
-                        local object = rec[key]
-                        if object then
-                                pcall(function() object:Destroy() end)
-                        end
-                end
+                PhysicsRig.destroy(rec)
 
                 for _, part in ipairs(rec.parts) do
                         local saved = claimedParts[part]
@@ -5210,57 +5196,14 @@ do
                                 end
                         end
 
-                        -- The puppet, same pattern as the pull: an invisible
-                        -- anchored whip target the assembly is strung to with
-                        -- unlimited-force aligns. The target orbits the player
-                        -- and is re-thrown onto a brand new orbit every whip;
-                        -- moving it IS the storm - the engine's constraint
-                        -- solver does the acceleration, gravity fighting and
-                        -- tumbling on every physics substep, and on an assembly
-                        -- we do not simulate the constraints simply do nothing,
-                        -- so nothing ever fakes.
-                        local target = Instance.new("Part")
-                        rec.target = target
-                        target.Name = "__ObjectShakerTarget"
-                        target.Size = Vector3.new(0.2, 0.2, 0.2)
-                        target.Transparency = 1
-                        target.Anchored = true
-                        target.CanCollide = false
-                        target.CanTouch = false
-                        target.CanQuery = false
-                        target.CastShadow = false
-                        target.CFrame = root.CFrame
-                        target.Parent = shakerFolder
-
-                        local targetAttachment = Instance.new("Attachment")
-                        targetAttachment.Parent = target
-
-                        local attachment = Instance.new("Attachment")
-                        rec.attachment = attachment
-                        attachment.Parent = root
-
-                        local align = Instance.new("AlignPosition")
-                        rec.align = align
-                        align.Mode = Enum.PositionAlignmentMode.TwoAttachment
-                        align.Attachment0 = attachment
-                        align.Attachment1 = targetAttachment
-                        align.MaxForce = math.huge
-                        align.MaxVelocity = ALIGN_MAX_VELOCITY
-                        align.Responsiveness = ALIGN_RESPONSIVENESS
-                        align.ApplyAtCenterOfMass = true
-                        align.RigidityEnabled = false
-                        align.Parent = root
-
-                        local orient = Instance.new("AlignOrientation")
-                        rec.orient = orient
-                        orient.Mode = Enum.OrientationAlignmentMode.TwoAttachment
-                        orient.Attachment0 = attachment
-                        orient.Attachment1 = targetAttachment
-                        orient.MaxTorque = math.huge
-                        orient.MaxAngularVelocity = ORIENT_MAX_ANGULAR
-                        orient.Responsiveness = ALIGN_RESPONSIVENESS
-                        orient.RigidityEnabled = false
-                        orient.Parent = root
+                        PhysicsRig.create(rec, root, {
+                                folder = shakerFolder,
+                                targetName = "__ObjectShakerTarget",
+                                maxVelocity = ALIGN_MAX_VELOCITY,
+                                positionResponsiveness = ALIGN_RESPONSIVENESS,
+                                orientationResponsiveness = ALIGN_RESPONSIVENESS,
+                                maxAngularVelocity = ORIENT_MAX_ANGULAR
+                        })
 
                         rec.spinAxis = randomUnit()
                         rec.spinPhase = math.random() * math.pi * 2
@@ -5478,10 +5421,7 @@ do
                         if not root.Parent then
                                 releaseShakeRoot(root)
                         elseif root.Anchored or root.AssemblyRootPart ~= root
-                                or not rec.target.Parent
-                                or rec.align.Parent ~= root
-                                or rec.orient.Parent ~= root
-                                or rec.attachment.Parent ~= root then
+                                or not rec.target or not PhysicsRig.valid(rec, root) then
                                 releaseShakeRoot(root)
                         else
                                 if now >= (rec.nextWhipAt or 0) then
@@ -5951,9 +5891,9 @@ ObjectHoverSection:Slider({
 
                 local rig = ObjectHoldSettings.Rig
 
-                if rig and rig.AlignPosition then
+                if rig and rig.align then
                         pcall(function()
-                                rig.AlignPosition.Responsiveness = math.clamp(
+                                rig.align.Responsiveness = math.clamp(
                                         tonumber(value) or 35,
                                         5,
                                         100
