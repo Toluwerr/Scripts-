@@ -2973,9 +2973,10 @@ S.protection = Protection
 
 
 local Walkfling = (function()
-    local M: any = {enabled = false, pulses = 0, connections = {}, scale = 10000, lift = 10000, contacts = {}, corrections = 0, blocked = {}}
+    local M: any = {enabled = false, pulses = 0, connections = {}, scale = 2, contacts = {}, corrections = 0, blocked = {}}
     local viewName = "PoopWalkflingView"
     local replay = module(client, "InstantReplay")
+    local pro = game.ReplicatedStorage:FindFirstChild("ProState")
     local pending
     local function ownsBall(ball, character, pid)
         local ownId = character:GetAttribute("DribbleId")
@@ -3008,7 +3009,7 @@ local Walkfling = (function()
             local ok, err = pcall(function() ball.part.AssemblyLinearVelocity = ball.velocity end)
             if not ok then M.ballError = tostring(err) end
         end
-        if saved.root.Parent == saved.character then
+        if saved.root.Parent == saved.character and not saved.root.Anchored and isnetworkowner(saved.root) then
             saved.root.AssemblyLinearVelocity = saved.velocity
             return saved.root, saved.velocity
         end
@@ -3080,8 +3081,16 @@ local Walkfling = (function()
         if not M.enabled or not life.alive() then return end
         local at = os.clock()
         if os.clock() >= (M.nextContacts or 0) or player.Character ~= M.contactCharacter then M.syncContacts() end
-        if replay.playing() then blocked("Replay"); return end
-        if S.busy or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then blocked("Input"); return end
+        if replay.playing() or (pro and pro:GetAttribute("Phase") ~= "Play") then
+            M.previous = nil
+            blocked("Not playing")
+            return
+        end
+        if S.busy or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then
+            M.previous = nil
+            blocked("Input")
+            return
+        end
         local character = player.Character
         local r = character and character:FindFirstChild("Root")
         if not r or not r:IsA("BasePart") or character:GetAttribute("BodyState") ~= "Animated"
@@ -3093,6 +3102,13 @@ local Walkfling = (function()
             and (r.Position - previous.position).Magnitude > math.max(16, velocity.Magnitude * (at - previous.at) * 3 + 3) then
             M.corrections += 1
             M.lastCorrection = {from = previous.position, to = r.Position, at = at}
+            M.stop()
+            cfg.walkfling = false
+            if S.controls.walkfling then S.controls.walkfling:Set(false, false) end
+            save()
+            blocked("Position corrected")
+            notify("Walkfling", "Disabled after an unexpected position correction.")
+            return
         end
         if at < (M.pauseUntil or 0) then blocked("Jump"); return end
         local motion = velocity * Vector3.new(1, 0, 1)
@@ -3111,7 +3127,16 @@ local Walkfling = (function()
             end
         end
         if not closest then blocked("No contact"); return end
-        local pulse = motion * M.scale + Vector3.new(0, M.lift, 0)
+        local speedLimit, riseLimit = Tuning.Launch.Speed, Tuning.Launch.Rise
+        if not finite(speedLimit) or speedLimit <= 0 or not finite(riseLimit) or riseLimit <= 0 then
+            blocked("Invalid movement limits")
+            return
+        end
+        local lift = math.clamp(velocity.Y + riseLimit * 0.15, -riseLimit * 0.45, riseLimit * 0.45)
+        local horizontalLimit = speedLimit * math.sqrt(math.max(0, 0.81 - (lift / riseLimit) ^ 2))
+        local horizontal = motion * M.scale
+        if horizontal.Magnitude > horizontalLimit then horizontal = horizontal.Unit * horizontalLimit end
+        local pulse = horizontal + Vector3.new(0, lift, 0)
         pending = {root = r, character = character, velocity = velocity}
         r.AssemblyLinearVelocity = pulse
         local ok, err = pcall(pulseBall, pending, pulse)
@@ -3135,8 +3160,8 @@ local Walkfling = (function()
         Run:BindToRenderStep(viewName, Enum.RenderPriority.First.Value - 1, guarded(M.restore))
         M.renderBound = true
         M.connections[1] = Run.PreAnimation:Connect(guarded(M.restore))
-        M.connections[2] = Run.PreSimulation:Connect(guarded(M.restore))
-        M.connections[3] = Run.Heartbeat:Connect(guarded(M.step))
+        M.connections[2] = Run.PreSimulation:Connect(guarded(M.step))
+        M.connections[3] = Run.PostSimulation:Connect(guarded(M.restore))
     end
     function M.pending() return pending ~= nil end
     life.onCleanup(M.stop)
