@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "1.7"
+local VERSION = "1.8"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -4400,9 +4400,6 @@ do
         local POKE_INTERVAL = 3
         local ALIGN_RESPONSIVENESS = 200
         local ALIGN_MAX_VELOCITY = 800
-        local FAR_PULL_VELOCITY = 1200
-        local FAR_PULL_ENTER = 150
-        local FAR_PULL_EXIT = 100
         local ANTI_SLEEP = Vector3.new(0.5, 0.5, 0.5)
         local MAX_DIMENSION = 120
         local DEFAULT_KEEP = 7
@@ -4759,30 +4756,19 @@ do
                                 local toPlayer = center - root.Position
                                 local gap = toPlayer.Magnitude
 
-                                if gap == gap and gap < math.huge and gap > 0.01 then
+                                if gap == gap and gap > 0.01 then
                                         local ringPos = center - toPlayer.Unit * keep
-                                        local errorDistance = math.abs(gap - keep)
-                                        local fast = errorDistance > FAR_PULL_ENTER
-                                                or (rec.fastPull == true and errorDistance > FAR_PULL_EXIT)
-                                        if fast ~= (rec.fastPull == true) then
-                                                rec.align.MaxVelocity = if fast then FAR_PULL_VELOCITY else ALIGN_MAX_VELOCITY
-                                                rec.fastPull = fast
-                                        end
-
-                                        local shift = ringPos - rec.target.Position
+                                        local current = rec.target.Position
+                                        local shift = ringPos - current
                                         if shift:Dot(shift) > 0.0001 then
                                                 rec.target.CFrame = CFrame.new(ringPos) * rec.rotation
                                         end
+                                end
 
-                                        -- Wake settled assemblies without interrupting their approach.
-                                        if poke and errorDistance <= 2 then
-                                                local velocity = root.AssemblyLinearVelocity
-                                                if velocity:Dot(velocity) < 1 then
-                                                        pcall(function()
-                                                                root.AssemblyLinearVelocity = ANTI_SLEEP
-                                                        end)
-                                                end
-                                        end
+                                if poke then
+                                        pcall(function()
+                                                root.AssemblyLinearVelocity = ANTI_SLEEP
+                                        end)
                                 end
                         end
                 end
