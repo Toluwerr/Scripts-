@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "1.2"
+local VERSION = "1.3"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -3262,6 +3262,17 @@ local function setAntiFlingEnabled(value)
         end
 end
 
+local function makeStatusUpdater(feature, state, fallback)
+        return function(text)
+                local message = tostring(text or fallback)
+                if state.LastStatus == message then return end
+                state.LastStatus = message
+                if type(feature.OnStatusChanged) == "function" then
+                        pcall(feature.OnStatusChanged, message)
+                end
+        end
+end
+
 local Environment = {
         records = setmetatable({}, {__mode = "k"}),
         sleepUsers = {},
@@ -3338,6 +3349,13 @@ function Environment.release(owner)
                         Environment.sleepOriginal = nil
                 end
         end
+end
+
+function Environment.boostActive()
+        local ok, radius = Environment.read(LocalPlayer, "SimulationRadius", true)
+        if ok and type(radius) == "number" and radius >= 1e6 then return true end
+        local readable, maximum = Environment.read(LocalPlayer, "MaximumSimulationRadius", false)
+        return readable and type(maximum) == "number" and maximum >= 1e6
 end
 
 local PhysicsRig = {
@@ -3505,47 +3523,9 @@ function PhysicsRig.valid(rig, root)
 end
 
 do
-        -- ============================================================
-        -- Object Hover: real-physics hold built on AlignPosition and
-        -- AlignOrientation mover constraints - the modern successors
-        -- to the deprecated BodyPosition/BodyGyro movers.
-        --
-        -- How it works: grabbing an assembly attaches a small local
-        -- rig to its root part - one Attachment, one AlignPosition in
-        -- OneAttachment mode chasing a goal position above the head,
-        -- and one AlignOrientation holding the object level. The
-        -- constraints apply continuous force and the physics solver
-        -- integrates it: nothing is teleported, no velocity is
-        -- snapped, no CFrame is ever written. The object collides
-        -- with the world, supports riders (MaxForce is unlimited, so
-        -- added weight simply produces added counter-force), snags
-        -- and slides against geometry like real matter, and keeps
-        -- its momentum as a genuine toss on release.
-        --
-        -- Replication: per the official Network Ownership docs, the
-        -- engine automatically hands simulation of unanchored parts
-        -- near a player's character to that player's client, and a
-        -- client-owned assembly's simulated physics replicates to
-        -- the server and every other player. The slot floats right
-        -- above the holder's head, so ownership - and therefore
-        -- replication - is the steady state. A server-owned grab
-        -- from far away simply becomes client-owned as the object
-        -- approaches, and the hold continues seamlessly.
-        -- ============================================================
+        -- Object Hover: direct position and orientation constraints.
 
-        local function updateHoldStatus(text)
-                local message = tostring(text or "Object Hover off")
-
-                if ObjectHoldSettings.LastStatus == message then
-                        return
-                end
-
-                ObjectHoldSettings.LastStatus = message
-
-                if type(ObjectHold.OnStatusChanged) == "function" then
-                        pcall(ObjectHold.OnStatusChanged, message)
-                end
-        end
+        local updateHoldStatus = makeStatusUpdater(ObjectHold, ObjectHoldSettings, "Object Hover off")
 
         local function hasHoldBlockedAncestor(instance)
                 local current = instance
@@ -4312,40 +4292,7 @@ do
         end
 end
 
--- ============================================================
--- Object Pull: rebuilt from five working sources - the Project
--- Gravity engine (the NDS blackhole script), Bring Loose Parts
--- (open source), the classic telekinesis holds, the tornado
--- windfields, and the devforum thread that documented the
--- client side ownership check.
---
--- Claiming stays the simulation radius war: our own radius is
--- re-asserted every single frame and everyone else's gets
--- pinned to zero twice a second, so debris all over the island
--- arbitrates to our client and what we do to it becomes real
--- replicated physics. The movement itself is now the puppet
--- pattern the working bring-parts scripts use: each claimed
--- assembly gets a tiny invisible anchored target part plus an
--- AlignPosition and AlignOrientation with unlimited force, and
--- the pull just moves the target. The engine's own constraint
--- solver then accelerates, brakes, fights gravity and holds the
--- ring on every physics substep - which per-frame velocity
--- writes (the old version) can never do, and why the old ring
--- bobbed and sagged. A constraint on an assembly we do not
--- simulate does nothing at all, so there is no fake client-only
--- dragging either. Anchored parts are no longer touched at all:
--- an anchored part is server-static, no client can ever move it
--- for real, so the old seizure was client-side theatre. Only
--- genuinely unanchored assemblies are claimed, and ReceiveAge -
--- zero means the assembly is genuinely ours, the
--- devforum-verified check - reports how much of the swarm is
--- really held. The old radius query
--- silently truncated at 8192 parts and missed most of a busy
--- NDS island, so a throttled full-workspace walk now claims
--- everything, and debris that appears mid-disaster is picked up
--- by the next pass. Small velocity pokes keep assemblies from
--- dozing off mid-flight.
--- ============================================================
+-- Object Pull: bounded assembly discovery and target tracking.
 do
         local ENV_INTERVAL = 0.5
         local SCAN_RADIUS = 1000
@@ -4378,19 +4325,7 @@ do
         local walkSeen = setmetatable({}, { __mode = "k" })
         local frameTick = 0
 
-        local function updatePullStatus(text)
-                local message = tostring(text or "Object Pull off")
-
-                if ObjectPullSettings.LastStatus == message then
-                        return
-                end
-
-                ObjectPullSettings.LastStatus = message
-
-                if type(ObjectPull.OnStatusChanged) == "function" then
-                        pcall(ObjectPull.OnStatusChanged, message)
-                end
-        end
+        local updatePullStatus = makeStatusUpdater(ObjectPull, ObjectPullSettings, "Object Pull off")
 
         local function getKeepDistance()
                 return math.clamp(
@@ -4400,23 +4335,16 @@ do
                 )
         end
 
-        local function pullSimBoostActive()
-                local ok, radius = Environment.read(LocalPlayer, "SimulationRadius", true)
-                if ok and type(radius) == "number" and radius >= 1e6 then return true end
-                local readable, maximum = Environment.read(LocalPlayer, "MaximumSimulationRadius", false)
-                return readable and type(maximum) == "number" and maximum >= 1e6
-        end
-
         local function assertSelfBoost()
                 Environment.remember(ObjectPull, LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
                 Environment.remember(ObjectPull, LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
                 Environment.remember(ObjectPull, LocalPlayer, "NetworkIsSleeping", false, true)
         end
 
-        local function applyPullEnvironment(rootPart)
+        local function applyPullEnvironment()
                 assertSelfBoost()
                 Environment.keepAwake(ObjectPull)
-                ObjectPullSettings.SimBoost = pullSimBoostActive()
+                ObjectPullSettings.SimBoost = Environment.boostActive()
         end
 
         local function restorePullEnvironment()
@@ -4681,7 +4609,7 @@ do
 
                 if now >= (ObjectPullSettings.NextEnvAt or 0) then
                         ObjectPullSettings.NextEnvAt = now + ENV_INTERVAL
-                        applyPullEnvironment(rootPart)
+                        applyPullEnvironment()
 
                         -- Between passes only: the moment a pass is due,
                         -- let the walk start and speak through its own
@@ -4811,7 +4739,7 @@ do
                         and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 
                 if rootPart and rootPart.Parent then
-                        applyPullEnvironment(rootPart)
+                        applyPullEnvironment()
                 end
 
                 ObjectPullSettings.NextPassAt = 0
@@ -4833,33 +4761,7 @@ do
         end
 end
 
--- ============================================================
--- Object Shaker v2: the Fun tab storm engine, rebuilt on the
--- puppet actuation the pull uses. The v40 velocity writes
--- re-randomized every Heartbeat produced a random walk that
--- barely moved anywhere, and on assemblies we do not simulate
--- they were local writes the server instantly corrected -
--- that is where most of the jitter came from. The v40 anchored
--- seizure is gone entirely: an anchored part is server-static,
--- no client can ever move it for real, so shaking it was pure
--- client-side theatre. Only genuinely unanchored assemblies
--- are claimed now, and each gets an invisible anchored whip
--- target strung to it with unlimited-force AlignPosition and
--- AlignOrientation, exactly like the pull's puppet. The target
--- orbits the player on a random axis at 5-13 rad/s on a 10-26
--- stud shell, and every quarter second or so the whole orbit
--- is re-thrown onto a completely new axis, radius, speed and
--- orientation - so every part is perpetually either whipping
--- around the player or tearing across the shell at the 800
--- studs/s solver cap, tumbling the entire time. Joints are
--- never touched: assemblies keep their welds and hinges and
--- flail as connected pieces. The shell tracks the player every
--- frame, so the whole storm travels with you. Claimed parts go
--- non-collidable while shaken so the storm cannot smash the
--- player running it; collision is restored exactly on release.
--- Constraints no-op on assemblies we do not simulate, so
--- nothing can ever fake. No sliders on purpose.
--- ============================================================
+-- Object Shaker: rotating target motion for nearby assemblies.
 do
         local ENV_INTERVAL = 0.5
         local SHAKE_RADIUS = 100
@@ -4897,19 +4799,7 @@ do
         local overlapParams = OverlapParams.new()
         overlapParams.MaxParts = 100000
 
-        local function updateShakeStatus(text)
-                local message = tostring(text or "Object Shaker off")
-
-                if ShakerSettings.LastStatus == message then
-                        return
-                end
-
-                ShakerSettings.LastStatus = message
-
-                if type(Shaker.OnStatusChanged) == "function" then
-                        pcall(Shaker.OnStatusChanged, message)
-                end
-        end
+        local updateShakeStatus = makeStatusUpdater(Shaker, ShakerSettings, "Object Shaker off")
 
         local function randomUnit()
                 local vector = Vector3.new(
@@ -4948,23 +4838,16 @@ do
                 )
         end
 
-        local function shakeSimBoostActive()
-                local ok, radius = Environment.read(LocalPlayer, "SimulationRadius", true)
-                if ok and type(radius) == "number" and radius >= 1e6 then return true end
-                local readable, maximum = Environment.read(LocalPlayer, "MaximumSimulationRadius", false)
-                return readable and type(maximum) == "number" and maximum >= 1e6
-        end
-
         local function assertSelfBoost()
                 Environment.remember(Shaker, LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
                 Environment.remember(Shaker, LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
                 Environment.remember(Shaker, LocalPlayer, "NetworkIsSleeping", false, true)
         end
 
-        local function applyShakeEnvironment(rootPart)
+        local function applyShakeEnvironment()
                 assertSelfBoost()
                 Environment.keepAwake(Shaker)
-                ShakerSettings.SimBoost = shakeSimBoostActive()
+                ShakerSettings.SimBoost = Environment.boostActive()
         end
 
         local function restoreShakeEnvironment()
@@ -5198,7 +5081,7 @@ do
 
                 if now >= (ShakerSettings.NextEnvAt or 0) then
                         ShakerSettings.NextEnvAt = now + ENV_INTERVAL
-                        applyShakeEnvironment(rootPart)
+                        applyShakeEnvironment()
                 end
 
                 local center = rootPart.Position
@@ -5310,7 +5193,7 @@ do
                         and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 
                 if rootPart and rootPart.Parent then
-                        applyShakeEnvironment(rootPart)
+                        applyShakeEnvironment()
                 end
 
                 if not shakerFolder then
