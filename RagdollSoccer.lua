@@ -372,117 +372,125 @@ local function goalPassage(simulation, goal, radius)
     return nil, "Shot does not fully cross the goal line"
 end
 
-local function fitShot(sample, target, goal, family, speed, side, back, attempts)
-    local radius = sample.ball.Size.X * 0.5
-    local params = Flight.params(sample.ball)
-    local groundY = Ball.groundBallY()
-    local aim = target
-    for _ = 1, attempts or 3 do
-        local velocity, spin, flightTime, miss = Flight.solve(sample.from, aim, speed, side, back, params, groundY, math.rad(70))
-        if not finite(flightTime) or not finite(miss) or miss > 1.1 then return nil end
-        local acceptedVelocity, acceptedSpin = KickRules.checkStrike(family, velocity, spin)
-        if not acceptedVelocity or not acceptedSpin then return nil end
-        velocity, spin = acceptedVelocity, acceptedSpin
-        local simulation = Flight.simulate(sample.from, velocity, spin, 0, params, groundY, math.min(flightTime + 1, 10))
-        local passage = goalPassage(simulation, goal, radius)
-        if not passage then return nil end
-        if passage.valid then
-            return {
-                target = aim, family = family, velocity = velocity, spin = spin,
-                flightTime = passage.time, miss = miss, sample = sample, passage = passage,
-                simulation = simulation, side = side, back = back, speed = speed, goal = goal,
-            }
-        end
-        local nextAim = Vector3.new(goal.x,
-            math.clamp(aim.Y + passage.shiftY * 1.12, goal.ground + radius + 0.2, goal.top - radius - 0.3),
-            math.clamp(aim.Z + passage.shiftZ * 1.12, goal.z - goal.width + radius + 0.3, goal.z + goal.width - radius - 0.3))
-        if (nextAim - aim).Magnitude < 0.01 then return nil end
-        aim = nextAim
-    end
-    return nil
-end
-
-local function clearanceScore(plan, bodies)
-    local closest, interception = 35, 0.8
-    local reachTime = S.passingEngine and S.passingEngine.reachTime
-    local stride = math.max(1, math.floor(plan.simulation.n / 28))
-    for i = 1, plan.simulation.n, stride do
-        local time = (i - 1) * Flight.STEP
-        if time > plan.flightTime then break end
-        local point = plan.simulation.pos[i]
-        for _, body in ipairs(bodies) do
-            local predicted = body.root.Position + body.root.AssemblyLinearVelocity * math.min(time, 0.3)
-            local keeper = body.model:GetAttribute("Role") == "Goalkeeper"
-            local bodyY = math.clamp(point.Y, predicted.Y - 2.8, predicted.Y + 3.1)
-            local radius = if keeper then 3.5 else 2.1
-            closest = math.min(closest, (point - Vector3.new(predicted.X, bodyY, predicted.Z)).Magnitude - radius)
-            if body.enemy and body.actor and reachTime then
-                local jump = if keeper and time > 0.35 then math.min((time - 0.35) * 12, 4) else 0
-                if point.Y <= body.actor.pos.Y + 3.1 + jump then
-                    local arrival = reachTime(body.actor, point, radius + 0.84, if body.actor.available then 0.14 else 0.65)
-                    interception = math.min(interception, arrival - time)
-                end
-            end
-        end
-    end
-    return interception * 20 + closest * 0.3 - plan.flightTime * 3 + math.min(plan.passage.margin, 2)
-end
-
-local previewChoice
 local function choiceKey(options)
     return table.concat({options.style, options.corner, options.curve, tostring(options.power), tostring(options.spin)}, ":")
 end
-local function calculate(sample, preview, configuration)
-    local options = configuration or cfg
-    local goal = mouth()
-    if not goal then return nil, "No opponent goal is loaded" end
-    local target, ranked = targetFor(goal, sample.from, options)
-    local points = ranked or {target}
-    if not preview and options.corner == "Auto" then
-        table.insert(points, Vector3.new(goal.x, (goal.ground + goal.top) / 2, goal.z))
-    end
-    local key = choiceKey(options)
-    local preferredSide
-    if preview then
-        local preferred = previewChoice and previewChoice.key == key and previewChoice.out == goal.out and previewChoice.target
-        points = {preferred or target}
-        if preferred then preferredSide = previewChoice.side end
-    end
-    local bodies = if preview then {} else opponents(true)
-    local best, bestScore
-    for _, point in ipairs(points) do
-        local family, speed, side, back = profile(options.style, sample.from, point, options)
-        if preferredSide ~= nil then side = preferredSide end
-        local directions = {side}
-        if not preview and options.curve == "Automatic" and side ~= 0 then table.insert(directions, -side) end
-        for _, chosenSide in ipairs(directions) do
-            local plan = fitShot(sample, point, goal, family, speed, chosenSide, back, if preview then 1 else 3)
-            if plan then
-                local score = clearanceScore(plan, bodies)
-                if not bestScore or score > bestScore then best, bestScore = plan, score end
+
+local function makeShotPlanner(Flight, budget)
+    local function fitShot(sample, target, goal, family, speed, side, back, attempts)
+        local radius = sample.ball.Size.X * 0.5
+        local params = Flight.params(sample.ball)
+        local groundY = Ball.groundBallY()
+        local aim = target
+        for _ = 1, attempts or 3 do
+            local velocity, spin, flightTime, miss = Flight.solve(sample.from, aim, speed, side, back, params, groundY, math.rad(70))
+            if not finite(flightTime) or not finite(miss) or miss > 1.1 then return nil end
+            local acceptedVelocity, acceptedSpin = KickRules.checkStrike(family, velocity, spin)
+            if not acceptedVelocity or not acceptedSpin then return nil end
+            velocity, spin = acceptedVelocity, acceptedSpin
+            local simulation = Flight.simulate(sample.from, velocity, spin, 0, params, groundY, math.min(flightTime + 1, 10))
+            local passage = goalPassage(simulation, goal, radius)
+            if not passage then return nil end
+            if passage.valid then
+                return {
+                    target = aim, family = family, velocity = velocity, spin = spin,
+                    flightTime = passage.time, miss = miss, sample = sample, passage = passage,
+                    simulation = simulation, side = side, back = back, speed = speed, goal = goal,
+                }
             end
+            local nextAim = Vector3.new(goal.x,
+                math.clamp(aim.Y + passage.shiftY * 1.12, goal.ground + radius + 0.2, goal.top - radius - 0.3),
+                math.clamp(aim.Z + passage.shiftZ * 1.12, goal.z - goal.width + radius + 0.3, goal.z + goal.width - radius - 0.3))
+            if (nextAim - aim).Magnitude < 0.01 then return nil end
+            aim = nextAim
         end
+        return nil
     end
 
-    if not preview and not best and options.curve == "Automatic" and (options.style == "Power" or options.style == "Laced" or options.style == "Knuckleball (low spin)") then
-        local amounts = if options.style == "Knuckleball (low spin)" then {8} else {12, 30}
-        for _, amount in ipairs(amounts) do
-            for _, point in ipairs(points) do
-                local family, speed, _, back = profile(options.style, sample.from, point, options)
-                for _, side in ipairs({amount, -amount}) do
-                    local plan = fitShot(sample, point, goal, family, speed, side, back)
-                    if plan then
-                        local score = clearanceScore(plan, bodies)
-                        if not bestScore or score > bestScore then best, bestScore = plan, score end
+    local function clearanceScore(plan, bodies)
+        local closest, interception = 35, 0.8
+        local reachTime = S.passingEngine and S.passingEngine.reachTime
+        local stride = math.max(1, math.floor(plan.simulation.n / 28))
+        for i = 1, plan.simulation.n, stride do
+            if budget then budget() end
+            local time = (i - 1) * Flight.STEP
+            if time > plan.flightTime then break end
+            local point = plan.simulation.pos[i]
+            for _, body in ipairs(bodies) do
+                local predicted = body.root.Position + body.root.AssemblyLinearVelocity * math.min(time, 0.3)
+                local keeper = body.model:GetAttribute("Role") == "Goalkeeper"
+                local bodyY = math.clamp(point.Y, predicted.Y - 2.8, predicted.Y + 3.1)
+                local radius = if keeper then 3.5 else 2.1
+                closest = math.min(closest, (point - Vector3.new(predicted.X, bodyY, predicted.Z)).Magnitude - radius)
+                if body.enemy and body.actor and reachTime then
+                    local jump = if keeper and time > 0.35 then math.min((time - 0.35) * 12, 4) else 0
+                    if point.Y <= body.actor.pos.Y + 3.1 + jump then
+                        local arrival = reachTime(body.actor, point, radius + 0.84, if body.actor.available then 0.14 else 0.65)
+                        interception = math.min(interception, arrival - time)
                     end
                 end
             end
-            if best then break end
         end
+        return interception * 20 + closest * 0.3 - plan.flightTime * 3 + math.min(plan.passage.margin, 2)
     end
-    if best and not preview and not configuration then previewChoice = {target = best.target, key = key, out = goal.out, side = best.side} end
-    return best, if best then nil else "No clear route through the goal at this power; move closer or change technique"
+
+    local previewChoice
+    local function calculate(sample, preview, configuration)
+        local options = configuration or cfg
+        local goal = mouth()
+        if not goal then return nil, "No opponent goal is loaded" end
+        local target, ranked = targetFor(goal, sample.from, options)
+        local points = ranked or {target}
+        if not preview and options.corner == "Auto" then
+            table.insert(points, Vector3.new(goal.x, (goal.ground + goal.top) / 2, goal.z))
+        end
+        local key = choiceKey(options)
+        local preferredSide
+        if preview then
+            local preferred = previewChoice and previewChoice.key == key and previewChoice.out == goal.out and previewChoice.target
+            points = {preferred or target}
+            if preferred then preferredSide = previewChoice.side end
+        end
+        local bodies = if preview then {} else opponents(true)
+        local best, bestScore
+        for _, point in ipairs(points) do
+            local family, speed, side, back = profile(options.style, sample.from, point, options)
+            if preferredSide ~= nil then side = preferredSide end
+            local directions = {side}
+            if not preview and options.curve == "Automatic" and side ~= 0 then table.insert(directions, -side) end
+            for _, chosenSide in ipairs(directions) do
+                local plan = fitShot(sample, point, goal, family, speed, chosenSide, back, if preview then 1 else 3)
+                if plan then
+                    local score = clearanceScore(plan, bodies)
+                    if not bestScore or score > bestScore then best, bestScore = plan, score end
+                end
+            end
+        end
+
+        if not preview and not best and options.curve == "Automatic" and (options.style == "Power" or options.style == "Laced" or options.style == "Knuckleball (low spin)") then
+            local amounts = if options.style == "Knuckleball (low spin)" then {8} else {12, 30}
+            for _, amount in ipairs(amounts) do
+                for _, point in ipairs(points) do
+                    local family, speed, _, back = profile(options.style, sample.from, point, options)
+                    for _, side in ipairs({amount, -amount}) do
+                        local plan = fitShot(sample, point, goal, family, speed, side, back)
+                        if plan then
+                            local score = clearanceScore(plan, bodies)
+                            if not bestScore or score > bestScore then best, bestScore = plan, score end
+                        end
+                    end
+                end
+                if best then break end
+            end
+        end
+        if best and not preview and not configuration then previewChoice = {target = best.target, key = key, out = goal.out, side = best.side} end
+        return best, if best then nil else "No clear route through the goal at this power; move closer or change technique"
+    end
+
+    return calculate, fitShot
 end
+
+local calculate, fitShot = makeShotPlanner(Flight)
 S.calculate = calculate
 S.goalPassage = goalPassage
 function S.planAt(position, options)
@@ -1557,225 +1565,7 @@ local Visual = (function()
     local function calculateVisual(sample, options, cancelled, synchronous)
         local Flight, budget = visualFlight(cancelled, synchronous)
         if not synchronous then V.planWorkMs = 0 end
-        local function opponents(includeAllies)
-            local char = player.Character
-            local team = char and char:GetAttribute("Team")
-            local result = {}
-            for _, model in ipairs(workspace:GetChildren()) do
-                if model:IsA("Model") and model ~= char then
-                    local otherRoot = model:FindFirstChild("Root")
-                    local otherTeam = model:GetAttribute("Team")
-                    if otherRoot and otherRoot:IsA("BasePart") and otherTeam and (includeAllies or otherTeam ~= team) then
-                        local engine = S.passingEngine
-                local actor = engine and engine.actor(model, Players:GetPlayerFromCharacter(model), now())
-                table.insert(result, {root = otherRoot, model = model, actor = actor, enemy = otherTeam ~= team})
-                    end
-                end
-            end
-            return result
-        end
-        local function targetFor(goal, from, configuration)
-            local options = configuration or cfg
-            local radius = 0.84
-            local side = goal.width - radius - 1.25
-            local top = goal.top - radius - 1.1
-            local low = goal.ground + radius + 1.15
-            local function point(left, high)
-                return Vector3.new(goal.x, if high then top else low, goal.z + (if left then -1 else 1) * goal.out * side)
-            end
-            if options.corner == "Top left" then return point(true, true) end
-            if options.corner == "Top right" then return point(false, true) end
-            if options.corner == "Low left" then return point(true, false) end
-            if options.corner == "Low right" then return point(false, false) end
-            if options.corner == "Centre" then return Vector3.new(goal.x, (top + low) / 2, goal.z) end
-            local enemies = opponents()
-            local ranked = {}
-            for _, candidate in ipairs({point(true, true), point(false, true), point(true, false), point(false, false)}) do
-                local score = if candidate.Y > (top + low) / 2 then 3 else 0
-                local closest = 80
-                for _, enemy in ipairs(enemies) do
-                    local predicted = enemy.root.Position + enemy.root.AssemblyLinearVelocity * 0.15
-                    local flatDistance = Vector2.new(predicted.X - candidate.X, predicted.Z - candidate.Z).Magnitude
-                    closest = math.min(closest, flatDistance)
-                end
-                score = score + closest - (candidate - from).Magnitude * 0.012
-                table.insert(ranked, {point = candidate, score = score})
-            end
-            table.sort(ranked, function(a, b) return a.score > b.score end)
-            local points = {}
-            for _, item in ipairs(ranked) do table.insert(points, item.point) end
-            return points[1], points
-        end
-        local function profile(style, from, target, configuration)
-            local options = configuration or cfg
-            local familyName = if style == "Curve" then "Finesse" elseif style == "Knuckleball (low spin)" then "Power" else style
-            local family = Families[familyName] or Families.Power
-            local side = 0
-            local back = family.back or 0
-            if style == "Finesse" or style == "Curve" or style == "Trivela" then
-                local direction = if options.curve == "Left" then 1 elseif options.curve == "Right" then -1 else math.sign((target.Z - from.Z) * (target.X - from.X))
-                if direction == 0 then direction = 1 end
-                side = options.spin * direction
-            end
-            if style == "Knuckleball (low spin)" then back = 0 end
-            local speed = family.speed[2] * 1.05 * math.clamp(options.power, 50, 108) / 100
-            return familyName, speed, side, back
-        end
-
-        local function goalPassage(simulation, goal, radius)
-            local lowerZ = goal.z - goal.width + radius + 0.4
-            local upperZ = goal.z + goal.width - radius - 0.4
-            local lowerY = goal.ground + radius - 0.12
-            local upperY = goal.top - radius - 0.4
-            local firstDepth = (simulation.pos[1].X - goal.x) * goal.out
-            if firstDepth > radius then return nil, "Ball is already behind the goal line" end
-            local entered = firstDepth >= -radius
-            local minZ, maxZ, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
-            local function include(point)
-                minZ, maxZ = math.min(minZ, point.Z), math.max(maxZ, point.Z)
-                minY, maxY = math.min(minY, point.Y), math.max(maxY, point.Y)
-            end
-            if entered then include(simulation.pos[1]) end
-            for i = 2, simulation.n do
-                local a, b = simulation.pos[i - 1], simulation.pos[i]
-                local da, db = (a.X - goal.x) * goal.out, (b.X - goal.x) * goal.out
-                if not entered and da < -radius and db >= -radius then
-                    entered = true
-                    include(a:Lerp(b, (-radius - da) / (db - da)))
-                end
-                if entered then
-                    if db < -radius then return nil, "Shot turns back before entering the goal" end
-                    if da < radius and db >= radius then
-                        local exit = a:Lerp(b, (radius - da) / (db - da))
-                        include(exit)
-                        local dz = if minZ < lowerZ then lowerZ - minZ elseif maxZ > upperZ then upperZ - maxZ else 0
-                        local dy = if maxY > upperY then upperY - maxY elseif minY < lowerY then lowerY - minY else 0
-                        return {
-                            valid = dz == 0 and dy == 0,
-                            shiftZ = dz, shiftY = dy,
-                            position = exit, time = (i - 2 + (radius - da) / (db - da)) * Flight.STEP,
-                            margin = math.min(minZ - lowerZ, upperZ - maxZ, minY - lowerY, upperY - maxY),
-                            minZ = minZ, maxZ = maxZ, minY = minY, maxY = maxY,
-                        }
-                    end
-                    include(b)
-                end
-            end
-            return nil, "Shot does not fully cross the goal line"
-        end
-
-        local function fitShot(sample, target, goal, family, speed, side, back, attempts)
-            local radius = sample.ball.Size.X * 0.5
-            local params = Flight.params(sample.ball)
-            local groundY = Ball.groundBallY()
-            local aim = target
-            for _ = 1, attempts or 3 do
-                local velocity, spin, flightTime, miss = Flight.solve(sample.from, aim, speed, side, back, params, groundY, math.rad(70))
-                if not finite(flightTime) or not finite(miss) or miss > 1.1 then return nil end
-                local acceptedVelocity, acceptedSpin = KickRules.checkStrike(family, velocity, spin)
-                if not acceptedVelocity or not acceptedSpin then return nil end
-                velocity, spin = acceptedVelocity, acceptedSpin
-                local simulation = Flight.simulate(sample.from, velocity, spin, 0, params, groundY, math.min(flightTime + 1, 10))
-                local passage = goalPassage(simulation, goal, radius)
-                if not passage then return nil end
-                if passage.valid then
-                    return {
-                        target = aim, family = family, velocity = velocity, spin = spin,
-                        flightTime = passage.time, miss = miss, sample = sample, passage = passage,
-                        simulation = simulation, side = side, back = back, speed = speed, goal = goal,
-                    }
-                end
-                local nextAim = Vector3.new(goal.x,
-                    math.clamp(aim.Y + passage.shiftY * 1.12, goal.ground + radius + 0.2, goal.top - radius - 0.3),
-                    math.clamp(aim.Z + passage.shiftZ * 1.12, goal.z - goal.width + radius + 0.3, goal.z + goal.width - radius - 0.3))
-                if (nextAim - aim).Magnitude < 0.01 then return nil end
-                aim = nextAim
-            end
-            return nil
-        end
-
-        local function clearanceScore(plan, bodies)
-            local closest, interception = 35, 0.8
-            local reachTime = S.passingEngine and S.passingEngine.reachTime
-            local stride = math.max(1, math.floor(plan.simulation.n / 28))
-            for i = 1, plan.simulation.n, stride do
-                budget()
-                local time = (i - 1) * Flight.STEP
-                if time > plan.flightTime then break end
-                local point = plan.simulation.pos[i]
-                for _, body in ipairs(bodies) do
-                    local predicted = body.root.Position + body.root.AssemblyLinearVelocity * math.min(time, 0.3)
-                    local keeper = body.model:GetAttribute("Role") == "Goalkeeper"
-                    local bodyY = math.clamp(point.Y, predicted.Y - 2.8, predicted.Y + 3.1)
-                    local radius = if keeper then 3.5 else 2.1
-                    closest = math.min(closest, (point - Vector3.new(predicted.X, bodyY, predicted.Z)).Magnitude - radius)
-                    if body.enemy and body.actor and reachTime then
-                        local jump = if keeper and time > 0.35 then math.min((time - 0.35) * 12, 4) else 0
-                        if point.Y <= body.actor.pos.Y + 3.1 + jump then
-                            local arrival = reachTime(body.actor, point, radius + 0.84, if body.actor.available then 0.14 else 0.65)
-                            interception = math.min(interception, arrival - time)
-                        end
-                    end
-                end
-            end
-            return interception * 20 + closest * 0.3 - plan.flightTime * 3 + math.min(plan.passage.margin, 2)
-        end
-
-        local previewChoice
-        local function choiceKey(options)
-            return table.concat({options.style, options.corner, options.curve, tostring(options.power), tostring(options.spin)}, ":")
-        end
-        local function calculate(sample, preview, configuration)
-            local options = configuration or cfg
-            local goal = mouth()
-            if not goal then return nil, "No opponent goal is loaded" end
-            local target, ranked = targetFor(goal, sample.from, options)
-            local points = ranked or {target}
-            if not preview and options.corner == "Auto" then
-                table.insert(points, Vector3.new(goal.x, (goal.ground + goal.top) / 2, goal.z))
-            end
-            local key = choiceKey(options)
-            local preferredSide
-            if preview then
-                local preferred = previewChoice and previewChoice.key == key and previewChoice.out == goal.out and previewChoice.target
-                points = {preferred or target}
-                if preferred then preferredSide = previewChoice.side end
-            end
-            local bodies = if preview then {} else opponents(true)
-            local best, bestScore
-            for _, point in ipairs(points) do
-                local family, speed, side, back = profile(options.style, sample.from, point, options)
-                if preferredSide ~= nil then side = preferredSide end
-                local directions = {side}
-                if not preview and options.curve == "Automatic" and side ~= 0 then table.insert(directions, -side) end
-                for _, chosenSide in ipairs(directions) do
-                    local plan = fitShot(sample, point, goal, family, speed, chosenSide, back, if preview then 1 else 3)
-                    if plan then
-                        local score = clearanceScore(plan, bodies)
-                        if not bestScore or score > bestScore then best, bestScore = plan, score end
-                    end
-                end
-            end
-
-            if not preview and not best and options.curve == "Automatic" and (options.style == "Power" or options.style == "Laced" or options.style == "Knuckleball (low spin)") then
-                local amounts = if options.style == "Knuckleball (low spin)" then {8} else {12, 30}
-                for _, amount in ipairs(amounts) do
-                    for _, point in ipairs(points) do
-                        local family, speed, _, back = profile(options.style, sample.from, point, options)
-                        for _, side in ipairs({amount, -amount}) do
-                            local plan = fitShot(sample, point, goal, family, speed, side, back)
-                            if plan then
-                                local score = clearanceScore(plan, bodies)
-                                if not bestScore or score > bestScore then best, bestScore = plan, score end
-                            end
-                        end
-                    end
-                    if best then break end
-                end
-            end
-            if best and not preview and not configuration then previewChoice = {target = best.target, key = key, out = goal.out, side = best.side} end
-            return best, if best then nil else "No clear route through the goal at this power; move closer or change technique"
-        end
+        local calculate, fitShot = makeShotPlanner(Flight, budget)
         local result, message = calculate(sample, false, options)
         if result then
             result.refit = function(fresh)
