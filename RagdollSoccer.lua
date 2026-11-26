@@ -2422,20 +2422,21 @@ local Passing = (function()
         if mode.kind then return bounded(velocity, Hands.MAX_SPEED[mode.kind]), bounded(spin, KickRules.Server.MaxSpin) end
         return KickRules.checkStrike(mode.family, velocity, spin)
     end
-    local function solve(scene, receiver, mode, space, paceScale)
+    local function solveDuration(scene, receiver, mode, space, pace, maximum, timeScale)
         local initialDistance = flat(receiver.pos - scene.from).Magnitude
-        if initialDistance < 4 then return nil end
-        local family = mode.family and Families[mode.family]
-        local maximum = if mode.kind then Hands.MAX_SPEED[mode.kind] else math.max(family.speed[2], family.shotSpeed and family.shotSpeed[2] or 0) * KickRules.Server.SpeedSlack * KickRules.KickButton.FullPower
-        local pace = math.min(mode.pace * paceScale, maximum * 0.84)
-        local duration = math.clamp(initialDistance / pace, mode.minimum or 0.18, 5)
+        if initialDistance < 4 then return nil, "Receiver is too close" end
+        local minimum = mode.minimum or 0.18
+        local function travelTime(distance)
+            return math.clamp(distance / pace * timeScale, minimum, 5)
+        end
+        local duration = travelTime(initialDistance)
         local receiveHeight = scene.floor + scene.params.radius + (if mode.ground then 0 else 1.2)
         local point, from, windup, direction
         for _ = 1, 2 do
             point = predict(receiver, duration + (windup or 0)) + scene.attack * space
             point = Vector3.new(point.X, receiveHeight, point.Z)
             from, windup, direction = releasePoint(scene, mode, point)
-            duration = math.clamp(flat(point - from).Magnitude / pace, mode.minimum or 0.18, 5)
+            duration = travelTime(flat(point - from).Magnitude)
         end
         point = predict(receiver, duration + windup) + scene.attack * space
         point = Vector3.new(point.X, receiveHeight, point.Z)
@@ -2468,7 +2469,29 @@ local Passing = (function()
         if not Rules.takeable(endpoint.vel, receiver.vel) then return nil, "Arrival cannot be controlled" end
         return {receiver = receiver, mode = mode, space = space, from = from, velocity = best.vel,
             spin = best.spin, time = duration, windup = windup, direction = direction,
-            point = point, rows = rows, error = bestError, arrivalVelocity = endpoint.vel}
+            point = point, rows = rows, error = bestError, arrivalVelocity = endpoint.vel,
+            timeScale = timeScale}
+    end
+
+    local function solve(scene, receiver, mode, space, paceScale)
+        local family = mode.family and Families[mode.family]
+        if not mode.kind and not family then return nil, "Unknown pass family" end
+        local maximum = if mode.kind then Hands.MAX_SPEED[mode.kind] else math.max(family.speed[2], family.shotSpeed and family.shotSpeed[2] or 0)
+            * KickRules.Server.SpeedSlack * KickRules.KickButton.FullPower
+        if not finite(maximum) or maximum <= 0 or not finite(paceScale) or paceScale <= 0 then
+            return nil, "Invalid pass speed"
+        end
+        local pace = math.min(mode.pace * paceScale, maximum * 0.84)
+        local plan, reason = solveDuration(scene, receiver, mode, space, pace, maximum, 1)
+        if plan then return plan end
+        if reason == "Receiver is too close" or reason == "Offside" then return nil, reason end
+
+        local factors = if mode.ground then {1.2, 0.85} else {0.8, 1.25, 0.65}
+        for _, factor in ipairs(factors) do
+            local candidate = solveDuration(scene, receiver, mode, space, pace, maximum, factor)
+            if candidate then return candidate end
+        end
+        return nil, reason
     end
     M.solve = solve
     local trajectoryCache = {}
@@ -2493,7 +2516,7 @@ local Passing = (function()
         local bucket = math.max(8, math.floor(distance / 8 + 0.5) * 8)
         local template = trajectoryCache[mode.name .. ":" .. bucket]
         if template == nil then return solve(scene, receiver, mode, space, paceScale) end
-        if template == false then return solve(scene, receiver, mode, space, paceScale) end
+        if template == false or template.timeScale ~= 1 then return solve(scene, receiver, mode, space, paceScale) end
         if distance < 4 or not inPitch(point, scene.bounds, 2) or not onside(scene, receiver, 0) then return nil end
         if reachTime(receiver, point, Rules.Pickup.CushionReach, 0.14) > duration then return nil end
         local scale = distance / bucket
