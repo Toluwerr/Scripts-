@@ -98,13 +98,13 @@ local defaults = {
     aimDot = true,
     autoPoke = true,
     jumpEnabled = true, infiniteJump = true, jumpHeight = 18, playerHitboxes = false, playerHitboxSize = 12, hitboxVisuals = true, ballExpander = true, ballHitboxRadius = 4, ballHitboxVisual = true,
-    freezeBall = false, juggling = false, juggleHeight = 3,
+    freezeBall = false,
     ballGlue = true, ballOrbit = false, ballGrabRange = 24, orbitRadius = 4, orbitSpeed = 32,
     antiRagdoll = true, antiSlide = true,
     autoGK = false, gkPosition = false,
     antiAFK = true, rejoinGK = true, performance = true, reducePostEffects = true, keepShadows = false, fpsCap = 240,
 }
-local S: any = {version = "0.49", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
+local S: any = {version = "0.50", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
 local settingsPath = "Poop/soccer.settings.json"
 pcall(function()
     if isfile(settingsPath) then
@@ -128,8 +128,6 @@ end
 S.settings.speed = math.clamp(S.settings.speed, 0.5, 4)
 S.settings.power = math.clamp(S.settings.power, 50, 108)
 S.settings.spin = math.clamp(S.settings.spin, 0, 70)
-S.settings.juggleHeight = math.clamp(S.settings.juggleHeight, 1, 5)
-S.settings.juggling = false
 local styles = {"Power", "Finesse", "Trivela", "Laced", "Knuckleball (low spin)", "Curve"}
 local corners = {"Auto", "Top left", "Top right", "Low left", "Low right", "Centre"}
 if not table.find(styles, S.settings.style) then S.settings.style = "Power" end
@@ -3064,7 +3062,7 @@ local Hitboxes = (function()
         for part, entry in pairs(M.entries) do release(part, entry) end
     end
     function M.ballContact()
-        if not cfg.ballExpander or cfg.freezeBall or cfg.ballOrbit or cfg.ballGlue or cfg.juggling or replay.playing() then return end
+        if not cfg.ballExpander or cfg.freezeBall or cfg.ballOrbit or cfg.ballGlue or replay.playing() then return end
         if M.ballRecord and M.ballRecord.accepted and not M.ballRecord.counted then
             M.ballRecord.counted = true
             M.ballAccepted += 1
@@ -3255,7 +3253,7 @@ local Orbit = (function()
             if M.pending and M.pending.pid < event.pid then M.pending = nil end
         end
         for key, record in pairs(M.inflight) do if at - record.sentAt > 0.5 then M.inflight[key] = nil end end
-        if not cfg.ballOrbit or cfg.juggling or not life.alive() or at < M.nextAt or at < (M.suspendUntil or 0) or replay.playing() or S.busy
+        if not cfg.ballOrbit or not life.alive() or at < M.nextAt or at < (M.suspendUntil or 0) or replay.playing() or S.busy
             or Input:GetFocusedTextBox() or Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
             or GuiService.MenuIsOpen or (pro and pro:GetAttribute("Phase") ~= "Play") then return end
         local character, r = player.Character, root()
@@ -3494,7 +3492,7 @@ local Glue = (function()
         M.nextAt = os.clock() + 0.12
     end)
     function M.step()
-        if not M.enabled or not cfg.ballGlue or cfg.juggling then return end
+        if not M.enabled or not cfg.ballGlue then return end
         local at, clock = os.clock(), now()
         local character, r, ball = player.Character, root(), Ball.getBall()
         if not character or not r or not ball then reset(); return end
@@ -3591,7 +3589,7 @@ local Freeze = (function()
         end
     end)
     function M.step()
-        if not M.enabled or not life.alive() or cfg.ballOrbit or cfg.ballGlue or cfg.juggling then return end
+        if not M.enabled or not life.alive() or cfg.ballOrbit or cfg.ballGlue then return end
         if replay.playing() or (state and state:GetAttribute("Phase") ~= "Play") then
             M.anchor, M.pending = nil, nil
             return
@@ -3639,139 +3637,6 @@ local Freeze = (function()
     return M
 end)()
 S.freezeBall = Freeze
-
-
-local Juggling = (function()
-    local M: any = {enabled = false, touches = 0, status = "Disabled"}
-    local replay = module(client, "InstantReplay")
-    local pro = game.ReplicatedStorage:FindFirstChild("ProState")
-
-    local function validVector(v)
-        return typeof(v) == "Vector3" and finite(v.X) and finite(v.Y) and finite(v.Z)
-    end
-
-    function M.setEnabled(enabled)
-        M.enabled = enabled == true
-        M.pending, M.character, M.ball = nil, nil, nil
-        M.touches = 0
-        M.nextAt = os.clock() + 0.2
-        M.status = if M.enabled then "Waiting for possession" else "Disabled"
-    end
-
-    function M.stop(reason, show)
-        M.enabled = false
-        M.pending, M.character, M.ball = nil, nil, nil
-        M.status = reason or "Disabled"
-        if cfg.juggling then
-            cfg.juggling = false
-            if S.controls.juggling then S.controls.juggling:Set(false, false) end
-            save()
-        end
-        if show then notify("Juggling", M.status) end
-    end
-
-    local function touch(ball, character, r, from, pid, state, clock)
-        local gravity = Flight.params(ball).gravity
-        if not finite(gravity) or gravity <= 0 then return false, "Ball physics unavailable" end
-        local height = math.clamp(cfg.juggleHeight, 1, 5)
-        local rise = math.sqrt(2 * gravity * height)
-        local duration = 2 * rise / gravity
-        local horizontal = Vector3.new(r.AssemblyLinearVelocity.X, 0, r.AssemblyLinearVelocity.Z)
-        if horizontal.Magnitude > 10 then return false, "Slow down to juggle" end
-        local correction = (r.Position - from) * Vector3.new(1, 0, 1) / math.max(duration, 0.1)
-        if correction.Magnitude > 4 then correction = correction.Unit * 4 end
-        local wanted = horizontal + correction + Vector3.new(0, rise, 0)
-        local family = "Chip"
-        if not Families[family] then return false, "Chip kick unavailable" end
-        local velocity, spin = KickRules.checkStrike(family, wanted, Vector3.zero)
-        if not validVector(velocity) or not validVector(spin) or velocity.Y <= 0
-            or velocity.Y > rise * 1.35 or (velocity * Vector3.new(1, 0, 1)).Magnitude > 14 then
-            return false, "Juggling touch rejected by kick rules"
-        end
-
-        local before = ball:GetAttribute("KickFlight")
-        local sent = if state then Dribble.strike(from, velocity, spin, family, clock)
-            else Dribble.strikeFree(from, velocity, spin, family, clock)
-        if not sent then return false, "Touch unavailable" end
-        M.character, M.ball = character, ball
-        M.pending = {pid = pid, clock = clock, before = before, sentAt = os.clock(), confirmed = false,
-            ownId = character:GetAttribute("DribbleId")}
-        M.status = "Waiting for touch confirmation"
-        return true
-    end
-
-    function M.step()
-        if not M.enabled or not cfg.juggling or not life.alive() then return end
-        if S.busy or replay.playing() or (pro and pro:GetAttribute("Phase") ~= "Play")
-            or Input:GetFocusedTextBox() or GuiService.MenuIsOpen or Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
-            if M.pending then M.stop("Interrupted", false) end
-            return
-        end
-        local character, r, ball = player.Character, root(), Ball.getBall()
-        if not character or not r or not ball or r.Anchored or character:GetAttribute("BodyState") ~= "Animated"
-            or character:GetAttribute("Role") == "Goalkeeper" then
-            if M.pending then M.stop("Character or ball changed", false) end
-            return
-        end
-        if M.ball and (M.ball ~= ball or M.character ~= character) then M.stop("Ball or character changed", false); return end
-        local ownId, pid = character:GetAttribute("DribbleId"), ball:GetAttribute("PossessionId")
-        if not finite(ownId) or ownId <= 0 or not finite(pid) then return end
-        local possessor = ball:GetAttribute("Possessor")
-        local clock, at = now(), os.clock()
-        local pending = M.pending
-
-        if pending then
-            if possessor ~= 0 and possessor ~= ownId then M.stop("Possession lost", false); return end
-            if not pending.confirmed then
-                local raw = ball:GetAttribute("KickFlight")
-                if type(raw) == "string" and raw ~= pending.before then
-                    local ok, event = pcall(Flight.decode, raw)
-                    if ok and event and event.pid == pending.pid + 1 and event.by == ownId and event.family == "Chip"
-                        and finite(event.t) and math.abs(event.t - pending.clock) <= 0.4 then
-                        pending.confirmed = true
-                        pending.flight = raw
-                        M.touches += 1
-                        M.status = "Juggling"
-                    end
-                end
-                if not pending.confirmed then
-                    if at - pending.sentAt > 0.65 then M.stop("Touch not confirmed", true) end
-                    return
-                end
-            end
-            if ball:GetAttribute("KickFlight") ~= pending.flight or pid ~= pending.pid + 1 then
-                M.stop("Ball touched by another action", false)
-                return
-            end
-            if at - pending.sentAt > 3 then M.stop("Ball did not return", false); return end
-            if possessor ~= 0 or at - pending.sentAt < 0.2 then return end
-            local position, velocity = Ball.freeSample(clock)
-            if not validVector(position) or not validVector(velocity) then return end
-            local gap = ((position - r.Position) * Vector3.new(1, 0, 1)).Magnitude
-            if gap > 6 then M.stop("Ball out of reach", false); return end
-            if velocity.Y >= -0.5 or position.Y > Ball.groundBallY(position) + 1.2 then return end
-            local ok, reason = touch(ball, character, r, position, pid, nil, clock)
-            if not ok then M.stop(reason, true) end
-            return
-        end
-
-        if at < M.nextAt or possessor ~= ownId then return end
-        local sample = ballSample()
-        if not sample or not sample.state or sample.ball ~= ball or sample.pid ~= pid or not validVector(sample.from) then return end
-        if ((sample.from - r.Position) * Vector3.new(1, 0, 1)).Magnitude > 5 then return end
-        local ok, reason = touch(ball, character, r, sample.from, pid, sample.state, sample.time)
-        if not ok then M.stop(reason, true) end
-    end
-
-    life.connect(Run.Heartbeat, function()
-        if not M.enabled then return end
-        local ok, err = pcall(M.step)
-        if not ok then M.error = tostring(err); M.stop("Touch calculation failed", true) end
-    end)
-    life.onCleanup(function() M.enabled = false; M.pending = nil end)
-    return M
-end)()
-S.juggling = Juggling
 
 
 local PokeRecovery: any = {steps = 0, calls = 0, lateWindow = module(gameModules.Dribble, "Rules").Server.LateMax}
@@ -3968,8 +3833,6 @@ slider(orbitSection, "Grab range", "ballGrabRange", 4, 32, 0.5, Orbit.applyVisua
 slider(orbitSection, "Orbit radius", "orbitRadius", 2.5, 7, 0.5, Orbit.applyVisual)
 slider(orbitSection, "Orbit speed", "orbitSpeed", 4, 90, 1)
 toggle(orbitSection, "Show reach", "ballHitboxVisual", Orbit.applyVisual)
-toggle(orbitSection, "Juggling", "juggling", Juggling.setEnabled)
-slider(orbitSection, "Juggle height", "juggleHeight", 1, 5, 0.5)
 local protectionSection = playerTab:Section("Protection")
 toggle(protectionSection, "Anti ragdoll", "antiRagdoll")
 toggle(protectionSection, "Anti slide", "antiSlide")
@@ -4005,11 +3868,7 @@ local function onKeyInput(key, processed)
     if processed or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
     if key.KeyCode == Enum.KeyCode.RightShift then window:Toggle(); return end
     if key.KeyCode == Enum.KeyCode.Space and cfg.jumpEnabled then Jump.fire(); return end
-    if key.KeyCode == Enum.KeyCode.F then
-        if cfg.juggling then Juggling.stop("Shot requested", false) end
-        Orbit.suspendUntil = os.clock() + 0.9
-        Glue.suspendUntil = os.clock() + 0.9
-    end
+    if key.KeyCode == Enum.KeyCode.F then Orbit.suspendUntil = os.clock() + 0.9; Glue.suspendUntil = os.clock() + 0.9 end
     if key.KeyCode == Enum.KeyCode.H then
         changed("autoGK", not cfg.autoGK)
         S.controls.autoGK:Set(cfg.autoGK, false)
