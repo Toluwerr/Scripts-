@@ -444,13 +444,31 @@ local function makeShotPlanner(Flight, budget)
         return speed, side, back
     end
 
-    local function fitShot(sample, target, goal, family, speed, side, back, attempts)
+    local function physicsContext(sample)
+        return {params = Flight.params(sample.ball), groundY = Ball.groundBallY()}
+    end
+
+    local function sameParams(previous, current)
+        if type(previous) ~= "table" or type(current) ~= "table" then return false end
+        for key, value in pairs(previous) do
+            local kind = type(value)
+            if (kind ~= "number" and kind ~= "boolean" and kind ~= "string") or current[key] ~= value then
+                return false
+            end
+        end
+        for key in pairs(current) do
+            if previous[key] == nil then return false end
+        end
+        return true
+    end
+
+    local function fitShot(sample, target, goal, family, speed, side, back, attempts, context)
         if not validVector(sample.from) or not validVector(target) then return nil end
         speed, side, back = constrainInputs(family, sample.from, target, speed, side, back)
         if not speed then return nil end
         local radius = goal.radius or sample.ball.Size.X * 0.5
-        local params = Flight.params(sample.ball)
-        local groundY = Ball.groundBallY()
+        context = context or physicsContext(sample)
+        local params, groundY = context.params, context.groundY
         local aim = target
         local best, bestError
         for _ = 1, attempts or 3 do
@@ -474,6 +492,8 @@ local function makeShotPlanner(Flight, budget)
                         target = target, aim = aim, family = family, velocity = velocity, spin = spin,
                         flightTime = passage.time, miss = placementError, solverMiss = miss, sample = sample, passage = passage,
                         simulation = simulation, side = side, back = back, speed = speed, goal = goal,
+                        physicsParams = if type(params) == "table" then table.clone(params) else nil,
+                        groundY = groundY,
                     }
                 end
                 if not crossing or placementError <= 0.35 then break end
@@ -487,6 +507,18 @@ local function makeShotPlanner(Flight, budget)
             aim = nextAim
         end
         return best
+    end
+
+    local function refitShot(sample, plan)
+        local context = physicsContext(sample)
+        if sample.ball == plan.sample.ball and sample.pid == plan.sample.pid
+            and sample.from == plan.sample.from and context.groundY == plan.groundY
+            and sameParams(plan.physicsParams, context.params) then
+            local refreshed = table.clone(plan)
+            refreshed.sample = sample
+            return refreshed
+        end
+        return fitShot(sample, plan.target, plan.goal, plan.family, plan.speed, plan.side, plan.back, nil, context)
     end
 
     local function clearanceScore(plan, bodies)
@@ -537,6 +569,7 @@ local function makeShotPlanner(Flight, budget)
             if preferred then preferredSide = previewChoice.side end
         end
         local bodies = if preview then {} else opponents(true)
+        local context = physicsContext(sample)
         local best, bestScore
         for _, point in ipairs(points) do
             local family, speed, side, back = profile(options.style, sample.from, point, options)
@@ -544,7 +577,7 @@ local function makeShotPlanner(Flight, budget)
             local directions = {side}
             if not preview and options.curve == "Automatic" and side ~= 0 then table.insert(directions, -side) end
             for _, chosenSide in ipairs(directions) do
-                local plan = fitShot(sample, point, goal, family, speed, chosenSide, back, if preview then 1 else 3)
+                local plan = fitShot(sample, point, goal, family, speed, chosenSide, back, if preview then 1 else 3, context)
                 if plan then
                     local score = clearanceScore(plan, bodies)
                     if not bestScore or score > bestScore then best, bestScore = plan, score end
@@ -558,7 +591,7 @@ local function makeShotPlanner(Flight, budget)
                 for _, point in ipairs(points) do
                     local family, speed, _, back = profile(options.style, sample.from, point, options)
                     for _, side in ipairs({amount, -amount}) do
-                        local plan = fitShot(sample, point, goal, family, speed, side, back)
+                        local plan = fitShot(sample, point, goal, family, speed, side, back, nil, context)
                         if plan then
                             local score = clearanceScore(plan, bodies)
                             if not bestScore or score > bestScore then best, bestScore = plan, score end
@@ -572,10 +605,10 @@ local function makeShotPlanner(Flight, budget)
         return best, if best then nil else "No clear route through the goal at this power; move closer or change technique"
     end
 
-    return calculate, fitShot
+    return calculate, refitShot
 end
 
-local calculate, fitShot = makeShotPlanner(Flight)
+local calculate, refitShot = makeShotPlanner(Flight)
 S.calculate = calculate
 S.goalPassage = goalPassage
 function S.planAt(position, options)
@@ -720,7 +753,7 @@ local function beginKickMotion(sample, plan)
     if not contact or contact == Vector3.zero then contact = sample.from end
     if (contact - plan.sample.from).Magnitude > 0.1 then
         local predicted = {ball = sample.ball, from = contact, time = contactAt, state = sample.state, pid = sample.pid}
-        local adjusted = fitShot(predicted, plan.target, plan.goal, plan.family, plan.speed, plan.side, plan.back)
+        local adjusted = refitShot(predicted, plan)
         if not adjusted then return nil, nil, "No valid shot from the predicted contact position" end
         plan = adjusted
     end
@@ -797,13 +830,13 @@ function S.shoot(silent)
 
         local fresh, freshWhy = resample()
         if not fresh then return false, freshWhy end
-        plan = fitShot(fresh, plan.target, plan.goal, plan.family, plan.speed, plan.side, plan.back)
+        plan = refitShot(fresh, plan)
         if not plan then return false, "The ball moved out of this shot's route; try F again" end
         local latest, latestWhy = resample()
         if not latest then return false, latestWhy end
         if (latest.from - fresh.from).Magnitude > 0.25 then
             fresh = latest
-            plan = fitShot(fresh, plan.target, plan.goal, plan.family, plan.speed, plan.side, plan.back)
+            plan = refitShot(fresh, plan)
             if not plan then return false, "The ball moved out of this shot's route; try F again" end
             latest, latestWhy = resample()
             if not latest then return false, latestWhy end
@@ -1710,11 +1743,11 @@ local Visual = (function()
     local function calculateVisual(sample, options, cancelled, synchronous)
         local Flight, budget = visualFlight(cancelled, synchronous)
         if not synchronous then V.planWorkMs = 0 end
-        local calculate, fitShot = makeShotPlanner(Flight, budget)
+        local calculate, refitShot = makeShotPlanner(Flight, budget)
         local result, message = calculate(sample, false, options)
         if result then
             result.refit = function(fresh)
-                return fitShot(fresh, result.target, result.goal, result.family, result.speed, result.side, result.back)
+                return refitShot(fresh, result)
             end
         end
         return result, message
