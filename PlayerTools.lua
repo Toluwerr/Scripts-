@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "0.3"
+local VERSION = "0.4"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -208,7 +208,6 @@ local ObjectHoldSettings = {
         PickerRoot = nil,
         PickerHighlights = {},
         HoldHighlights = {},
-        HoldGlowParts = {},
         HeldParts = nil,
         HoldBottomOffset = nil,
         HoldCharacter = nil,
@@ -3282,93 +3281,61 @@ do
                 end
         end
 
-        local function glowAssembly(
-                root,
-                list,
-                name,
-                fillColor,
-                outlineColor,
-                fillTransparency,
-                depthMode
-        )
-                clearGlowList(list)
-
-                local parts = getHoldAssemblyParts(root)
+        local function syncGlow(parts, list, name, fillColor, outlineColor, fillTransparency, depthMode)
                 local count = math.min(#parts, MAX_GLOW_PARTS)
 
-                for index = 1, count do
-                        local highlight = Instance.new("Highlight")
-                        highlight.Name = name
-                        highlight.Adornee = parts[index]
-                        highlight.DepthMode = depthMode
-                                or Enum.HighlightDepthMode.AlwaysOnTop
-                        highlight.FillColor = fillColor
-                        highlight.FillTransparency = fillTransparency
-                        highlight.OutlineColor = outlineColor
-                        highlight.OutlineTransparency = 0.05
-                        highlight.Parent = Workspace
-                        list[index] = highlight
-                end
-        end
-
-        local function glowPartsMatch(cached, parts, count)
-                if #cached ~= count then
-                        return false
+                for index = #list, count + 1, -1 do
+                        local highlight = list[index]
+                        list[index] = nil
+                        pcall(function() highlight:Destroy() end)
                 end
 
                 for index = 1, count do
-                        if cached[index] ~= parts[index] then
-                                return false
+                        local highlight = list[index]
+                        if not highlight or highlight.Parent ~= Workspace then
+                                if highlight then
+                                        pcall(function() highlight:Destroy() end)
+                                end
+                                highlight = Instance.new("Highlight")
+                                list[index] = highlight
+                                highlight.Name = name
+                                highlight.DepthMode = depthMode
+                                highlight.FillColor = fillColor
+                                highlight.FillTransparency = fillTransparency
+                                highlight.OutlineColor = outlineColor
+                                highlight.OutlineTransparency = 0.05
+                                highlight.Adornee = parts[index]
+                                highlight.Parent = Workspace
+                        elseif highlight.Adornee ~= parts[index] then
+                                highlight.Adornee = parts[index]
                         end
                 end
-
-                return true
         end
 
-        -- Rebuild the hold glow only when the assembly's part set
-        -- actually changed: steady state costs zero instance churn,
-        -- which is what keeps the framerate healthy on long holds.
         local function refreshHoldGlow(root)
                 local parts = getHoldAssemblyParts(root)
-                local count = math.min(#parts, MAX_GLOW_PARTS)
-                local cached = ObjectHoldSettings.HoldGlowParts
-
                 ObjectHoldSettings.HeldParts = parts
 
-                -- Vertical offset from the root part's center down
-                -- to the assembly's lowest point (negative or zero).
-                -- The auto slot in updateObjectHold uses it to park
-                -- the object's bottom edge, not its center, a fixed
-                -- clearance above the head. Axis-aligned sizes are
-                -- accurate here because the hold keeps the assembly
-                -- level. Runs on the slow tick, never per frame.
-                local lowest = -(root.Size.Y / 2)
-                local scanned = 0
-
-                for _, part in ipairs(parts) do
-                        scanned += 1
-
-                        if scanned > 2000 then
-                                break
-                        end
-
-                        local offset = part.Position.Y
-                                - root.Position.Y
-                                - part.Size.Y / 2
-
+                -- Project each oriented part's half-extents onto the vertical axis.
+                local rootY = root.Position.Y
+                local lowest = 0
+                for index = 1, math.min(#parts, 2000) do
+                        local part = parts[index]
+                        local frame, size = part.CFrame, part.Size
+                        local halfHeight = (
+                                math.abs(frame.RightVector.Y) * size.X
+                                + math.abs(frame.UpVector.Y) * size.Y
+                                + math.abs(frame.LookVector.Y) * size.Z
+                        ) * 0.5
+                        local offset = frame.Position.Y - rootY - halfHeight
                         if offset == offset and offset < lowest then
                                 lowest = offset
                         end
                 end
 
                 ObjectHoldSettings.HoldBottomOffset = lowest
-
-                if glowPartsMatch(cached, parts, count) then
-                        return
-                end
-
-                glowAssembly(
-                        root,
+                syncGlow(
+                        parts,
                         ObjectHoldSettings.HoldHighlights,
                         "__PlayerToolsHoldGlow",
                         Color3.fromRGB(64, 170, 255),
@@ -3376,12 +3343,6 @@ do
                         0.78,
                         Enum.HighlightDepthMode.Occluded
                 )
-
-                table.clear(cached)
-
-                for index = 1, count do
-                        cached[index] = parts[index]
-                end
         end
 
         local function castForHoldTarget(includeHeld)
@@ -3564,8 +3525,6 @@ do
                 ObjectHoldSettings.HeldParts = nil
                 ObjectHoldSettings.HoldBottomOffset = nil
 
-                table.clear(ObjectHoldSettings.HoldGlowParts)
-
                 clearGlowList(ObjectHoldSettings.HoldHighlights)
                 updateHoldStatus(message or "Released - click an object")
         end
@@ -3629,6 +3588,7 @@ do
                         releaseObject("Could not initialize hold")
                         return false
                 end
+                ObjectHoldSettings.NextGlowRefresh = os.clock() + 1.25
                 updateHoldStatus("Holding: " .. tostring(root.Name):sub(1, 32))
                 return true
         end
@@ -3874,8 +3834,8 @@ do
                 if root then
                         if ObjectHoldSettings.PickerRoot ~= root then
                                 ObjectHoldSettings.PickerRoot = root
-                                glowAssembly(
-                                        root,
+                                syncGlow(
+                                        getHoldAssemblyParts(root),
                                         ObjectHoldSettings.PickerHighlights,
                                         "__PlayerToolsHoldPick",
                                         Color3.fromRGB(64, 205, 98),
