@@ -556,6 +556,8 @@ local function makeShotPlanner(Flight, budget)
     end
 
     local function refitShot(sample, plan)
+        local goal = mouth(sample.ball)
+        if not goal or not sameParams(plan.goal, goal) then return nil end
         local context = physicsContext(sample)
         if sample.ball == plan.sample.ball and sample.pid == plan.sample.pid
             and sample.from == plan.sample.from and context.groundY == plan.groundY
@@ -735,7 +737,7 @@ local function trackShot(plan, before, style, motion)
             end
             if entry.goalConfirmed then
                 entry.result = "Goal confirmed"
-                if S.lastShot == entry then S.status = "Goal confirmed | " .. entry.style end
+                if S.lastShot == entry and not S.busy then S.status = "Goal confirmed | " .. entry.style end
                 notify("Goal", entry.style .. " scored.")
                 return
             end
@@ -746,7 +748,7 @@ local function trackShot(plan, before, style, motion)
         end
         if not life.alive() then return end
         entry.result = if entry.accepted then "Server accepted; no goal confirmed" else "Release not confirmed by server"
-        if S.lastShot == entry then S.status = entry.result end
+        if S.lastShot == entry and not S.busy then S.status = entry.result end
     end)
 end
 local lastAction = -10
@@ -758,6 +760,7 @@ local function cancelKickMotion(reason)
     kickMotion = nil
     if motion.animator.kick and motion.animator.kick.id == motion.id then motion.animator.kick = nil end
     if not motion.released then
+        motion.cancelled = true
         pcall(function() kickCancelRemote:FireServer(motion.id) end)
         motion.status = reason or "Cancelled"
     end
@@ -765,7 +768,7 @@ end
 life.onCleanup(function() cancelKickMotion("Hub unloaded") end)
 life.connect(Net:RemoteEvent("KickPlanRelay").OnClientEvent, function(sender, packet)
     local motion = S.lastKickMotion
-    if sender == player and motion and type(packet) == "table" and packet.id == motion.id then
+    if sender == player and motion and not motion.cancelled and type(packet) == "table" and packet.id == motion.id then
         motion.relayed = true
         motion.relayAt = now()
         motion.status = "Server relayed kick motion"
@@ -781,10 +784,12 @@ Run:BindToRenderStep(motionRenderName, Enum.RenderPriority.Camera.Value - 2, fun
         return
     end
     local remaining = motion.contactAt - now()
-    if motion.released or remaining < -0.25 then
-        
-        if motion.animator.kick and motion.animator.kick.id == motion.id then motion.animator.kick = nil end
-        kickMotion = nil
+    if motion.released then
+        cancelKickMotion()
+        return
+    end
+    if remaining < -0.25 then
+        cancelKickMotion("Kick contact expired")
         return
     end
     motion.spec.at = math.max(remaining, 0.001)
@@ -1882,7 +1887,11 @@ local Visual = (function()
             return now() - shot.at < 0.35
         end
         local raw = ball:GetAttribute("KickFlight")
-        local event = type(raw) == "string" and Flight.decode(raw)
+        local event
+        if type(raw) == "string" then
+            local ok, decoded = pcall(Flight.decode, raw)
+            if ok and type(decoded) == "table" then event = decoded end
+        end
         local server = event and event.pid == shot.pid + 1 and event.by == shot.characterId and event.family == shot.family
             and finite(event.t) and math.abs(event.t - shot.expectedTime) < 1
         local key = if server then raw else tostring(shot)
@@ -1911,7 +1920,7 @@ local Visual = (function()
     life.connect(Net:RemoteEvent("KickPlanRelay").OnClientEvent, function(sender, packet)
         local motion = S.lastKickMotion
         if sender ~= player or type(packet) ~= "table" or not motion or packet.id ~= motion.id
-            or not S.busy or not S.status:find("Planting foot", 1, true) then return end
+            or not S.busy or kickMotion ~= motion or motion.released then return end
         if not cfg.trajectory or not validVector(packet.ball) or not validVector(packet.vel) or not validVector(packet.spin) then return end
         local generation, ball = V.generation, Ball.getBall()
         local function cancelled()
@@ -1964,7 +1973,14 @@ local Visual = (function()
         local state = ownState()
         local pid = if state then state.pid else Ball.pendingPid() or possessionId()
         local forecast, elapsed, phase
-        if releaseForecast(ball, pid, state) then
+        local motion = kickMotion
+        if S.busy and motion and not motion.released then
+            clearReleased()
+            V.preview = nil
+            if V.windup and V.windup.id == motion.id and now() - V.windup.at < 1 then
+                forecast, elapsed, phase = V.windup, 0, "windup"
+            end
+        elseif releaseForecast(ball, pid, state) then
             V.preview, V.windup = nil, nil
             local flight = V.released
             if flight then
@@ -1973,12 +1989,7 @@ local Visual = (function()
                 elapsed = math.max(clock - flight.time, 0)
                 if elapsed < flight.trace.horizon then forecast, phase = flight, "released" else V.released = nil end
             end
-        elseif S.busy then
-            local motion = kickMotion
-            if V.windup and motion and V.windup.id == motion.id and not motion.released and now() - V.windup.at < 1 then
-                forecast, elapsed, phase = V.windup, 0, "windup"
-            end
-        else
+        elseif not S.busy then
             V.windup = nil
             V.request()
             local preview = V.preview
