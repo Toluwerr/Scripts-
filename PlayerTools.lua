@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "1.9"
+local VERSION = "2.0"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -5368,15 +5368,17 @@ end
 do
         local SCAN_INTERVAL = 2
         local SCAN_BUDGET = 0.002
-        local UPDATE_BUDGET = 0.003
+        local VALIDATION_BUDGET = 0.003
         local SCAN_BATCH = 400
         local CLAIM_BATCH = 8
-        local UPDATE_BATCH = 240
+        local VALIDATION_BATCH = 240
         local TAU = math.pi * 2
         local claims = {}
         local ordered = {}
         local stack = {}
         local seen = {}
+        local targetParts = {}
+        local targetFrames = {}
         local folder
         local characterRoot
         local removedCharacter
@@ -5443,8 +5445,8 @@ do
                         PhysicsRig.create(record, root, {
                                 folder = folder,
                                 targetName = "RingTarget",
-                                maxVelocity = 250,
-                                positionResponsiveness = 35,
+                                maxVelocity = 800,
+                                positionResponsiveness = 200,
                                 orientationResponsiveness = 25,
                                 maxAngularVelocity = 20
                         })
@@ -5457,6 +5459,8 @@ do
                 while #ordered > 0 do release(ordered[#ordered]) end
                 table.clear(stack)
                 table.clear(seen)
+                table.clear(targetParts)
+                table.clear(targetFrames)
                 characterRoot = nil
                 scanning = false
                 nextScan = 0
@@ -5522,30 +5526,46 @@ do
                 if dt ~= dt or dt < 0 then dt = 0 end
                 phase = (phase + math.rad(RingSettings.Speed) * math.min(dt, 0.1)) % TAU
 
-                local count = #ordered
-                local layers = math.min(count, math.clamp(math.floor(RingSettings.Layers + 0.5), 1, 5))
-                local origin = root.Position + Vector3.new(0, RingSettings.Height, 0)
-                local tilt = CFrame.Angles(math.rad(RingSettings.Tilt), 0, 0)
-                local radius, spacing = RingSettings.Radius, RingSettings.Spacing
-                local budget = math.min(count, UPDATE_BATCH)
-                local deadline = os.clock() + UPDATE_BUDGET
+                local budget = math.min(#ordered, VALIDATION_BATCH)
+                local deadline = os.clock() + VALIDATION_BUDGET
                 for _ = 1, budget do
                         if #ordered == 0 or os.clock() >= deadline then break end
                         if cursor > #ordered then cursor = 1 end
                         local assembly = ordered[cursor]
-                        local record = claims[assembly]
-                        if not eligible(assembly) or not PhysicsRig.valid(record, assembly) then
+                        if not eligible(assembly) or not PhysicsRig.valid(claims[assembly], assembly) then
                                 release(assembly)
                         else
-                                local slot = cursor - 1
+                                cursor += 1
+                        end
+                end
+
+                local count = #ordered
+                table.clear(targetParts)
+                table.clear(targetFrames)
+                if count > 0 then
+                        local layers = math.min(count, math.clamp(math.floor(RingSettings.Layers + 0.5), 1, 5))
+                        local origin = root.Position + Vector3.new(0, RingSettings.Height, 0)
+                        local tilt = CFrame.Angles(math.rad(RingSettings.Tilt), 0, 0)
+                        local radius, spacing = RingSettings.Radius, RingSettings.Spacing
+
+                        for index, assembly in ipairs(ordered) do
+                                local record = claims[assembly]
+                                if not record.target or record.target.Parent ~= folder
+                                        or not assembly.Parent or assembly.Anchored or assembly.ReceiveAge ~= 0 then
+                                        continue
+                                end
+                                local slot = index - 1
                                 local layer = slot % layers
                                 local layerCount = math.floor((count - 1 - layer) / layers) + 1
                                 local angle = phase + TAU * math.floor(slot / layers) / layerCount
-                                local localPosition = Vector3.new(math.cos(angle) * radius,
+                                local offset = Vector3.new(math.cos(angle) * radius,
                                         (layer - (layers - 1) / 2) * spacing, math.sin(angle) * radius)
-                                record.target.CFrame = CFrame.new(origin + tilt:VectorToWorldSpace(localPosition))
+                                targetParts[#targetParts + 1] = record.target
+                                targetFrames[#targetFrames + 1] = CFrame.new(origin + tilt:VectorToWorldSpace(offset))
                                         * record.rotation
-                                cursor += 1
+                        end
+                        if #targetParts > 0 then
+                                Workspace:BulkMoveTo(targetParts, targetFrames, Enum.BulkMoveMode.FireCFrameChanged)
                         end
                 end
 
@@ -5589,7 +5609,7 @@ do
                                 folder = Instance.new("Folder")
                                 folder.Name = "__RingPartsRuntime"
                                 folder.Parent = Workspace
-                                RingSettings.Connection = RunService.Heartbeat:Connect(function(dt)
+                                RingSettings.Connection = RunService.PreSimulation:Connect(function(dt)
                                         local success, failure = pcall(update, dt)
                                         if not success then
                                                 RingSettings.Enabled = false
