@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "1.4"
+local VERSION = "1.5"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -104,6 +104,8 @@ local FlingSettings = {
         RespawnConnection = nil,
         NoclipConnection = nil,
         BurstConnection = nil,
+        PartCooldowns = setmetatable({}, {__mode = "k"}),
+        NextPartScan = 0,
         DensitySaved = setmetatable({}, { __mode = "k" }),
         LastTouchAt = 0,
         CooldownUntil = 0,
@@ -2970,8 +2972,72 @@ local function findFlingTouch(root)
         return false
 end
 
+local flingOverlap = OverlapParams.new()
+flingOverlap.FilterType = Enum.RaycastFilterType.Exclude
+flingOverlap.MaxParts = 128
+
+local function isFlingPart(part)
+        if not part or not part.Parent or part.Anchored then return false end
+        if part == PlatformSettings.Part then return false end
+        if ObjectHoldSettings.Root == part
+                or (ObjectPull.IsClaimed and ObjectPull.IsClaimed(part))
+                or (Shaker.IsClaimed and Shaker.IsClaimed(part)) then
+                return false
+        end
+        local vehicle = VehicleSettings.CurrentModel
+        if vehicle and vehicle.Parent and part:IsDescendantOf(vehicle) then return false end
+        local ancestor = part.Parent
+        while ancestor and ancestor ~= Workspace do
+                if ancestor:IsA("Tool") or ancestor:IsA("Accessory")
+                        or (ancestor:IsA("Model") and ancestor:FindFirstChildOfClass("Humanoid")) then
+                        return false
+                end
+                ancestor = ancestor.Parent
+        end
+        return true
+end
+
+local function flingNearbyParts(root, now)
+        if now < FlingSettings.NextPartScan then return end
+        FlingSettings.NextPartScan = now + 0.1
+        flingOverlap.FilterDescendantsInstances = {root.Parent}
+
+        local parts = Workspace:GetPartBoundsInRadius(root.Position, FLING_TOUCH_RANGE, flingOverlap)
+        local seen = {}
+        local speed = math.clamp((tonumber(FlingSettings.Power) or 100) * 2, 2, 400)
+        for _, part in ipairs(parts) do
+                local assembly = part.AssemblyRootPart
+                if not assembly or seen[assembly] then continue end
+                seen[assembly] = true
+                if not isFlingPart(part) or not isFlingPart(assembly) then continue end
+                if now < (FlingSettings.PartCooldowns[assembly] or 0) then continue end
+
+                local eligible = true
+                for _, connected in ipairs(assembly:GetConnectedParts(true)) do
+                        if not isFlingPart(connected) then
+                                eligible = false
+                                break
+                        end
+                end
+                if not eligible then continue end
+
+                local offset = assembly.Position - root.Position
+                local horizontal = Vector3.new(offset.X, 0, offset.Z)
+                local direction = if horizontal.Magnitude > 0.05 then horizontal.Unit
+                        else root.CFrame.LookVector
+                local mass = assembly.AssemblyMass
+                if mass <= 0 or mass ~= mass or mass == math.huge then continue end
+                FlingSettings.PartCooldowns[assembly] = now + FLING_COOLDOWN
+                pcall(function()
+                        assembly:ApplyImpulse((direction * speed + Vector3.new(0, speed * 0.25, 0)) * mass)
+                end)
+        end
+end
+
 local function stopFling()
         FlingSettings.Enabled = false
+        FlingSettings.NextPartScan = 0
+        table.clear(FlingSettings.PartCooldowns)
         disconnect(FlingSettings.RespawnConnection)
         FlingSettings.RespawnConnection = nil
         disconnect(FlingSettings.NoclipConnection)
@@ -3063,6 +3129,7 @@ local function startFling()
 
                 local now = os.clock()
                 local touching = findFlingTouch(root)
+                pcall(flingNearbyParts, root, now)
 
                 if touching then
                         FlingSettings.LastTouchAt = now
