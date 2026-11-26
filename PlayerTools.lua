@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "1.3"
+local VERSION = "1.4"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -4093,6 +4093,16 @@ do
                         return
                 end
 
+                local character = LocalPlayer.Character
+                if not character or not character:FindFirstChild("Head") then
+                        if ObjectHoldSettings.PickerRoot then
+                                clearGlowList(ObjectHoldSettings.PickerHighlights)
+                                ObjectHoldSettings.PickerRoot = nil
+                        end
+                        ObjectHoldSettings.HoveredRoot = nil
+                        return
+                end
+
                 local root = castForHoldTarget(false)
                 ObjectHoldSettings.HoveredRoot = root
 
@@ -4201,6 +4211,15 @@ do
                 ObjectHoldSettings.NextPickerRun = 0
         end
 
+        ObjectHold.resetCharacter = function()
+                releaseObject("Character unavailable")
+                clearGlowList(ObjectHoldSettings.PickerHighlights)
+                ObjectHoldSettings.HoveredRoot = nil
+                ObjectHoldSettings.PickerRoot = nil
+                ObjectHoldSettings.ClickConsumedAt = 0
+                ObjectHoldSettings.NextPickerRun = 0
+        end
+
         ObjectHold.release = function()
                 if not ObjectHoldSettings.Enabled then
                         return
@@ -4227,68 +4246,77 @@ do
                 stopObjectHold()
                 ObjectHoldSettings.Enabled = enabled
 
-                if type(ObjectHold.OnEnabledChanged) == "function" then
-                        pcall(ObjectHold.OnEnabledChanged, enabled)
-                end
-
                 if not enabled then
+                        if type(ObjectHold.OnEnabledChanged) == "function" then
+                                pcall(ObjectHold.OnEnabledChanged, false)
+                        end
                         return
                 end
 
-                updateHoldStatus("Enabled - click an object")
+                local started, err = pcall(function()
+                        updateHoldStatus("Enabled - click an object")
 
-                ObjectHoldSettings.PickerConnection = RunService.RenderStepped:Connect(
-                        function()
-                                -- 20 Hz is plenty for a hover glow;
-                                -- six raycasts every single frame was
-                                -- real per-frame cost.
-                                if os.clock()
-                                        < (ObjectHoldSettings.NextPickerRun or 0) then
-                                        return
+                        ObjectHoldSettings.PickerConnection = RunService.RenderStepped:Connect(
+                                function()
+                                        -- 20 Hz is plenty for a hover glow;
+                                        -- six raycasts every single frame was
+                                        -- real per-frame cost.
+                                        if os.clock()
+                                                < (ObjectHoldSettings.NextPickerRun or 0) then
+                                                return
+                                        end
+
+                                        ObjectHoldSettings.NextPickerRun = os.clock() + 0.05
+
+                                        local ok, err = pcall(updateHoldPicker)
+
+                                        if not ok then
+                                                updateHoldStatus(
+                                                        "Picker error: "
+                                                                .. tostring(err):sub(1, 80)
+                                                )
+                                        end
                                 end
+                        )
 
-                                ObjectHoldSettings.NextPickerRun = os.clock() + 0.05
-
-                                local ok, err = pcall(updateHoldPicker)
-
-                                if not ok then
-                                        updateHoldStatus(
-                                                "Picker error: "
-                                                        .. tostring(err):sub(1, 80)
+                        ObjectHoldSettings.InputConnection = UserInputService.InputBegan:Connect(
+                                function(input, gameProcessedEvent)
+                                        local ok, err = pcall(
+                                                onHoldInput,
+                                                input,
+                                                gameProcessedEvent
                                         )
+
+                                        if not ok then
+                                                updateHoldStatus(
+                                                        "Input error: "
+                                                                .. tostring(err):sub(1, 80)
+                                                )
+                                        end
                                 end
-                        end
-                )
+                        )
 
-                ObjectHoldSettings.InputConnection = UserInputService.InputBegan:Connect(
-                        function(input, gameProcessedEvent)
-                                local ok, err = pcall(
-                                        onHoldInput,
-                                        input,
-                                        gameProcessedEvent
-                                )
+                        ObjectHoldSettings.HeartbeatConnection = RunService.Heartbeat:Connect(
+                                function(deltaTime)
+                                        local ok, err = pcall(updateObjectHold, deltaTime)
 
-                                if not ok then
-                                        updateHoldStatus(
-                                                "Input error: "
-                                                        .. tostring(err):sub(1, 80)
-                                        )
+                                        if not ok then
+                                                updateHoldStatus(
+                                                        "Engine error: "
+                                                                .. tostring(err):sub(1, 80)
+                                                )
+                                        end
                                 end
-                        end
-                )
-
-                ObjectHoldSettings.HeartbeatConnection = RunService.Heartbeat:Connect(
-                        function(deltaTime)
-                                local ok, err = pcall(updateObjectHold, deltaTime)
-
-                                if not ok then
-                                        updateHoldStatus(
-                                                "Engine error: "
-                                                        .. tostring(err):sub(1, 80)
-                                        )
-                                end
-                        end
-                )
+                        )
+                end)
+                if not started then
+                        ObjectHoldSettings.Enabled = false
+                        stopObjectHold()
+                        updateHoldStatus("Initialization failed: " .. tostring(err):sub(1, 80))
+                end
+                if type(ObjectHold.OnEnabledChanged) == "function" then
+                        pcall(ObjectHold.OnEnabledChanged, ObjectHoldSettings.Enabled)
+                end
         end
 end
 
@@ -4676,35 +4704,36 @@ do
                 end
         end
 
-        local function stopObjectPull()
-                disconnect(ObjectPullSettings.Connection)
-                ObjectPullSettings.Connection = nil
-                ObjectPullSettings.NextEnvAt = 0
-                ObjectPullSettings.NextPassAt = 0
-
+        local function resetPullCharacter()
                 for root in pairs(claimedRoots) do
                         releasePullRoot(root)
                 end
-
                 frameTick = 0
                 ObjectPullSettings.SimBoost = false
+                ObjectPullSettings.NextEnvAt = 0
+                ObjectPullSettings.NextPassAt = 0
                 table.clear(walkStack)
                 table.clear(walkSeen)
+                restorePullEnvironment()
+        end
+
+        ObjectPull.resetCharacter = function()
+                resetPullCharacter()
+                updatePullStatus("Character unavailable")
+        end
+
+        local function stopObjectPull()
+                disconnect(ObjectPullSettings.Connection)
+                ObjectPullSettings.Connection = nil
+                resetPullCharacter()
 
                 if pullFolder then
                         local folder = pullFolder
                         pullFolder = nil
-
-                        pcall(function()
-                                folder:Destroy()
-                        end)
+                        pcall(function() folder:Destroy() end)
                 end
-
-                restorePullEnvironment()
         end
 
-        -- Shared with the shaker so the two storm engines never
-        -- claim the same assembly and fight over it.
         ObjectPull.IsClaimed = function(root)
                 return claimedRoots[root] ~= nil
         end
@@ -4722,42 +4751,51 @@ do
                 stopObjectPull()
                 ObjectPullSettings.Enabled = enabled
 
-                if type(ObjectPull.OnEnabledChanged) == "function" then
-                        pcall(ObjectPull.OnEnabledChanged, enabled)
-                end
-
                 if not enabled then
                         updatePullStatus("Object Pull off")
+                        if type(ObjectPull.OnEnabledChanged) == "function" then
+                                pcall(ObjectPull.OnEnabledChanged, false)
+                        end
                         return
                 end
 
-                pullFolder = Instance.new("Folder")
-                pullFolder.Name = "__ObjectPullRuntime"
-                pullFolder.Parent = Workspace
+                local started, err = pcall(function()
+                        pullFolder = Instance.new("Folder")
+                        pullFolder.Name = "__ObjectPullRuntime"
+                        pullFolder.Parent = Workspace
 
-                local rootPart = LocalPlayer.Character
-                        and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                        local rootPart = LocalPlayer.Character
+                                and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 
-                if rootPart and rootPart.Parent then
-                        applyPullEnvironment()
-                end
-
-                ObjectPullSettings.NextPassAt = 0
-
-                updatePullStatus("Scanning for objects...")
-
-                ObjectPullSettings.Connection = RunService.Heartbeat:Connect(
-                        function()
-                                local ok, err = pcall(updateObjectPull)
-
-                                if not ok then
-                                        updatePullStatus(
-                                                "Engine error: "
-                                                        .. tostring(err):sub(1, 80)
-                                        )
-                                end
+                        if rootPart and rootPart.Parent then
+                                applyPullEnvironment()
                         end
-                )
+
+                        ObjectPullSettings.NextPassAt = 0
+
+                        updatePullStatus("Scanning for objects...")
+
+                        ObjectPullSettings.Connection = RunService.Heartbeat:Connect(
+                                function()
+                                        local ok, err = pcall(updateObjectPull)
+
+                                        if not ok then
+                                                updatePullStatus(
+                                                        "Engine error: "
+                                                                .. tostring(err):sub(1, 80)
+                                                )
+                                        end
+                                end
+                        )
+                end)
+                if not started then
+                        ObjectPullSettings.Enabled = false
+                        stopObjectPull()
+                        updatePullStatus("Initialization failed: " .. tostring(err):sub(1, 80))
+                end
+                if type(ObjectPull.OnEnabledChanged) == "function" then
+                        pcall(ObjectPull.OnEnabledChanged, ObjectPullSettings.Enabled)
+                end
         end
 end
 
@@ -5137,32 +5175,34 @@ do
                 end
         end
 
-        local function stopObjectShaker()
-                disconnect(ShakerSettings.Connection)
-                ShakerSettings.Connection = nil
-                ShakerSettings.NextEnvAt = 0
-                ShakerSettings.NextScanAt = 0
-
+        local function resetShakeCharacter()
                 for root in pairs(claimedRoots) do
                         releaseShakeRoot(root)
                 end
-
                 frameTick = 0
                 ShakerSettings.SimBoost = false
-                if shakerFolder then
-                        local folder = shakerFolder
-                        shakerFolder = nil
-
-                        pcall(function()
-                                folder:Destroy()
-                        end)
-                end
-
+                ShakerSettings.NextEnvAt = 0
+                ShakerSettings.NextScanAt = 0
                 restoreShakeEnvironment()
         end
 
-        -- Shared with the pull so the two storm engines never claim
-        -- the same assembly and fight over it.
+        Shaker.resetCharacter = function()
+                resetShakeCharacter()
+                updateShakeStatus("Character unavailable")
+        end
+
+        local function stopObjectShaker()
+                disconnect(ShakerSettings.Connection)
+                ShakerSettings.Connection = nil
+                resetShakeCharacter()
+
+                if shakerFolder then
+                        local folder = shakerFolder
+                        shakerFolder = nil
+                        pcall(function() folder:Destroy() end)
+                end
+        end
+
         Shaker.IsClaimed = function(root)
                 return claimedRoots[root] ~= nil
         end
@@ -5180,44 +5220,53 @@ do
                 stopObjectShaker()
                 ShakerSettings.Enabled = enabled
 
-                if type(Shaker.OnEnabledChanged) == "function" then
-                        pcall(Shaker.OnEnabledChanged, enabled)
-                end
-
                 if not enabled then
                         updateShakeStatus("Object Shaker off")
+                        if type(Shaker.OnEnabledChanged) == "function" then
+                                pcall(Shaker.OnEnabledChanged, false)
+                        end
                         return
                 end
 
-                local rootPart = LocalPlayer.Character
-                        and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                local started, err = pcall(function()
+                        local rootPart = LocalPlayer.Character
+                                and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 
-                if rootPart and rootPart.Parent then
-                        applyShakeEnvironment()
-                end
-
-                if not shakerFolder then
-                        shakerFolder = Instance.new("Folder")
-                        shakerFolder.Name = "__ObjectShakerRuntime"
-                        shakerFolder.Parent = Workspace
-                end
-
-                ShakerSettings.NextScanAt = 0
-
-                updateShakeStatus("Scanning for objects...")
-
-                ShakerSettings.Connection = RunService.Heartbeat:Connect(
-                        function(deltaTime)
-                                local ok, err = pcall(updateObjectShaker, deltaTime)
-
-                                if not ok then
-                                        updateShakeStatus(
-                                                "Engine error: "
-                                                        .. tostring(err):sub(1, 80)
-                                        )
-                                end
+                        if rootPart and rootPart.Parent then
+                                applyShakeEnvironment()
                         end
-                )
+
+                        if not shakerFolder then
+                                shakerFolder = Instance.new("Folder")
+                                shakerFolder.Name = "__ObjectShakerRuntime"
+                                shakerFolder.Parent = Workspace
+                        end
+
+                        ShakerSettings.NextScanAt = 0
+
+                        updateShakeStatus("Scanning for objects...")
+
+                        ShakerSettings.Connection = RunService.Heartbeat:Connect(
+                                function(deltaTime)
+                                        local ok, err = pcall(updateObjectShaker, deltaTime)
+
+                                        if not ok then
+                                                updateShakeStatus(
+                                                        "Engine error: "
+                                                                .. tostring(err):sub(1, 80)
+                                                )
+                                        end
+                                end
+                        )
+                end)
+                if not started then
+                        ShakerSettings.Enabled = false
+                        stopObjectShaker()
+                        updateShakeStatus("Initialization failed: " .. tostring(err):sub(1, 80))
+                end
+                if type(Shaker.OnEnabledChanged) == "function" then
+                        pcall(Shaker.OnEnabledChanged, ShakerSettings.Enabled)
+                end
         end
 end
 
@@ -5538,8 +5587,12 @@ local function bindFeature(name, feature, settings, preferenceKey)
                                 return
                         end
 
-                        enabled = desired
-                        feature.setEnabled(desired)
+                        local ok = pcall(feature.setEnabled, desired)
+                        enabled = settings.Enabled == true
+                        if not ok or enabled ~= desired then
+                                toggle:Set(enabled)
+                        end
+                        Preferences.save()
                 end
         })
 
@@ -5849,6 +5902,13 @@ VehicleTeleportSection:Toggle({
         end
 })
 end
+
+track(LocalPlayer.CharacterRemoving:Connect(function()
+        if not running then return end
+        if ObjectHoldSettings.Enabled then pcall(ObjectHold.resetCharacter) end
+        if ObjectPullSettings.Enabled then pcall(ObjectPull.resetCharacter) end
+        if ShakerSettings.Enabled then pcall(Shaker.resetCharacter) end
+end))
 
 track(LocalPlayer.CharacterAdded:Connect(function(character)
         bindMovementCharacter(character)
