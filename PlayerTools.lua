@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "1.8"
+local VERSION = "1.9"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -256,6 +256,20 @@ local ShakerSettings = {
 
 local Shaker = {}
 
+local RingSettings = {
+        Enabled = false,
+        Radius = 25,
+        Speed = 90,
+        Height = 5,
+        Tilt = 0,
+        Layers = 1,
+        Spacing = 8,
+        Connection = nil,
+        LastStatus = nil
+}
+
+local RingParts = {}
+
 local Preferences = {
         path = "PlayerTools.settings.json",
         values = {},
@@ -281,6 +295,13 @@ local Preferences = {
                 {key = "ObjectPullSettings.Enabled", state = ObjectPullSettings, field = "Enabled", active = true},
                 {key = "ObjectPullSettings.KeepDistance", state = ObjectPullSettings, field = "KeepDistance", min = 3, max = 50},
                 {key = "ShakerSettings.Enabled", state = ShakerSettings, field = "Enabled", active = true},
+                {key = "RingSettings.Enabled", state = RingSettings, field = "Enabled", active = true},
+                {key = "RingSettings.Radius", state = RingSettings, field = "Radius", min = 5, max = 300},
+                {key = "RingSettings.Speed", state = RingSettings, field = "Speed", min = 0, max = 360},
+                {key = "RingSettings.Height", state = RingSettings, field = "Height", min = -100, max = 100},
+                {key = "RingSettings.Tilt", state = RingSettings, field = "Tilt", min = -90, max = 90},
+                {key = "RingSettings.Layers", state = RingSettings, field = "Layers", min = 1, max = 5},
+                {key = "RingSettings.Spacing", state = RingSettings, field = "Spacing", min = 0, max = 40},
                 {key = "FlySettings.Enabled", state = FlySettings, field = "Enabled", active = true},
                 {key = "FlySettings.Speed", state = FlySettings, field = "Speed", min = 10, max = 250},
                 {key = "AimlockSettings.Enabled", state = AimlockSettings, field = "Enabled", active = true},
@@ -2985,7 +3006,8 @@ local function isFlingPart(part)
         if part == PlatformSettings.Part then return false end
         if ObjectHoldSettings.Root == part
                 or (ObjectPull.IsClaimed and ObjectPull.IsClaimed(part))
-                or (Shaker.IsClaimed and Shaker.IsClaimed(part)) then
+                or (Shaker.IsClaimed and Shaker.IsClaimed(part))
+                or (RingParts.IsClaimed and RingParts.IsClaimed(part)) then
                 return false
         end
         local vehicle = VehicleSettings.CurrentModel
@@ -3643,7 +3665,8 @@ do
                 end
 
                 if (ObjectPull.IsClaimed and ObjectPull.IsClaimed(root))
-                        or (Shaker.IsClaimed and Shaker.IsClaimed(root)) then
+                        or (Shaker.IsClaimed and Shaker.IsClaimed(root))
+                        or (RingParts.IsClaimed and RingParts.IsClaimed(root)) then
                         return false
                 end
 
@@ -4568,7 +4591,8 @@ do
                         return false
                 end
 
-                if Shaker.IsClaimed and Shaker.IsClaimed(root) then
+                if (Shaker.IsClaimed and Shaker.IsClaimed(root))
+                        or (RingParts.IsClaimed and RingParts.IsClaimed(root)) then
                         return false
                 end
 
@@ -5088,7 +5112,8 @@ do
                         return false
                 end
 
-                if ObjectPull.IsClaimed and ObjectPull.IsClaimed(root) then
+                if (ObjectPull.IsClaimed and ObjectPull.IsClaimed(root))
+                        or (RingParts.IsClaimed and RingParts.IsClaimed(root)) then
                         return false
                 end
 
@@ -5340,6 +5365,257 @@ do
         end
 end
 
+do
+        local SCAN_INTERVAL = 2
+        local SCAN_BUDGET = 0.002
+        local UPDATE_BUDGET = 0.003
+        local SCAN_BATCH = 400
+        local CLAIM_BATCH = 8
+        local UPDATE_BATCH = 240
+        local TAU = math.pi * 2
+        local claims = {}
+        local ordered = {}
+        local stack = {}
+        local seen = {}
+        local folder
+        local characterRoot
+        local removedCharacter
+        local nextScan = 0
+        local nextStatus = 0
+        local cursor = 1
+        local phase = 0
+        local scanning = false
+        local status = makeStatusUpdater(RingParts, RingSettings, "Ring Parts off")
+
+        local function protected(part)
+                if not part.Parent or part.Anchored or part == PlatformSettings.Part
+                        or part:IsA("Seat") or part:IsA("VehicleSeat")
+                        or part:FindFirstChildOfClass("Fire") then
+                        return true
+                end
+                if folder and part:IsDescendantOf(folder) then return true end
+                local vehicle = VehicleSettings.CurrentModel
+                if vehicle and vehicle.Parent and part:IsDescendantOf(vehicle) then return true end
+                local ancestor = part.Parent
+                while ancestor and ancestor ~= Workspace do
+                        if ancestor:IsA("Tool") or ancestor:IsA("Accessory")
+                                or (ancestor:IsA("Model") and (ancestor:FindFirstChildOfClass("Humanoid")
+                                        or ancestor:FindFirstChildOfClass("AnimationController"))) then
+                                return true
+                        end
+                        ancestor = ancestor.Parent
+                end
+                return false
+        end
+
+        local function eligible(root)
+                return root and root:IsA("BasePart") and root:IsDescendantOf(Workspace)
+                        and root.AssemblyRootPart == root and not protected(root)
+                        and root.ReceiveAge == 0
+                        and ObjectHoldSettings.Root ~= root
+                        and not (ObjectPull.IsClaimed and ObjectPull.IsClaimed(root))
+                        and not (Shaker.IsClaimed and Shaker.IsClaimed(root))
+        end
+
+        local function release(root)
+                local record = claims[root]
+                if not record then return end
+                claims[root] = nil
+                local index = record.index
+                local last = ordered[#ordered]
+                ordered[index] = last
+                ordered[#ordered] = nil
+                if last ~= root then claims[last].index = index end
+                PhysicsRig.destroy(record)
+                PhysicsRig.restoreParts(record)
+        end
+
+        local function claim(root)
+                if claims[root] or not eligible(root) then return false end
+                for _, part in ipairs(PhysicsRig.assemblyParts(root)) do
+                        if protected(part) then return false end
+                end
+                local record = {parts = {}, rotation = root.CFrame - root.Position, index = #ordered + 1}
+                claims[root] = record
+                ordered[record.index] = root
+                local ok = pcall(function()
+                        PhysicsRig.captureParts(record, root)
+                        PhysicsRig.create(record, root, {
+                                folder = folder,
+                                targetName = "RingTarget",
+                                maxVelocity = 250,
+                                positionResponsiveness = 35,
+                                orientationResponsiveness = 25,
+                                maxAngularVelocity = 20
+                        })
+                end)
+                if not ok then release(root) end
+                return ok
+        end
+
+        local function clear()
+                while #ordered > 0 do release(ordered[#ordered]) end
+                table.clear(stack)
+                table.clear(seen)
+                characterRoot = nil
+                scanning = false
+                nextScan = 0
+                nextStatus = 0
+                cursor = 1
+                phase = 0
+        end
+
+        local function scan(now)
+                if not scanning then
+                        if now < nextScan then return end
+                        for _, child in ipairs(Workspace:GetChildren()) do
+                                stack[#stack + 1] = child
+                        end
+                        scanning = true
+                end
+
+                local deadline = os.clock() + SCAN_BUDGET
+                local processed, added = 0, 0
+                while #stack > 0 and processed < SCAN_BATCH and added < CLAIM_BATCH
+                        and os.clock() < deadline do
+                        local instance = stack[#stack]
+                        stack[#stack] = nil
+                        processed += 1
+                        if not instance.Parent or instance == folder then continue end
+                        if instance:IsA("BasePart") then
+                                local root = instance.AssemblyRootPart
+                                if root and not seen[root] then
+                                        seen[root] = true
+                                        if not claims[root] and claim(root) then added += 1 end
+                                end
+                        end
+                        for _, child in ipairs(instance:GetChildren()) do
+                                stack[#stack + 1] = child
+                        end
+                end
+
+                if #stack == 0 then
+                        table.clear(seen)
+                        scanning = false
+                        nextScan = now + SCAN_INTERVAL
+                end
+        end
+
+        local function update(dt)
+                if not running or not RingSettings.Enabled then return end
+                local character = LocalPlayer.Character
+                local root = character and getRoot(character)
+                if character == removedCharacter or not root or not root.Parent then
+                        if characterRoot then clear() end
+                        status("Character unavailable")
+                        return
+                end
+                removedCharacter = nil
+                if characterRoot ~= root then
+                        clear()
+                        characterRoot = root
+                end
+
+                local now = os.clock()
+                scan(now)
+                dt = tonumber(dt) or 0
+                if dt ~= dt or dt < 0 then dt = 0 end
+                phase = (phase + math.rad(RingSettings.Speed) * math.min(dt, 0.1)) % TAU
+
+                local count = #ordered
+                local layers = math.min(count, math.clamp(math.floor(RingSettings.Layers + 0.5), 1, 5))
+                local origin = root.Position + Vector3.new(0, RingSettings.Height, 0)
+                local tilt = CFrame.Angles(math.rad(RingSettings.Tilt), 0, 0)
+                local radius, spacing = RingSettings.Radius, RingSettings.Spacing
+                local budget = math.min(count, UPDATE_BATCH)
+                local deadline = os.clock() + UPDATE_BUDGET
+                for _ = 1, budget do
+                        if #ordered == 0 or os.clock() >= deadline then break end
+                        if cursor > #ordered then cursor = 1 end
+                        local assembly = ordered[cursor]
+                        local record = claims[assembly]
+                        if not eligible(assembly) or not PhysicsRig.valid(record, assembly) then
+                                release(assembly)
+                        else
+                                local slot = cursor - 1
+                                local layer = slot % layers
+                                local layerCount = math.floor((count - 1 - layer) / layers) + 1
+                                local angle = phase + TAU * math.floor(slot / layers) / layerCount
+                                local localPosition = Vector3.new(math.cos(angle) * radius,
+                                        (layer - (layers - 1) / 2) * spacing, math.sin(angle) * radius)
+                                record.target.CFrame = CFrame.new(origin + tilt:VectorToWorldSpace(localPosition))
+                                        * record.rotation
+                                cursor += 1
+                        end
+                end
+
+                if now >= nextStatus then
+                        nextStatus = now + 0.5
+                        status("Orbiting " .. #ordered .. " assemblies" .. (scanning and " - scanning" or ""))
+                end
+        end
+
+        RingParts.IsClaimed = function(root)
+                return claims[root] ~= nil
+        end
+
+        RingParts.resetCharacter = function()
+                removedCharacter = LocalPlayer.Character
+                clear()
+                status("Character unavailable")
+        end
+
+        local function stop()
+                disconnect(RingSettings.Connection)
+                RingSettings.Connection = nil
+                clear()
+                removedCharacter = nil
+                if folder then
+                        local old = folder
+                        folder = nil
+                        pcall(function() old:Destroy() end)
+                end
+        end
+
+        RingParts.setEnabled = function(value)
+                local enabled = value == true
+                if enabled and not running then return end
+                if enabled and RingSettings.Enabled and RingSettings.Connection
+                        and RingSettings.Connection.Connected then return end
+                RingSettings.Enabled = false
+                stop()
+                if enabled then
+                        local ok, err = pcall(function()
+                                folder = Instance.new("Folder")
+                                folder.Name = "__RingPartsRuntime"
+                                folder.Parent = Workspace
+                                RingSettings.Connection = RunService.Heartbeat:Connect(function(dt)
+                                        local success, failure = pcall(update, dt)
+                                        if not success then
+                                                RingSettings.Enabled = false
+                                                stop()
+                                                status("Ring error: " .. tostring(failure):sub(1, 80))
+                                                if RingParts.OnEnabledChanged then
+                                                        pcall(RingParts.OnEnabledChanged, false)
+                                                end
+                                        end
+                                end)
+                        end)
+                        RingSettings.Enabled = ok
+                        if ok then status("Scanning for objects...")
+                        else
+                                stop()
+                                status("Initialization failed: " .. tostring(err):sub(1, 80))
+                        end
+                else
+                        status("Ring Parts off")
+                end
+                if RingParts.OnEnabledChanged then
+                        pcall(RingParts.OnEnabledChanged, RingSettings.Enabled)
+                end
+        end
+end
+
 local function cleanup()
         if not running then
                 return
@@ -5365,6 +5641,7 @@ local function cleanup()
         pcall(function()
                 Shaker.setEnabled(false)
         end)
+        pcall(RingParts.setEnabled, false)
         clearNoclip()
         stopFling()
         disableAntiFling()
@@ -5723,6 +6000,30 @@ ObjectPullSection:Slider({
 })
 
 bindFeature("Object Shaker", Shaker, ShakerSettings, "ShakerSettings.Enabled")
+
+local RingSection = bindFeature("Ring Parts", RingParts, RingSettings, "RingSettings.Enabled")
+for _, spec in ipairs({
+        {"Radius", "Radius", 5, 300},
+        {"Speed (deg/s)", "Speed", 0, 360},
+        {"Height", "Height", -100, 100},
+        {"Tilt", "Tilt", -90, 90},
+        {"Layers", "Layers", 1, 5},
+        {"Layer Spacing", "Spacing", 0, 40}
+}) do
+        local field, minimum, maximum = spec[2], spec[3], spec[4]
+        RingSection:Slider({
+                Text = spec[1],
+                Min = minimum,
+                Max = maximum,
+                Value = RingSettings[field],
+                Callback = function(value)
+                        local number = tonumber(value)
+                        if number and number == number and math.abs(number) < math.huge then
+                                RingSettings[field] = math.clamp(number, minimum, maximum)
+                        end
+                end
+        })
+end
 end
 
 do
@@ -5978,6 +6279,7 @@ track(LocalPlayer.CharacterRemoving:Connect(function()
         if ObjectHoldSettings.Enabled then pcall(ObjectHold.resetCharacter) end
         if ObjectPullSettings.Enabled then pcall(ObjectPull.resetCharacter) end
         if ShakerSettings.Enabled then pcall(Shaker.resetCharacter) end
+        if RingSettings.Enabled then pcall(RingParts.resetCharacter) end
 end))
 
 track(LocalPlayer.CharacterAdded:Connect(function(character)
@@ -6153,6 +6455,7 @@ do
         if Preferences.values["ObjectHoldSettings.Enabled"] then pcall(ObjectHold.setEnabled, true) end
         if Preferences.values["ObjectPullSettings.Enabled"] then pcall(ObjectPull.setEnabled, true) end
         if Preferences.values["ShakerSettings.Enabled"] then pcall(Shaker.setEnabled, true) end
+        if Preferences.values["RingSettings.Enabled"] then pcall(RingParts.setEnabled, true) end
         if Preferences.values["FlySettings.Enabled"] then pcall(setFlyEnabled, true) end
         if Preferences.values["AimlockSettings.Enabled"] then pcall(setAimlockEnabled, true) end
         if Preferences.values["FlingSettings.Enabled"] then pcall(setFlingEnabled, true) end
