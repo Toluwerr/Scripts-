@@ -422,6 +422,18 @@ local function choiceKey(options)
     return table.concat({options.style, options.corner, options.curve, tostring(options.power), tostring(options.spin)}, ":")
 end
 
+local function frameContact(frames, position, velocity, gravity, duration, radius)
+    local firstTime, firstPoint
+    for _, frame in ipairs(frames) do
+        local time, point = frame:sweep(position, velocity, gravity, duration, radius)
+        if finite(time) and point and time >= 0 and time <= duration
+            and (not firstTime or time < firstTime) then
+            firstTime, firstPoint = time, point
+        end
+    end
+    return firstTime, firstPoint
+end
+
 local function makeShotPlanner(Flight, budget)
     local function validVector(value)
         return typeof(value) == "Vector3" and finite(value.X) and finite(value.Y) and finite(value.Z)
@@ -453,7 +465,28 @@ local function makeShotPlanner(Flight, budget)
     end
 
     local function physicsContext(sample)
-        return {params = Flight.params(sample.ball), groundY = Ball.groundBallY()}
+        local world = module(gameModules.BallSim, "World")
+        return {
+            params = Flight.params(sample.ball), groundY = Ball.groundBallY(),
+            frames = world.get().frames, frameParams = world.params(),
+        }
+    end
+
+    local function clearsFrames(simulation, passage, context)
+        local frames, params = context.frames, context.frameParams
+        if not frames or #frames == 0 then return true end
+        local step = Flight.STEP
+        for i = 1, simulation.n - 1 do
+            local at = (i - 1) * step
+            local duration = math.min(step, passage.time - at)
+            if duration <= 0 then break end
+            if budget and i % 12 == 1 then budget() end
+            local rolling = simulation.rollAt and at >= simulation.rollAt
+            local time = frameContact(frames, simulation.pos[i], simulation.vel[i],
+                if rolling then 0 else params.gravity, duration, params.radius)
+            if time then return false end
+        end
+        return true
     end
 
     local function sameParams(previous, current)
@@ -498,7 +531,8 @@ local function makeShotPlanner(Flight, budget)
             if passage.valid then
                 local crossing = if closeRange then passage.position else passage.centre or passage.position
                 local placementError = Vector2.new(crossing.Y - target.Y, crossing.Z - target.Z).Magnitude
-                if (miss <= 1.1 or placementError <= 1.1) and (not bestError or placementError < bestError) then
+                if (miss <= 1.1 or placementError <= 1.1) and (not bestError or placementError < bestError)
+                    and clearsFrames(simulation, passage, context) then
                     bestError = placementError
                     best = {
                         target = target, aim = aim, family = family, velocity = velocity, spin = spin,
@@ -525,7 +559,8 @@ local function makeShotPlanner(Flight, budget)
         local context = physicsContext(sample)
         if sample.ball == plan.sample.ball and sample.pid == plan.sample.pid
             and sample.from == plan.sample.from and context.groundY == plan.groundY
-            and sameParams(plan.physicsParams, context.params) then
+            and sameParams(plan.physicsParams, context.params)
+            and clearsFrames(plan.simulation, plan.passage, context) then
             local refreshed = table.clone(plan)
             refreshed.sample = sample
             return refreshed
@@ -1482,20 +1517,17 @@ local Visual = (function()
         local stop
         for i = 1, math.ceil(math.clamp(seconds, 0.05, 6) / Sim.STEP) do
             local previous = state
-            local hitTime, hitPosition
-            for _, frame in ipairs(world.frames) do
-                local time, point = frame:sweep(previous.pos, previous.vel, if previous.rolling then 0 else params.gravity, Sim.STEP, params.radius)
-                if time and point and time >= 0 and time <= Sim.STEP and (not hitTime or time < hitTime) then hitTime, hitPosition = time, point end
-            end
-            if hitTime then
-                rows[#rows + 1] = {t = previous.t + hitTime, p = hitPosition, v = previous.vel}
-                state = {t = previous.t + hitTime, pos = hitPosition, vel = previous.vel}
-                stop = "Contact"
-                break
-            end
+            local hitTime, hitPosition = frameContact(world.frames, previous.pos, previous.vel,
+                if previous.rolling then 0 else params.gravity, Sim.STEP, params.radius)
             state = Sim.step(World.FLIGHT, state, Sim.STEP, params, sandbox, false, 0, nil)
             if not validVector(state.pos) then return nil end
             local fraction, crossing = V.goalCrossing(previous.pos, state.pos, bounds, lines, params.radius)
+            local crossingTime = fraction and (state.t - previous.t) * fraction
+            if hitTime and (not crossingTime or hitTime <= crossingTime) then
+                rows[#rows + 1] = {t = previous.t + hitTime, p = hitPosition, v = previous.vel}
+                stop = "Contact"
+                break
+            end
             if fraction then
                 rows[#rows + 1] = {t = previous.t + (state.t - previous.t) * fraction, p = crossing, v = previous.vel:Lerp(state.vel, fraction)}
                 stop = "Goal"
