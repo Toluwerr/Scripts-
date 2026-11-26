@@ -19,6 +19,7 @@ local state = {
     alive = true,
     enabled = false,
     humanize = false,
+    antiAFK = true,
     amount = 35,
     lastNote = {},
     offsets = setmetatable({}, {__mode = "k"}),
@@ -202,6 +203,10 @@ local function cleanup()
         pcall(function() state.conn:Disconnect() end)
         state.conn = nil
     end
+    if state.idleConnection then
+        state.idleConnection:Disconnect()
+        state.idleConnection = nil
+    end
     if global.__SYMPHONY_AP == state then
         global.__SYMPHONY_AP = nil
     end
@@ -260,6 +265,13 @@ local built, widget = pcall(function()
             state.amount = math.clamp(finite(tonumber(value), 35), 0, 100)
         end
     })
+    ui:Toggle({
+        Text = "Anti-AFK",
+        Value = state.antiAFK,
+        Callback = function(value)
+            state.antiAFK = value == true
+        end
+    })
     if resolveError then status:Set("Engine unavailable: " .. resolveError:sub(1, 80)) end
     return ui
 end)
@@ -272,6 +284,15 @@ if not built then
 end
 
 global.__SYMPHONY_AP = state
+
+state.idleConnection = player.Idled:Connect(function()
+    if not state.alive or not state.antiAFK then return end
+    pcall(function()
+        local virtualUser = game:GetService("VirtualUser")
+        virtualUser:CaptureController()
+        virtualUser:ClickButton2(Vector2.zero)
+    end)
+end)
 
 if engine then
     state.conn = RunService.Heartbeat:Connect(update)
