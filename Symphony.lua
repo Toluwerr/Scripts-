@@ -230,7 +230,8 @@ end
 local built, widget = pcall(function()
     local ui = library:CreateWidget({
         Title = "Symphony",
-        Width = 210,
+        Width = 150,
+        MinWidth = 140,
         OnClose = cleanup
     })
     state.win = ui
@@ -257,7 +258,7 @@ local built, widget = pcall(function()
         end
     })
     ui:Slider({
-        Text = "Timing variation (%)",
+        Text = "Variation (%)",
         Min = 0,
         Max = 100,
         Value = state.amount,
