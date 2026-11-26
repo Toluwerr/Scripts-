@@ -95,20 +95,16 @@ local defaults = {
     power = 100, spin = 50, assist = false, 
     speedEnabled = false, speed = 1.5, sprint = false,
     trajectory = true, marker = true, notifications = true,
-    passStrength = 100, passType = "Direct pass", passPower = 85, passCurve = "Automatic", passSpin = 25,
-    passTargets = "Teammates", passCone = 14, passLead = true, aimDot = true,
+    aimDot = true,
     autoPoke = true, walkfling = false,
     jumpEnabled = true, infiniteJump = true, jumpHeight = 18, playerHitboxes = false, playerHitboxSize = 12, hitboxVisuals = true, ballExpander = true, ballHitboxRadius = 4, ballHitboxVisual = true,
     freezeBall = false,
-    hotPotato = false,
-    ballGlue = true, ballOrbit = false, ballGrabRange = 24, orbitRadius = 4, orbitSpeed = 32, autoDribble = false,
+    ballGlue = true, ballOrbit = false, ballGrabRange = 24, orbitRadius = 4, orbitSpeed = 32,
     antiRagdoll = true, antiSlide = true,
-    passHeightMode = "Automatic", passAngle = 37, passAdaptive = false,
     autoGK = false, gkPosition = false,
-    passDecision = "Balanced", smartPassType = "Automatic", 
     antiAFK = true, rejoinGK = true, performance = true, reducePostEffects = true, keepShadows = false, fpsCap = 240,
 }
-local S: any = {version = "0.45", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", passStatus = "B | Look at a teammate to pass", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
+local S: any = {version = "0.45", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
 local settingsPath = "Poop/soccer.settings.json"
 pcall(function()
     if isfile(settingsPath) then
@@ -134,23 +130,12 @@ S.settings.power = math.clamp(S.settings.power, 50, 108)
 S.settings.spin = math.clamp(S.settings.spin, 0, 70)
 local styles = {"Power", "Finesse", "Trivela", "Laced", "Knuckleball (low spin)", "Curve"}
 local corners = {"Auto", "Top left", "Top right", "Low left", "Low right", "Centre"}
-local passTypes = {"Direct pass", "Curled pass", "Driven pass", "Lofted pass", "Power pass"}
-if not table.find(passTypes, S.settings.passType) then S.settings.passType = "Direct pass" end
-if not table.find({"Automatic", "Left", "Right"}, S.settings.passCurve) then S.settings.passCurve = "Automatic" end
-S.settings.passTargets = "Teammates"
-if S.settings.passPower ~= S.settings.passPower or math.abs(S.settings.passPower) == math.huge or S.settings.passPower < 0 then S.settings.passPower = 85 end
-if S.settings.passAngle ~= S.settings.passAngle or S.settings.passAngle < 0 or S.settings.passAngle >= 90 then S.settings.passAngle = 37 end
-if not table.find({"Automatic", "Custom"}, S.settings.passHeightMode) then S.settings.passHeightMode = "Automatic" end
-S.settings.passSpin = math.clamp(S.settings.passSpin, 0, 60)
-S.settings.passCone = math.clamp(S.settings.passCone, 5, 25)
 if not table.find(styles, S.settings.style) then S.settings.style = "Power" end
 if not table.find(corners, S.settings.corner) then S.settings.corner = "Auto" end
 if not table.find({"Automatic", "Left", "Right"}, S.settings.curve) then S.settings.curve = "Automatic" end
 env.__PoopSoccer = S
 local cfg = S.settings
 cfg.curve = "Automatic"
-cfg.passStrength = math.clamp(cfg.passStrength, 25, 150)
-if cfg.smartPassType == "Curve left" or cfg.smartPassType == "Curve right" then cfg.smartPassType = "Curved" end
 local function save()
     local ok, err = pcall(function()
         if not isfolder("Poop") then makefolder("Poop") end
@@ -293,6 +278,69 @@ local function ballSample()
     if not finite(pid) then return nil, "Ball possession is syncing; try again" end
     return {ball = b, from = sample, time = at, pid = pid}
 end
+local PlayerMotion = (function()
+    local M = {}
+    local observations = setmetatable({}, {__mode = "k"})
+    local function flat(v) return Vector3.new(v.X, 0, v.Z) end
+    local function unit(v) return if v.Magnitude > 0.0001 then v.Unit else Vector3.new(1, 0, 0) end
+    local function bounded(v, limit) return if v.Magnitude > limit then v.Unit * limit else v end
+    local function stateObject() return game.ReplicatedStorage:FindFirstChild("ProState") end
+    function M.restart()
+        local state = stateObject()
+        if not state then return nil end
+        local phase = state:GetAttribute("Phase")
+        if phase ~= "Restart" and phase ~= "Dead" then return nil end
+        return {kind = state:GetAttribute("Restart"), team = state:GetAttribute("RestartTeam"),
+            taker = state:GetAttribute("Taker"), spot = state:GetAttribute("TakerSpot"),
+            ball = state:GetAttribute("RestartAt"), walkAt = state:GetAttribute("WalkUpAt"),
+            bannerAt = state:GetAttribute("BannerAt"), phase = phase}
+    end
+    local function actor(model, other, at)
+        local r = model:FindFirstChild("Root")
+        if not r or not r:IsA("BasePart") then return nil end
+        local id = model:GetAttribute("DribbleId")
+        if type(id) ~= "number" or id == 0 then return nil end
+        local cm = model:FindFirstChildOfClass("ControllerManager")
+        local ground = cm and cm:FindFirstChild("GroundController")
+        local speed = math.max(cm and cm.BaseMoveSpeed or 26, 1)
+        local velocity = bounded(flat(r.AssemblyLinearVelocity), math.max(speed * 1.25, 32))
+        local old = observations[model]
+        local acceleration = Vector3.zero
+        local uncertainty = 0.3
+        if old and at - old.at > 0.035 and at - old.at < 0.4 then
+            acceleration = bounded((velocity - old.velocity) / (at - old.at), 45)
+            uncertainty += math.min((velocity - old.velocity).Magnitude * 0.12, 1.8)
+        end
+        if not old or at - old.at >= 0.06 then observations[model] = {at = at, velocity = velocity} end
+        local animated = model:GetAttribute("BodyState") == "Animated"
+        return {id = id, player = other, model = model, pos = r.Position, vel = velocity,
+            acceleration = acceleration, uncertainty = uncertainty, speed = speed,
+            accel = speed / math.max(ground and ground.AccelerationTime or 0.18, 0.06),
+            available = animated, team = model:GetAttribute("Team"), role = model:GetAttribute("Role")}
+    end
+    M.actor = actor
+    local function reachTime(a, point, reach, reaction)
+        local delta = flat(point - a.pos)
+        local distance = math.max(delta.Magnitude - reach, 0)
+        if distance <= 0 then return 0 end
+        local direction = unit(delta)
+        local closing = math.clamp(a.vel:Dot(direction), -a.speed, a.speed)
+        local delay = reaction or 0.1
+        distance = math.max(distance - math.max(closing, 0) * delay, 0)
+        if distance == 0 then return delay end
+        local acceleration = math.max(a.accel, 1)
+        local accelerateFor = math.max(a.speed - closing, 0) / acceleration
+        local accelerateDistance = closing * accelerateFor + 0.5 * acceleration * accelerateFor * accelerateFor
+        if distance <= accelerateDistance then
+            return delay + (-closing + math.sqrt(closing * closing + 2 * acceleration * distance)) / acceleration
+        end
+        return delay + accelerateFor + (distance - accelerateDistance) / a.speed
+    end
+    M.reachTime = reachTime
+    life.onCleanup(function() table.clear(observations) end)
+    return M
+end)()
+
 local function opponents(includeAllies)
     local char = player.Character
     local team = char and char:GetAttribute("Team")
@@ -302,8 +350,7 @@ local function opponents(includeAllies)
             local otherRoot = model:FindFirstChild("Root")
             local otherTeam = model:GetAttribute("Team")
             if otherRoot and otherRoot:IsA("BasePart") and otherTeam and (includeAllies or otherTeam ~= team) then
-                local engine = S.passingEngine
-                local actor = engine and engine.actor(model, Players:GetPlayerFromCharacter(model), now())
+                local actor = PlayerMotion.actor(model, Players:GetPlayerFromCharacter(model), now())
                 table.insert(result, {root = otherRoot, model = model, actor = actor, enemy = otherTeam ~= team})
             end
         end
@@ -572,7 +619,7 @@ local function makeShotPlanner(Flight, budget)
 
     local function clearanceScore(plan, bodies)
         local closest, interception = 35, 0.8
-        local reachTime = S.passingEngine and S.passingEngine.reachTime
+        local reachTime = PlayerMotion.reachTime
         local stride = math.max(1, math.floor(plan.simulation.n / 28))
         for i = 1, plan.simulation.n, stride do
             if budget then budget() end
@@ -950,10 +997,6 @@ function S.shoot(silent)
     end
     return sent
 end
-
-local passSight = RaycastParams.new()
-passSight.FilterType = Enum.RaycastFilterType.Exclude
-passSight.RespectCanCollide = false
 
 local baseline = table.clone(Tuning.Speed)
 local speedFields = {"Walk", "Jog", "Sprint", "SideStep", "BackStep", "SideStepSprint", "BackStepSprint", "Strafe", "StrafeBack", "SideSprint", "BackSprint"}
@@ -2234,665 +2277,6 @@ local AntiAFK = (function()
 end)()
 S.antiAFK = AntiAFK
 
-local Passing = (function()
-    local Sim = module(gameModules, "BallSim")
-    local World = module(gameModules.BallSim, "World")
-    local Bounds = module(gameModules, "PitchBounds")
-    local Rules = module(gameModules.Dribble, "Rules")
-    local Hands = module(gameModules, "KeeperHands")
-    local Animation = module(gameModules, "AIGoalie")
-    local NativeKick = module(client, "KickClient")
-    local KeeperRules = module(gameModules, "KeeperRules")
-    local M: any = {status = "Waiting for the ball", history = {}, ranked = {}, planning = false}
-    if previous and previous.passingEngine then M.history = previous.passingEngine.history or {} end
-    local observations = setmetatable({}, {__mode = "k"})
-    local function flat(v) return Vector3.new(v.X, 0, v.Z) end
-    local function unit(v) return if v.Magnitude > 0.0001 then v.Unit else Vector3.new(1, 0, 0) end
-    local function bounded(v, limit) return if v.Magnitude > limit then v.Unit * limit else v end
-    local function push(row)
-        table.insert(M.history, row)
-        if #M.history > 40 then table.remove(M.history, 1) end
-    end
-    local function stateObject() return game.ReplicatedStorage:FindFirstChild("ProState") end
-    function M.restart()
-        local state = stateObject()
-        if not state then return nil end
-        local phase = state:GetAttribute("Phase")
-        if phase ~= "Restart" and phase ~= "Dead" then return nil end
-        return {kind = state:GetAttribute("Restart"), team = state:GetAttribute("RestartTeam"),
-            taker = state:GetAttribute("Taker"), spot = state:GetAttribute("TakerSpot"),
-            ball = state:GetAttribute("RestartAt"), walkAt = state:GetAttribute("WalkUpAt"),
-            bannerAt = state:GetAttribute("BannerAt"), phase = phase}
-    end
-    local function actor(model, other, at)
-        local r = model:FindFirstChild("Root")
-        if not r or not r:IsA("BasePart") then return nil end
-        local id = model:GetAttribute("DribbleId")
-        if type(id) ~= "number" or id == 0 then return nil end
-        local cm = model:FindFirstChildOfClass("ControllerManager")
-        local ground = cm and cm:FindFirstChild("GroundController")
-        local speed = math.max(cm and cm.BaseMoveSpeed or 26, 1)
-        local velocity = bounded(flat(r.AssemblyLinearVelocity), math.max(speed * 1.25, 32))
-        local old = observations[model]
-        local acceleration = Vector3.zero
-        local uncertainty = 0.3
-        if old and at - old.at > 0.035 and at - old.at < 0.4 then
-            acceleration = bounded((velocity - old.velocity) / (at - old.at), 45)
-            uncertainty += math.min((velocity - old.velocity).Magnitude * 0.12, 1.8)
-        end
-        if not old or at - old.at >= 0.06 then observations[model] = {at = at, velocity = velocity} end
-        local animated = model:GetAttribute("BodyState") == "Animated"
-        return {id = id, player = other, model = model, pos = r.Position, vel = velocity,
-            acceleration = acceleration, uncertainty = uncertainty, speed = speed,
-            accel = speed / math.max(ground and ground.AccelerationTime or 0.18, 0.06),
-            available = animated, team = model:GetAttribute("Team"), role = model:GetAttribute("Role")}
-    end
-    local function predict(a, time)
-        local turnTime = math.min(time, 0.3)
-        return a.pos + a.vel * time + a.acceleration * (0.25 * turnTime * turnTime)
-    end
-    M.predictActor = predict
-    M.actor = actor
-    local function reachTime(a, point, reach, reaction)
-        local delta = flat(point - a.pos)
-        local distance = math.max(delta.Magnitude - reach, 0)
-        if distance <= 0 then return 0 end
-        local direction = unit(delta)
-        local closing = math.clamp(a.vel:Dot(direction), -a.speed, a.speed)
-        local delay = reaction or 0.1
-        distance = math.max(distance - math.max(closing, 0) * delay, 0)
-        if distance == 0 then return delay end
-        local acceleration = math.max(a.accel, 1)
-        local accelerateFor = math.max(a.speed - closing, 0) / acceleration
-        local accelerateDistance = closing * accelerateFor + 0.5 * acceleration * accelerateFor * accelerateFor
-        if distance <= accelerateDistance then
-            return delay + (-closing + math.sqrt(closing * closing + 2 * acceleration * distance)) / acceleration
-        end
-        return delay + accelerateFor + (distance - accelerateDistance) / a.speed
-    end
-    M.reachTime = reachTime
-    local function inPitch(point, bounds, margin)
-        if not bounds then return true end
-        local edge = bounds.edge or bounds.ball
-        return point.X >= edge.lo.X + margin and point.X <= edge.hi.X - margin
-            and point.Z >= edge.lo.Z + margin and point.Z <= edge.hi.Z - margin
-    end
-    M.inPitch = inPitch
-    function M.snapshot(allowRestart)
-        local character = player.Character
-        local ball = Ball.getBall()
-        local r = character and character:FindFirstChild("Root")
-        if not r or not ball then return nil, "Waiting to spawn" end
-        local team = character:GetAttribute("Team")
-        if team ~= "Red" and team ~= "Blue" then return nil, "Join a team first" end
-        local ownId = character:GetAttribute("DribbleId")
-        local state = Dribble.kickState()
-        local pid = if state then state.pid else ball:GetAttribute("PossessionId")
-        local possession = ball:GetAttribute("Possessor")
-        local restart = M.restart()
-        local restartMine = allowRestart and restart and restart.kind == "GoalKick" and restart.phase == "Restart"
-            and restart.team == team and restart.taker == player.UserId
-        if restart and not restartMine then return nil, "Waiting for the restart" end
-        if character:GetAttribute("BodyState") ~= "Animated" then return nil, "Recovering" end
-        if not state and possession ~= ownId and not restartMine then return nil, "Waiting for the ball" end
-        local held = not state and possession == ownId and ball:GetAttribute("DribblePath") == ""
-        if not held and not state and not restartMine then return nil, "Settling the ball" end
-        local at = now()
-        local world, params = World.get(), World.params()
-        local from = Ball.getPosition()
-        if state then from = Path.sample(state.seg, at, state.P) end
-        if not from then return nil, "Waiting for the ball" end
-        if restartMine and possession ~= ownId and flat(from - r.Position).Magnitude > 4.5 then return nil, "Moving to the ball" end
-        local ownArea = KeeperRules.area(team)
-        if not ownArea then return nil, "Waiting for the pitch" end
-        local scene = {character = character, ball = ball, ownId = ownId, pid = pid, team = team,
-            held = held, freeRestart = restartMine and possession ~= ownId, at = at, from = from,
-            root = r, attack = Vector3.new(-ownArea.side, 0, 0), floor = world.groundY - params.radius,
-            params = params, world = {groundY = world.groundY, frames = world.frames, bodies = {}},
-            bounds = Bounds.get(), teammates = {}, enemies = {}, restart = restart,
-            offside = workspace:GetAttribute("ProServer") == true and not restartMine}
-        for _, other in ipairs(Players:GetPlayers()) do
-            local model = other.Character
-            if model and model ~= character then
-                local a = actor(model, other, at)
-                if a and (a.team == "Red" or a.team == "Blue") then
-                    if a.team == team then
-                        if a.available then table.insert(scene.teammates, a) end
-                    else table.insert(scene.enemies, a) end
-                end
-            end
-        end
-        return scene
-    end
-    local modes = {
-        {name = "Ground", family = "SideFoot", pace = 72, ground = true},
-        {name = "Driven", family = "Power", pace = 111, ground = true},
-        {name = "Chip", family = "Chip", pace = 48, minimum = 0.65},
-        {name = "Lofted", family = "Lofted", pace = 82, minimum = 1.55},
-        {name = "Curve left", family = "Finesse", pace = 86, curve = 26},
-        {name = "Curve right", family = "Trivela", pace = 86, curve = -26},
-    }
-    local handModes = {
-        {name = "Roll", kind = "roll", pace = 65, ground = true},
-        {name = "Throw", kind = "throw", pace = 68, minimum = 0.65},
-        {name = "Punt", kind = "punt", pace = Hands.PUNT_PACE, minimum = Hands.PUNT_TIME[1]},
-    }
-    M.modes, M.handModes = modes, handModes
-    local function onside(scene, receiver, delay)
-        if not scene.offside or #scene.enemies < 2 or not scene.bounds then return true end
-        local edge = scene.bounds.edge or scene.bounds.ball
-        local centre = (edge.lo.X + edge.hi.X) * 0.5
-        local receiverX = (predict(receiver, delay or 0).X - centre) * scene.attack.X
-        if receiverX <= 0 then return true end
-        local first, second = -math.huge, -math.huge
-        for _, enemy in ipairs(scene.enemies) do
-            local x = (predict(enemy, delay or 0).X - centre) * scene.attack.X
-            if x > first then first, second = x, first elseif x > second then second = x end
-        end
-        return receiverX <= math.max(second, (scene.from.X - centre) * scene.attack.X) - 0.6
-    end
-    M.onside = onside
-    local function releasePoint(scene, mode, point)
-        local direction = unit(flat(point - scene.root.Position))
-        if not scene.held then return scene.from, 0, direction end
-        if mode.kind == "punt" then
-            local from, _, fall = Hands.punt(scene.root.CFrame, direction)
-            return from, Animation.PUNT_EXTEND + fall, direction
-        end
-        local move = if mode.kind == "roll" then Animation.ROLL else Animation.THROW
-        local at = scene.root.Position + direction * Animation.travel(move, move.release)
-        return Hands.moveBall(move, CFrame.new(at), direction, move.release), move.release, direction
-    end
-    local function simulate(scene, from, velocity, spin, duration, keepRows)
-        local current = Sim.fromEvent(World.FLIGHT, {t = 0, kind = "kick", n = 0, pos = from,
-            vel = velocity, spin = spin}, scene.world.groundY)
-        local rows = if keepRows then {{t = 0, p = current.pos, v = current.vel}} else nil
-        local step = Sim.STEP
-        local count = math.ceil(duration / step)
-        for index = 1, count do
-            current = Sim.step(World.FLIGHT, current, math.min(step, duration - current.t), scene.params, scene.world, false, 0, nil)
-            if rows and (index % 4 == 0 or index == count) then
-                table.insert(rows, {t = current.t, p = current.pos, v = current.vel})
-            end
-        end
-        return current, rows
-    end
-    M.simulate = simulate
-    local function accepted(mode, velocity, spin)
-        if mode.kind then return bounded(velocity, Hands.MAX_SPEED[mode.kind]), bounded(spin, KickRules.Server.MaxSpin) end
-        return KickRules.checkStrike(mode.family, velocity, spin)
-    end
-    local function passSpeed(mode, paceScale)
-        local family = mode.family and Families[mode.family]
-        if not mode.kind and not family then return nil, "Unknown pass family" end
-        local maximum = if mode.kind then Hands.MAX_SPEED[mode.kind] else math.max(family.speed[2], family.shotSpeed and family.shotSpeed[2] or 0)
-            * KickRules.Server.SpeedSlack * KickRules.KickButton.FullPower
-        if not finite(maximum) or maximum <= 0 or not finite(paceScale) or paceScale <= 0
-            or not finite(mode.pace) or mode.pace <= 0 then
-            return nil, "Invalid pass speed"
-        end
-        return math.min(mode.pace * paceScale, maximum), maximum
-    end
-
-    local function receivingHeight(scene, mode, offset)
-        if mode.ground then return scene.world.groundY end
-        local limit = math.max(0, Rules.Pickup.MaxHeight - 0.15)
-        return scene.world.groundY + math.clamp(offset or 1.2, 0, limit)
-    end
-
-    local function solveDuration(scene, receiver, mode, space, pace, maximum, timeScale, heightOffset)
-        local initialDistance = flat(receiver.pos - scene.from).Magnitude
-        if initialDistance < 4 then return nil, "Receiver is too close" end
-        local minimum = mode.minimum or 0.18
-        local function travelTime(distance)
-            return math.clamp(distance / pace * timeScale, minimum, 5)
-        end
-        local duration = travelTime(initialDistance)
-        local receiveHeight = receivingHeight(scene, mode, heightOffset)
-        local point, from, windup, direction
-        for _ = 1, 2 do
-            point = predict(receiver, duration + (windup or 0)) + scene.attack * space
-            point = Vector3.new(point.X, receiveHeight, point.Z)
-            from, windup, direction = releasePoint(scene, mode, point)
-            duration = travelTime(flat(point - from).Magnitude)
-        end
-        point = predict(receiver, duration + windup) + scene.attack * space
-        point = Vector3.new(point.X, receiveHeight, point.Z)
-        if not inPitch(point, scene.bounds, 2) then return nil, "Outside pitch" end
-        if not onside(scene, receiver, windup) then return nil, "Offside" end
-        if reachTime(receiver, point, Rules.Pickup.CushionReach, 0.14) > duration + windup then return nil, "Receiver cannot arrive" end
-        local delta = point - from
-        local velocity = delta / duration
-        if mode.ground then velocity = flat(velocity) + Vector3.new(0, if mode.kind == "roll" then Hands.ROLL_DOWN else 0, 0)
-        else velocity += Vector3.new(0, scene.params.gravity * duration * 0.5, 0) end
-        local spin
-        local best, bestError = nil, math.huge
-        for _ = 1, 6 do
-            velocity = bounded(velocity, maximum)
-            spin = if mode.ground then Flight.rollingSpin(velocity) else Flight.spinFrom(unit(flat(velocity)), mode.curve or 0, 0)
-            velocity, spin = accepted(mode, velocity, spin)
-            if not velocity or not spin then break end
-            local endpoint = simulate(scene, from, velocity, spin, duration, false)
-            local errorVector = point - endpoint.pos
-            local error = errorVector.Magnitude
-            if error < bestError then best, bestError = {vel = velocity, spin = spin}, error end
-            if error < 0.12 then break end
-            local correction = errorVector / duration * 1.08
-            if mode.ground then correction = flat(correction) end
-            velocity += correction
-        end
-        if not best or bestError > 1.3 then return nil, {reason = "Trajectory miss", miss = bestError, time = duration, from = from, point = point, fit = best} end
-        local endpoint, rows = simulate(scene, from, best.vel, best.spin, duration, true)
-        if endpoint.pos.Y > scene.floor + scene.params.radius + Rules.Pickup.MaxHeight then return nil, "Arrival is too high" end
-        if not Rules.takeable(endpoint.vel, receiver.vel) then return nil, "Arrival cannot be controlled" end
-        return {receiver = receiver, mode = mode, space = space, from = from, velocity = best.vel,
-            spin = best.spin, time = duration, windup = windup, direction = direction,
-            point = point, rows = rows, error = bestError, arrivalVelocity = endpoint.vel,
-            timeScale = timeScale, heightOffset = receiveHeight - scene.world.groundY,
-            requestedPace = pace, maximumSpeed = maximum}
-    end
-
-    local function solve(scene, receiver, mode, space, paceScale)
-        local pace, maximum = passSpeed(mode, paceScale)
-        if not pace then return nil, maximum end
-        local plan, reason = solveDuration(scene, receiver, mode, space, pace, maximum, 1)
-        if plan then return plan end
-        if reason == "Receiver is too close" or reason == "Offside" then return nil, reason end
-
-        local factors = if mode.ground then {1.2, 0.85} else {0.8, 1.25, 0.65}
-        for _, factor in ipairs(factors) do
-            local candidate = solveDuration(scene, receiver, mode, space, pace, maximum, factor)
-            if candidate then return candidate end
-        end
-        if not mode.ground then
-            local distance = flat(receiver.pos - scene.from).Magnitude
-            local gravity = scene.params.gravity
-            local factor = 1
-            if finite(gravity) and gravity > 0 and distance > 0 then
-                local efficientTime = math.sqrt(2 * distance / gravity)
-                factor = math.clamp(efficientTime / (distance / pace), 0.45, 1.6)
-            end
-            local high = math.min(2.4, math.max(0, Rules.Pickup.MaxHeight - 0.15))
-            for _, height in ipairs({0.35, high}) do
-                local candidate = solveDuration(scene, receiver, mode, space, pace, maximum, factor, height)
-                if candidate then return candidate end
-            end
-        end
-        return nil, reason
-    end
-    M.solve = solve
-    local trajectoryCache = {}
-    local cacheKey
-    local function physicsKey(params)
-        return table.concat({params.radius, params.gravity, params.airDrag, params.curve, params.friction,
-            params.mass, params.roll, params.rollDrag, params.bounce}, ":")
-    end
-    local function coarseSolve(scene, receiver, mode, space, paceScale)
-        if scene.held or paceScale ~= 1 or math.abs(scene.from.Y - scene.world.groundY) > 0.2
-            or cacheKey ~= physicsKey(scene.params) then return solve(scene, receiver, mode, space, paceScale) end
-        local pace, maximum = passSpeed(mode, paceScale)
-        if not pace then return nil, maximum end
-        local function travelTime(distance)
-            return math.clamp(distance / pace, mode.minimum or 0.18, 5)
-        end
-        local duration = travelTime(flat(receiver.pos - scene.from).Magnitude)
-        local point
-        for _ = 1, 3 do
-            point = predict(receiver, duration) + scene.attack * space
-            duration = travelTime(flat(point - scene.from).Magnitude)
-        end
-        point = predict(receiver, duration) + scene.attack * space
-        point = Vector3.new(point.X, receivingHeight(scene, mode), point.Z)
-        local delta = flat(point - scene.from)
-        local distance = delta.Magnitude
-        local bucket = math.max(8, math.floor(distance / 8 + 0.5) * 8)
-        local template = trajectoryCache[mode.name .. ":" .. bucket]
-        if template == nil then return solve(scene, receiver, mode, space, paceScale) end
-        if template == false or template.timeScale ~= 1
-            or math.abs((template.heightOffset or 0) - (point.Y - scene.world.groundY)) > 0.001 then
-            return solve(scene, receiver, mode, space, paceScale)
-        end
-        if distance < 4 or not inPitch(point, scene.bounds, 2) or not onside(scene, receiver, 0) then return nil end
-        if reachTime(receiver, point, Rules.Pickup.CushionReach, 0.14) > duration then
-            return solve(scene, receiver, mode, space, paceScale)
-        end
-        local scale = distance / bucket
-        local timeScale = duration / template.time
-        local direction = unit(delta)
-        local basis = CFrame.fromMatrix(Vector3.zero, direction, Vector3.yAxis, direction:Cross(Vector3.yAxis))
-        local function position(v)
-            local relative = v - template.from
-            return scene.from + basis:VectorToWorldSpace(Vector3.new(relative.X * scale, relative.Y * timeScale * timeScale, relative.Z * scale))
-        end
-        local function velocity(v)
-            return basis:VectorToWorldSpace(Vector3.new(v.X * scale / timeScale, v.Y * timeScale, v.Z * scale / timeScale))
-        end
-        local rows = {}
-        for _, row in ipairs(template.rows) do
-            table.insert(rows, {t = row.t * timeScale, p = position(row.p), v = velocity(row.v)})
-        end
-        local launchVelocity = velocity(template.velocity)
-        local launchSpin = basis:VectorToWorldSpace(template.spin)
-        local checkedVelocity, checkedSpin = accepted(mode, launchVelocity, launchSpin)
-        local arrivalVelocity = velocity(template.arrivalVelocity)
-        if launchVelocity.Magnitude > maximum or not checkedVelocity or not checkedSpin
-            or (checkedVelocity - launchVelocity).Magnitude > 0.001
-            or (checkedSpin - launchSpin).Magnitude > 0.001
-            or not Rules.takeable(arrivalVelocity, receiver.vel) then
-            return solve(scene, receiver, mode, space, paceScale)
-        end
-        return {receiver = receiver, mode = mode, space = space, from = scene.from,
-            velocity = checkedVelocity, spin = checkedSpin,
-            time = duration, windup = 0, direction = direction, point = point, rows = rows,
-            error = template.error * scale + 0.15, arrivalVelocity = arrivalVelocity, approximate = true,
-            requestedPace = pace, maximumSpeed = maximum}
-    end
-    M.coarseSolve = coarseSolve
-    task.spawn(function()
-        while life.alive() do
-            local params, world = World.params(), World.get()
-            local key = physicsKey(params)
-            if key ~= cacheKey then table.clear(trajectoryCache); cacheKey = key end
-            local origin = Vector3.new(0, world.groundY, 0)
-            local scene = {from = origin, root = {Position = origin + Vector3.new(0, 3.84, 0)}, held = false,
-                floor = world.groundY - params.radius, params = params,
-                world = {groundY = world.groundY, frames = {}, bodies = {}}, attack = Vector3.xAxis}
-            local complete = true
-            for bucket = 8, 240, 8 do
-                for _, mode in ipairs(modes) do
-                    if not life.alive() then return end
-                    local cacheId = mode.name .. ":" .. bucket
-                    if trajectoryCache[cacheId] ~= nil then continue end
-                    complete = false
-                    if M.planning or S.busy or Dribble.kickState() then task.wait(0.1); continue end
-                    local receiver = {pos = origin + Vector3.new(bucket, 3.84, 0), vel = Vector3.zero,
-                        acceleration = Vector3.zero, speed = 26, accel = 145}
-                    trajectoryCache[cacheId] = solve(scene, receiver, mode, 0, 1) or false
-                    M.cacheEntries = (M.cacheEntries or 0) + 1
-                    task.wait()
-                end
-            end
-            if complete then break end
-            task.wait(0.25)
-        end
-    end)
-    local function assess(scene, plan, look)
-        local margin, blocker = 4, nil
-        for _, row in ipairs(plan.rows) do
-            local time = row.t + plan.windup
-            if not inPitch(row.p, scene.bounds, 0.3) then return nil end
-            if row.t > 0.02 then
-                for _, enemy in ipairs(scene.enemies) do
-                    local height = scene.floor + 8.5 + (if time > 0.45 then 3.2 else 0)
-                    if row.p.Y <= height then
-                        local reach = 2.5 + scene.params.radius + math.min(time * 0.7 + enemy.uncertainty, 2)
-                        local travel = reachTime(enemy, row.p, reach, if enemy.available then 0.08 else 0.6)
-                        local difference = travel - time
-                        if difference < margin then margin, blocker = difference, enemy end
-                    end
-                end
-            end
-        end
-        local room = 35
-        local receivesAt = plan.time + plan.windup
-        for _, enemy in ipairs(scene.enemies) do
-            room = math.min(room, flat(predict(enemy, receivesAt) - plan.point).Magnitude)
-        end
-        local receiverUncertainty = plan.receiver.uncertainty * receivesAt + math.max(receivesAt - 1, 0) * 1.1
-        local probability = 1 / (1 + math.exp(-math.clamp(margin / 0.17, -20, 20)))
-        local progress = math.clamp((plan.point - scene.from):Dot(scene.attack), -100, 170)
-        local score = probability * 100 + progress * 0.065 + math.min(room, 25) * 0.35
-            - receivesAt * 1.8 - receiverUncertainty * 2 - plan.error * 4
-        if plan.mode.ground then score += 1.5 end
-        if cfg.passDecision == "Safe" then score -= math.max(progress, 0) * 0.035
-        elseif cfg.passDecision == "Attacking" then score += progress * 0.06 end
-        if look then score += math.max(unit(flat(plan.receiver.pos - scene.from)):Dot(look), -1) * 22 end
-        if plan.approximate then margin -= 0.06 end
-        plan.margin, plan.score, plan.blocker, plan.room = margin, score, blocker, room
-        plan.receiverUncertainty = receiverUncertainty
-        return plan
-    end
-    M.assess = assess
-    function M.plan(scene, options)
-        options = options or {}
-        local ranked, rejected = {}, {}
-        local sliceAt = os.clock()
-        for _, receiver in ipairs(scene.teammates) do
-            if options.receiverId and receiver.id ~= options.receiverId then continue end
-            for _, mode in ipairs(if scene.held then handModes else modes) do
-                if options.type and options.type ~= "Automatic" and options.type ~= mode.name
-                    and not (options.type == "Curved" and mode.curve) then continue end
-                for _, space in ipairs({0, 5}) do
-                    local plan, reason
-                    if options.exact then
-                        plan, reason = solve(scene, receiver, mode, space, options.paceScale or 1)
-                    else
-                        plan, reason = coarseSolve(scene, receiver, mode, space, options.paceScale or 1)
-                    end
-                    if plan then
-                        plan = assess(scene, plan, options.look)
-                        if plan then table.insert(ranked, plan) else reason = "Trajectory leaves pitch" end
-                    end
-                    if not plan then
-                        local label = if type(reason) == "table" then reason.reason else reason
-                        label = label or "No valid trajectory"
-                        rejected[label] = (rejected[label] or 0) + 1
-                    end
-                    if options.yield and os.clock() - sliceAt > 0.003 then
-                        options.yield()
-                        if not life.alive() then return nil, {} end
-                        sliceAt = os.clock()
-                    end
-                end
-            end
-        end
-        table.sort(ranked, function(a, b) return a.score > b.score end)
-        M.rejected = rejected
-        return ranked[1], ranked
-    end
-    local function minimumMargin()
-        return if cfg.passDecision == "Safe" then 0.18 elseif cfg.passDecision == "Attacking" then -0.08 else 0.04
-    end
-    function M.safe(plan) return plan and plan.margin >= minimumMargin() end
-    local function stillOwn(scene)
-        if not life.alive() or player.Character ~= scene.character or Ball.getBall() ~= scene.ball then return false end
-        local state = Dribble.kickState()
-        if state and not scene.held and not scene.freeRestart then return state.pid == scene.pid end
-        if scene.ball:GetAttribute("PossessionId") ~= scene.pid then return false end
-        if scene.freeRestart then
-            local restart = M.restart()
-            return restart and restart.phase == "Restart" and restart.kind == "GoalKick" and restart.team == scene.team
-                and restart.taker == player.UserId and flat(scene.from - scene.root.Position).Magnitude <= 4.5
-        end
-        return scene.ball:GetAttribute("Possessor") == scene.ownId
-    end
-    M.stillOwn = stillOwn
-    local function release(scene, plan)
-        if not stillOwn(scene) or S.busy then return false end
-        local sent
-        S.busy = true
-        local ok, err = pcall(function()
-            if scene.held then
-                if not NativeKick.hands or not NativeKick.hands.release then return end
-                local restoreAim = life.override(Hands, "aimIn", function() return plan.direction end)
-                local distance = flat(plan.point - scene.root.Position).Magnitude
-                local restoreKind = life.override(Hands, "kindFor", function() return plan.mode.kind, distance end)
-                local original = Hands.launch
-                local restoreLaunch = life.override(Hands, "launch", function(kind, from, at, direction, amount, yielding)
-                    if kind == plan.mode.kind and (from - plan.from).Magnitude < 4 then return plan.velocity, plan.spin end
-                    return original(kind, from, at, direction, amount, yielding)
-                end)
-                local invoked, value = pcall(NativeKick.hands.release, if plan.mode.kind == "punt" then "Shoot" else "Pass", 0.5)
-                restoreAim(); restoreKind()
-                task.delay(0.12, restoreLaunch)
-                if not invoked then error(value) end
-                sent = value == true
-            else
-                local state = Dribble.kickState()
-                local from = if state and state.pid == scene.pid then Path.sample(state.seg, now(), state.P) else scene.from
-                if (from - plan.from).Magnitude > 1.4 then return end
-                if scene.freeRestart then sent = Dribble.strikeFree(from, plan.velocity, plan.spin, plan.mode.family, now())
-                elseif state and state.pid == scene.pid then sent = Dribble.strike(from, plan.velocity, plan.spin, plan.mode.family, now()) end
-            end
-        end)
-        task.delay((if sent then plan.windup else 0) + 0.12, function() if life.alive() then S.busy = false end end)
-        if not ok then M.error = tostring(err); return false end
-        if sent then
-            local record = {at = now(), pid = scene.pid, ball = scene.ball, ownId = scene.ownId,
-                receiverId = plan.receiver.id, receiver = plan.receiver.player.DisplayName, receiverModel = plan.receiver.model,
-                style = plan.mode.name, point = plan.point, margin = plan.margin, score = plan.score,
-                time = plan.time, windup = plan.windup, requestedVelocity = plan.velocity,
-                requestedPace = plan.requestedPace, maximumSpeed = plan.maximumSpeed,
-                launchSpeed = plan.velocity.Magnitude, state = "Sent"}
-            M.active = record
-            push(record)
-            M.status = "Passing to " .. record.receiver .. " | " .. record.style
-            return true
-        end
-        return false
-    end
-    M.release = release
-    function M.lookTarget(scene)
-        local camera = workspace.CurrentCamera
-        if not camera then return nil end
-        local origin, direction = camera.CFrame.Position, camera.CFrame.LookVector
-        local threshold = math.cos(math.rad(cfg.passCone))
-        local best, bestAlignment, bestDistance = nil, threshold, math.huge
-        for _, receiver in ipairs(scene.teammates) do
-            local delta = receiver.pos - origin
-            local distance = delta.Magnitude
-            if distance < 0.01 then continue end
-            local alignment = delta:Dot(direction) / distance
-            if alignment >= threshold and (alignment > bestAlignment + 0.0001 or (math.abs(alignment - bestAlignment) <= 0.0001 and distance < bestDistance)) then
-                best, bestAlignment, bestDistance = receiver, alignment, distance
-            end
-        end
-        return best
-    end
-    local nextAttempt = 0
-    local function observe()
-        local record = M.active
-        if not record then return end
-        local ball = record.ball
-        if not ball.Parent or Ball.getBall() ~= ball then record.state = "Ball changed"; M.active = nil; return end
-        local pid, possessor = ball:GetAttribute("PossessionId"), ball:GetAttribute("Possessor")
-        local flight = Flight.decode(ball:GetAttribute(KickRules.ATTR_FLIGHT))
-        if flight and flight.pid == record.pid + 1 and flight.by == record.ownId then
-            record.accepted = true
-            record.acceptedVelocity = flight.vel
-        end
-        if possessor and possessor ~= 0 and possessor ~= record.ownId then
-            record.resultPid, record.resultHolder = pid, possessor
-            for _, other in ipairs(Players:GetPlayers()) do
-                local model = other.Character
-                if model and model:GetAttribute("DribbleId") == possessor then
-                    record.resultPlayer, record.resultTeam = other.DisplayName, model:GetAttribute("Team")
-                    break
-                end
-            end
-            local received = record.accepted and pid == record.pid + 2 and possessor == record.receiverId
-                and record.receiverModel:GetAttribute("DribbleId") == record.receiverId
-            record.state = if received then "Received" else "Interrupted"
-            M.status = if received then "Received by " .. record.receiver else "Pass interrupted"
-            M.active = nil
-        elseif pid and pid > record.pid + 1 then record.state = "Interrupted"; record.resultPid, record.resultHolder = pid, possessor; M.active = nil
-        elseif now() - record.at > record.windup + record.time + 2 then
-            record.state = if record.accepted then "Not received" else "Release not confirmed"
-            M.active = nil
-        end
-    end
-    function M.request(source)
-        local fromRestart = source == "restart"
-        if M.planning or S.busy or now() < nextAttempt then return false end
-        nextAttempt = now() + 0.1
-        local scene, reason = M.snapshot(true)
-        if not scene then M.status = reason; M.choice = nil; return false end
-        if fromRestart and (not scene.restart or scene.restart.kind ~= "GoalKick" or scene.restart.taker ~= player.UserId) then return false end
-        local receiver = if fromRestart then nil else M.lookTarget(scene)
-        if not fromRestart and not receiver then
-            M.status = "Look at a teammate"
-            notify("Pass unavailable", M.status)
-            return false
-        end
-        local receiverId = receiver and receiver.id
-        if scene.held and M.heldPid ~= scene.pid then M.heldPid, M.heldSince = scene.pid, now() end
-        if M.active and M.active.pid == scene.pid then return false end
-        M.planning = true
-        nextAttempt = now() + 0.18
-        task.spawn(function()
-            local ok, err = pcall(function()
-                local began = os.clock()
-                local options: any = {yield = function() task.wait() end}
-                options.type = if fromRestart then "Automatic" else cfg.smartPassType
-                options.paceScale = if fromRestart then 1 else cfg.passStrength / 100
-                options.receiverId = receiverId
-                options.look = if fromRestart then nil else unit(flat(workspace.CurrentCamera.CFrame.LookVector))
-                local _, ranked = M.plan(scene, options)
-                if #ranked == 0 and not fromRestart and stillOwn(scene) then
-                    options.exact = true
-                    _, ranked = M.plan(scene, options)
-                end
-                M.planMs = (os.clock() - began) * 1000
-                if not stillOwn(scene) then return end
-                local fresh = M.snapshot(true)
-                if not fresh or fresh.pid ~= scene.pid then return end
-                local choice
-                for index = 1, math.min(#ranked, 3) do
-                    local prior = ranked[index]
-                    local receiver
-                    for _, a in ipairs(fresh.teammates) do if a.id == prior.receiver.id then receiver = a; break end end
-                    if receiver then
-                        local candidate = solve(fresh, receiver, prior.mode, prior.space, options.paceScale or 1)
-                        if candidate then candidate = assess(fresh, candidate, options.look) end
-                        if candidate and (not choice or candidate.score > choice.score) then choice = candidate end
-                    end
-                    task.wait()
-                    if not stillOwn(fresh) then return end
-                end
-                local finalScene = M.snapshot(true)
-                if not finalScene or finalScene.pid ~= scene.pid then return end
-                if choice then
-                    local receiver
-                    for _, a in ipairs(finalScene.teammates) do if a.id == choice.receiver.id then receiver = a; break end end
-                    choice = if receiver then solve(finalScene, receiver, choice.mode, choice.space, options.paceScale or 1) else nil
-                    if choice then choice = assess(finalScene, choice, options.look) end
-                end
-                M.ranked, M.choice = ranked, choice
-                local manual = not fromRestart and cfg.passDecision ~= "Safe"
-                if choice and (manual or M.safe(choice) or (scene.held and now() - M.heldSince > Hands.HOLD_MAX - 1.25)) then
-                    if not release(finalScene, choice) then
-                        M.status = "Ball changed before release"
-                        if not fromRestart then notify("Pass unavailable", M.status) end
-                    end
-                else
-                    M.status = if choice then "Passing lane blocked" elseif #fresh.teammates == 0 then "No teammate available" else "No valid trajectory"
-                    if not choice and M.rejected then
-                        local count = 0
-                        for reason, total in pairs(M.rejected) do
-                            if total > count then M.status, count = reason, total end
-                        end
-                    end
-                    if not fromRestart then notify("Pass unavailable", M.status) end
-                end
-            end)
-            M.planning = false
-            if not ok then M.error = tostring(err); M.status = "Could not plan a pass" end
-        end)
-        return true
-    end
-    life.connect(Run.Heartbeat, function()
-        observe()
-    end)
-    life.onCleanup(function() table.clear(observations) end)
-    return M
-end)()
-S.passingEngine = Passing
-function S.passToLook() return Passing.request() end
-function S.findPassTarget()
-    local scene = Passing.snapshot(true)
-    return scene and Passing.lookTarget(scene)
-end
-
 local GK = (function()
     local KeeperRules = module(gameModules, "KeeperRules")
     local Hands = module(gameModules, "KeeperHands")
@@ -2900,7 +2284,7 @@ local GK = (function()
     local Sim = module(gameModules, "BallSim")
     local World = module(gameModules.BallSim, "World")
     local Motion = module(gameModules.Dribble, "Motion")
-    local M: any = {status = "Waiting for goalkeeper role", passStatus = "Waiting for possession",
+    local M: any = {status = "Waiting for goalkeeper role",
         saves = {}, decisions = {}, history = {}, samples = {}, enabledAt = now()}
     if previous and type(previous.gk) == "table" then
         for _, key in ipairs({"saves", "decisions", "history", "samples"}) do
@@ -3288,15 +2672,11 @@ local GK = (function()
     end
     M.restartDecision = restartDecision
     local function restartPolicy(character, r, goal, position)
-        local restart = Passing.restart()
+        local restart = PlayerMotion.restart()
         local action = restartDecision(restart, character:GetAttribute("Team"), player.UserId)
         if not action then return nil end
         if action == "Yield" then return "Yield" end
-        if action == "Take" then
-            
-            if restart.phase == "Restart" then Passing.request("restart") end
-            return "Yield"
-        end
+        if action == "Take" then return "Yield" end
         local home = standbyTarget(position, goal, 3.5, r.Position.Y)
         if action == "Retreat" or restart.phase ~= "Restart" then return "Retreat", home end
         local spot = if typeof(restart.spot) == "Vector3" then restart.spot else restart.ball
@@ -3318,7 +2698,7 @@ local GK = (function()
         for _, other in ipairs(Players:GetPlayers()) do
             local model = other.Character
             if model and model ~= character then
-                local a = Passing.actor(model, other, now())
+                local a = PlayerMotion.actor(model, other, now())
                 if a and (a.team == "Red" or a.team == "Blue") then
                     table.insert(if a.team == character:GetAttribute("Team") then allies else enemies, a)
                 end
@@ -3346,7 +2726,7 @@ local GK = (function()
             if eta > row.t then continue end
             local safe = true
             for _, enemy in ipairs(scene.enemies) do
-                if Passing.reachTime(enemy, row.p, 4, 0.06) <= row.t + 0.18 then safe = false; break end
+                if PlayerMotion.reachTime(enemy, row.p, 4, 0.06) <= row.t + 0.18 then safe = false; break end
             end
             if not safe then continue end
             for _, ally in ipairs(scene.allies) do
@@ -3923,7 +3303,7 @@ local Hitboxes = (function()
         for part, entry in pairs(M.entries) do release(part, entry) end
     end
     function M.ballContact()
-        if not cfg.ballExpander or cfg.freezeBall or cfg.hotPotato or cfg.ballOrbit or cfg.ballGlue or replay.playing() then return end
+        if not cfg.ballExpander or cfg.freezeBall or cfg.ballOrbit or cfg.ballGlue or replay.playing() then return end
         if M.ballRecord and M.ballRecord.accepted and not M.ballRecord.counted then
             M.ballRecord.counted = true
             M.ballAccepted += 1
@@ -4079,7 +3459,6 @@ local Orbit = (function()
         M.nextAt = 0
         if enabled then
             if S.controls.freezeBall then S.controls.freezeBall:Set(false, true) end
-            if S.controls.hotPotato then S.controls.hotPotato:Set(false, true) end
             if S.controls.ballGlue then S.controls.ballGlue:Set(false, true) end
         end
     end
@@ -4130,8 +3509,6 @@ local Orbit = (function()
         local ownId = character:GetAttribute("DribbleId")
         if type(ownId) ~= "number" or ownId <= 0 then return end
         if S.lastShot and now() - S.lastShot.at < 0.9 then return end
-        local pass = S.passingEngine and S.passingEngine.active
-        if pass and now() - pass.at < 0.9 then return end
         local pid = ball:GetAttribute("PossessionId")
         if type(pid) ~= "number" or pid <= 0 then return end
         local possessor = ball:GetAttribute("Possessor")
@@ -4288,96 +3665,6 @@ do
 end
 
 
-local AutoDribble = (function()
-    local M: any = {active = false, plans = 0}
-    local originalShape = Mannequin.shapeMove
-    local replay = module(client, "InstantReplay")
-    local pro = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
-    function M.allowed(context)
-        return context.enabled and context.forward and context.owned and context.animated
-            and context.playing and not context.replay and not context.busy and not context.typing and not context.menu
-    end
-    function M.choose(position, target, obstacles, previous)
-        local toward = (target - position) * Vector3.new(1, 0, 1)
-        if toward.Magnitude < 2 then return Vector3.zero end
-        local forward = toward.Unit
-        local best, bestScore = forward, -math.huge
-        for _, angle in ipairs({0, -22, 22, -42, 42, -65, 65}) do
-            local direction = CFrame.Angles(0, math.rad(angle), 0):VectorToWorldSpace(forward)
-            local score = direction:Dot(forward) * 6 - math.abs(angle) * 0.008
-            if previous then score += direction:Dot(previous) * 0.6 end
-            for _, obstacle in ipairs(obstacles) do
-                local predicted = obstacle.position + obstacle.velocity * 0.22
-                local offset = (predicted - position) * Vector3.new(1, 0, 1)
-                local along = math.clamp(offset:Dot(direction), 0, 11)
-                local clearance = (offset - direction * along).Magnitude
-                if along > 0 and offset.Magnitude < 16 then
-                    score -= math.exp(-clearance * clearance / 10) * 26 * (1 - along / 18)
-                end
-            end
-            if score > bestScore then best, bestScore = direction, score end
-        end
-        return best
-    end
-    function M.reset()
-        M.active, M.heading, M.desired = false, nil, nil
-        M.nextPlan = 0
-    end
-    function M.shape(input)
-        local base = if originalShape then originalShape(input) else input
-        if not cfg.autoDribble or not Input:IsKeyDown(Enum.KeyCode.W) then M.reset(); return base end
-        local c, r = player.Character, root()
-        local ball = Ball.getBall()
-        local ownId = c and c:GetAttribute("DribbleId")
-        local context = {enabled = cfg.autoDribble == true, forward = Input:IsKeyDown(Enum.KeyCode.W),
-            owned = type(ownId) == "number" and ownId > 0 and ball ~= nil and ball:GetAttribute("Possessor") == ownId,
-            animated = c ~= nil and c:GetAttribute("BodyState") == "Animated", replay = replay.playing(),
-            playing = not pro or pro:GetAttribute("Phase") == "Play", busy = S.busy,
-            typing = Input:GetFocusedTextBox() ~= nil, menu = GuiService.MenuIsOpen}
-        if not M.allowed(context) or not r or not workspace.CurrentCamera then M.reset(); return base end
-        local at = os.clock()
-        if at >= (M.nextPlan or 0) or not M.desired then
-            local goal = mouth()
-            if not goal then M.reset(); return base end
-            local obstacles = {}
-            for _, other in ipairs(Players:GetPlayers()) do
-                local model = other ~= player and other.Character
-                local otherRoot = model and model:FindFirstChild("Root")
-                if otherRoot and otherRoot:IsA("BasePart") and model:GetAttribute("Team") ~= c:GetAttribute("Team")
-                    and (otherRoot.Position - r.Position).Magnitude < 20 then
-                    obstacles[#obstacles + 1] = {position = otherRoot.Position, velocity = otherRoot.AssemblyLinearVelocity}
-                end
-            end
-            local target = Vector3.new(goal.x + goal.out * 2, r.Position.Y, goal.z)
-            M.desired = M.choose(r.Position, target, obstacles, M.heading)
-            M.target = target
-            M.nextPlan = at + 0.08
-            M.plans += 1
-        end
-        local elapsed = math.clamp(at - (M.lastAt or at), 0, 0.1)
-        M.lastAt = at
-        local desired = M.desired
-        if desired.Magnitude < 0.01 then M.active = true; return Vector2.zero end
-        M.heading = if M.heading then M.heading:Lerp(desired, 1 - math.exp(-elapsed * 14)) else desired
-        if M.heading.Magnitude < 0.01 then return base end
-        local camera = workspace.CurrentCamera
-        local look = camera.CFrame.LookVector * Vector3.new(1, 0, 1)
-        local right = camera.CFrame.RightVector * Vector3.new(1, 0, 1)
-        look = if look.Magnitude > 0.001 then look.Unit else Vector3.new(0, 0, -1)
-        right = if right.Magnitude > 0.001 then right.Unit else Vector3.xAxis
-        M.active = true
-        local direction = M.heading.Unit
-        local wish = Vector2.new(direction:Dot(right), direction:Dot(look))
-        if wish.Magnitude > 1 then wish = wish.Unit end
-        return wish * math.min(1, input.Magnitude)
-    end
-    life.override(Mannequin, "shapeMove", M.shape)
-    life.onCleanup(M.reset)
-    return M
-end)()
-S.autoDribble = AutoDribble
-
-
 local Glue = (function()
     local M: any = {enabled = false, sent = 0, accepted = 0, refused = 0, nextAt = 0, inflight = {}}
     local rules = module(gameModules:WaitForChild("Dribble"), "Rules")
@@ -4416,7 +3703,7 @@ local Glue = (function()
         M.enabled = enabled == true
         reset()
         if M.enabled then
-            for _, key in ipairs({"ballOrbit", "freezeBall", "hotPotato"}) do
+            for _, key in ipairs({"ballOrbit", "freezeBall"}) do
                 if S.controls[key] then S.controls[key]:Set(false, true) end
             end
         else
@@ -4469,8 +3756,6 @@ local Glue = (function()
             or GuiService.MenuIsOpen or (pro and pro:GetAttribute("Phase") ~= "Play")
             or character:GetAttribute("BodyState") ~= "Animated" or r.Anchored then return end
         if S.lastShot and clock - S.lastShot.at < 0.9 then return end
-        local pass = S.passingEngine and S.passingEngine.active
-        if pass and clock - pass.at < 0.9 then return end
         if possessor ~= ownId then
             if possessor == 0 then
                 local flight = Flight.decode(ball:GetAttribute("KickFlight"))
@@ -4523,87 +3808,6 @@ end)()
 S.ballGlue = Glue
 
 
-local HotPotato = (function()
-    local M: any = {sent = 0, accepted = 0, refused = 0, nextAt = 0}
-    local sim = module(gameModules, "BallSim")
-    local replay = module(client, "InstantReplay")
-    local remote = Net:RemoteEvent("DribbleKnock")
-    local pro = game:GetService("ReplicatedStorage"):FindFirstChild("ProState")
-    life.connect(Net:RemoteEvent("DribbleKnockRefused").OnClientEvent, function(pid)
-        if M.pending and M.pending.pid == pid then
-            M.refused += 1
-            M.pending = nil
-            M.nextAt = os.clock() + 0.35
-        end
-    end)
-    function M.setEnabled(enabled)
-        M.pending = nil
-        M.nextAt = 0
-        if enabled then
-            if S.controls.freezeBall then S.controls.freezeBall:Set(false, true) end
-            if S.controls.ballOrbit then S.controls.ballOrbit:Set(false, true) end
-            if S.controls.ballGlue then S.controls.ballGlue:Set(false, true) end
-        end
-    end
-    function M.step()
-        if (not cfg.hotPotato or cfg.ballOrbit) and not M.pending then return end
-        local ball = Ball.getBall()
-        local event = ball and sim.decode(ball:GetAttribute("BallSim"))
-        local pending = M.pending
-        local at = os.clock()
-        if pending and event and event.pid > pending.pid and event.by == pending.ownId
-            and math.abs(event.t - pending.clock) < 0.12 and (event.pos - pending.position).Magnitude < 0.2
-            and (event.vel - pending.velocity).Magnitude < 0.2 then
-            M.accepted += 1
-            M.lastAccepted = {pid = event.pid, at = at, target = pending.target, velocity = event.vel,
-                position = event.pos, positionError = (event.pos - pending.position).Magnitude,
-                velocityError = (event.vel - pending.velocity).Magnitude}
-            M.pending = nil
-        end
-        if not cfg.hotPotato or not life.alive() or at < M.nextAt or replay.playing()
-            or (pro and pro:GetAttribute("Phase") ~= "Play") or S.busy or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
-        local character, r = player.Character, root()
-        local position, velocity = Ball.freeState()
-        if not ball or not character or not r or not position or not velocity or r.Anchored
-            or character:GetAttribute("BodyState") ~= "Animated" or ball:GetAttribute("Possessor") ~= 0 then return end
-        local ownId = character:GetAttribute("DribbleId")
-        if type(ownId) ~= "number" or ownId <= 0 or ball:GetAttribute("ReleasedBy") == ownId then return end
-        local distance = ((position - r.Position) * Vector3.new(1, 0, 1)).Magnitude
-        if distance <= 1 or distance > 7.5 or math.abs(position.Y - Ball.groundBallY(position)) > 2.4 then return end
-        local closest, gap = nil, 35
-        for _, other in ipairs(Players:GetPlayers()) do
-            local model = other ~= player and other.Character
-            local otherRoot = model and model:FindFirstChild("Root")
-            if otherRoot and otherRoot:IsA("BasePart") then
-                local d = ((otherRoot.Position - position) * Vector3.new(1, 0, 1)).Magnitude
-                if d < gap then closest, gap = otherRoot, d end
-            end
-        end
-        if not closest then return end
-        local delta = (position - closest.Position) * Vector3.new(1, 0, 1)
-        if delta.Magnitude < 0.1 then delta = (position - r.Position) * Vector3.new(1, 0, 1) end
-        if delta.Magnitude < 0.1 then return end
-        local wanted = delta.Unit * 24
-        if velocity:Dot(delta.Unit) > 20 then return end
-        local pid = ball:GetAttribute("PossessionId")
-        if type(pid) ~= "number" or pid <= 0 then return end
-        if M.pending and M.pending.pid == pid and at - M.pending.sentAt < 0.3 then return end
-        M.pending = {pid = pid, ownId = ownId, position = position, velocity = wanted,
-            clock = Ball.drawnTime(), sentAt = at, target = closest.Parent and closest.Parent.Name}
-        remote:FireServer(pid, position, wanted, M.pending.clock)
-        M.sent += 1
-        M.nextAt = at + 0.15
-    end
-    life.connect(Run.Heartbeat, function()
-        local ok, err = pcall(M.step)
-        if not ok then M.error = tostring(err); M.pending = nil end
-    end)
-    life.onCleanup(function() M.pending = nil end)
-    return M
-end)()
-S.hotPotato = HotPotato
-
-
 local Freeze = (function()
     local M: any = {enabled = false, sent = 0, accepted = 0, refused = 0, nextAt = 0}
     local replay = module(client, "InstantReplay")
@@ -4625,7 +3829,7 @@ local Freeze = (function()
         end
     end)
     function M.step()
-        if not M.enabled or not life.alive() or cfg.hotPotato or cfg.ballOrbit or cfg.ballGlue then return end
+        if not M.enabled or not life.alive() or cfg.ballOrbit or cfg.ballGlue then return end
         if replay.playing() or (state and state:GetAttribute("Phase") ~= "Play") then
             M.anchor, M.pending = nil, nil
             return
@@ -4783,6 +3987,7 @@ aimDot.Size = UDim2.fromOffset(6, 6)
 aimDot.BorderSizePixel = 0
 aimDot.BackgroundColor3 = Color3.fromRGB(245, 247, 246)
 aimDot.Active = false
+aimDot.Visible = cfg.aimDot
 aimDot.Parent = aimGui
 local roundDot = Instance.new("UICorner")
 roundDot.CornerRadius = UDim.new(1, 0)
@@ -4801,7 +4006,6 @@ local function tab(name, icon)
     return result
 end
 local shootingTab = tab("Shooting", "crosshair")
-local passingTab = tab("Passing", "users")
 local keeperTab = tab("Keeper", "shield-check")
 local playerTab = tab("Player", "user")
 local visualsTab = tab("Visuals", "eye")
@@ -4840,12 +4044,6 @@ dropdown(aiming, "Aim", "corner", corners)
 slider(aiming, "Spin", "spin", 0, 70, 1)
 toggle(aiming, "Reduce shot spread", "assist")
 
-local passing = passingTab:Section("Pass")
-dropdown(passing, "Pass type", "smartPassType", {"Automatic", "Ground", "Driven", "Chip", "Lofted", "Curved", "Roll", "Throw", "Punt"})
-slider(passing, "Power (%)", "passStrength", 25, 150, 1)
-local passTarget = passingTab:Section("Target")
-slider(passTarget, "Target range", "passCone", 5, 25, 1)
-
 local keeper = keeperTab:Section("Keeper")
 toggle(keeper, "Auto GK (H)", "autoGK")
 toggle(keeper, "Positioning", "gkPosition")
@@ -4857,7 +4055,6 @@ local movement = playerTab:Section("Movement")
 toggle(movement, "Speed boost", "speedEnabled", applySpeed)
 slider(movement, "Speed multiplier", "speed", 0.5, 4, 0.1, applySpeed)
 toggle(movement, "Always sprint", "sprint")
-toggle(movement, "Auto dribble (W)", "autoDribble", AutoDribble.reset)
 movement:Button({Text = "Reset movement", Callback = function()
     changed("speedEnabled", false)
     changed("sprint", false)
@@ -4869,10 +4066,9 @@ local ball = playerTab:Section("Ball")
 toggle(ball, "Auto poke", "autoPoke")
 ball:Button({Text = "Poke", Callback = function() S.pokeCarrier(false) end})
 S.controls.ballMagnet = ball:Button({Text = "Ball magnet (C)", Callback = function() Magnet.pull(false) end})
-toggle(ball, "Freeze loose ball", "freezeBall", function(enabled) if enabled then if S.controls.hotPotato then S.controls.hotPotato:Set(false, true) end; if S.controls.ballOrbit then S.controls.ballOrbit:Set(false, true) end; if S.controls.ballGlue then S.controls.ballGlue:Set(false, true) end end; Freeze.setEnabled(enabled) end)
+toggle(ball, "Freeze loose ball", "freezeBall", function(enabled) if enabled then if S.controls.ballOrbit then S.controls.ballOrbit:Set(false, true) end; if S.controls.ballGlue then S.controls.ballGlue:Set(false, true) end end; Freeze.setEnabled(enabled) end)
 local tricks = playerTab:Section("Tricks")
 toggle(tricks, "Walkfling", "walkfling", Walkfling.setEnabled)
-toggle(tricks, "Hot potato", "hotPotato", HotPotato.setEnabled)
 local orbitSection = playerTab:Section("Ball control")
 toggle(orbitSection, "Ball glue", "ballGlue", Glue.setEnabled)
 toggle(orbitSection, "Ball orbit", "ballOrbit", Orbit.setEnabled)
@@ -4904,7 +4100,7 @@ menu:Button({Text = "Unload", Callback = function() life.cleanup() end})
 local guidesSection = visualsTab:Section("Guides")
 toggle(guidesSection, "Shot path", "trajectory")
 toggle(guidesSection, "Ball marker", "marker")
-toggle(guidesSection, "Centre dot", "aimDot")
+toggle(guidesSection, "Centre dot", "aimDot", function(enabled) aimDot.Visible = enabled end)
 local performance = visualsTab:Section("Performance")
 toggle(performance, "FPS mode", "performance", Performance.apply)
 toggle(performance, "Reduce effects", "reducePostEffects", Performance.apply)
@@ -4917,7 +4113,7 @@ local function onKeyInput(key, processed)
     if processed or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
     if key.KeyCode == Enum.KeyCode.RightShift then window:Toggle(); return end
     if key.KeyCode == Enum.KeyCode.Space and cfg.jumpEnabled then Jump.fire(); return end
-    if key.KeyCode == Enum.KeyCode.F or key.KeyCode == Enum.KeyCode.B or key.KeyCode == Enum.KeyCode.C then Orbit.suspendUntil = os.clock() + 0.9; Glue.suspendUntil = os.clock() + 0.9 end
+    if key.KeyCode == Enum.KeyCode.F or key.KeyCode == Enum.KeyCode.C then Orbit.suspendUntil = os.clock() + 0.9; Glue.suspendUntil = os.clock() + 0.9 end
     if key.KeyCode == Enum.KeyCode.C then Magnet.pull(false); return end
     if key.KeyCode == Enum.KeyCode.H then
         changed("autoGK", not cfg.autoGK)
@@ -4925,7 +4121,6 @@ local function onKeyInput(key, processed)
         return
     end
     if key.KeyCode == Enum.KeyCode.F and cfg.shooting then S.shoot(false) end
-    if key.KeyCode == Enum.KeyCode.B then S.passToLook() end
 end
 S.handleInput = onKeyInput
 life.connect(Input.InputBegan, onKeyInput)
@@ -4940,16 +4135,7 @@ life.connect(Run.Heartbeat, function(dt)
         if not ok then S.pokeError = tostring(err) end
     end
 end)
-local elapsed = 0
-life.connect(Run.Heartbeat, function(dt)
-    elapsed += dt
-    if elapsed < 0.1 then return end
-    elapsed = 0
-    local target = S.findPassTarget()
-    aimDot.Visible = cfg.aimDot
-    aimDot.BackgroundColor3 = if target then Color3.fromRGB(104, 211, 171) else Color3.fromRGB(245, 247, 246)
-end)
 Glue.setEnabled(cfg.ballGlue)
 save()
-notify("Ragdoll Soccer", "F: shoot | B: pass | H: keeper | Right Shift: menu")
+notify("Ragdoll Soccer", "F: shoot | H: keeper | Right Shift: menu")
 return S
