@@ -373,6 +373,7 @@ local function goalPassage(simulation, goal, radius)
     local firstDepth = (simulation.pos[1].X - goal.x) * goal.out
     if firstDepth >= radius then return nil, "Ball is already behind the goal line" end
     local entered = firstDepth >= -radius
+    local centre = if firstDepth == 0 then simulation.pos[1] else nil
     local minZ, maxZ, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
     local function include(point)
         minZ, maxZ = math.min(minZ, point.Z), math.max(maxZ, point.Z)
@@ -388,6 +389,7 @@ local function goalPassage(simulation, goal, radius)
         end
         if entered then
             if db < -radius then return nil, "Shot turns back before entering the goal" end
+            if da < 0 and db >= 0 then centre = a:Lerp(b, -da / (db - da)) end
             if da < radius and db >= radius then
                 local exit = a:Lerp(b, (radius - da) / (db - da))
                 include(exit)
@@ -396,7 +398,8 @@ local function goalPassage(simulation, goal, radius)
                 return {
                     valid = dz == 0 and dy == 0,
                     shiftZ = dz, shiftY = dy,
-                    position = exit, time = (i - 2 + (radius - da) / (db - da)) * Flight.STEP,
+                    position = exit, centre = centre,
+                    time = (i - 2 + (radius - da) / (db - da)) * Flight.STEP,
                     margin = math.min(minZ - lowerZ, upperZ - maxZ, minY - lowerY, upperY - maxY),
                     minZ = minZ, maxZ = maxZ, minY = minY, maxY = maxY,
                 }
@@ -449,30 +452,41 @@ local function makeShotPlanner(Flight, budget)
         local params = Flight.params(sample.ball)
         local groundY = Ball.groundBallY()
         local aim = target
+        local best, bestError
         for _ = 1, attempts or 3 do
             local velocity, spin, flightTime, miss = Flight.solve(sample.from, aim, speed, side, back, params, groundY, math.rad(70))
-            if not finite(flightTime) or flightTime <= 0 or not finite(miss) or miss > 1.1
-                or not validVector(velocity) or not validVector(spin) then return nil end
+            if not finite(flightTime) or flightTime <= 0 or not finite(miss)
+                or not validVector(velocity) or not validVector(spin) then break end
             local acceptedVelocity, acceptedSpin = KickRules.checkStrike(family, velocity, spin)
-            if not validVector(acceptedVelocity) or not validVector(acceptedSpin) then return nil end
+            if not validVector(acceptedVelocity) or not validVector(acceptedSpin) then break end
             velocity, spin = acceptedVelocity, acceptedSpin
             local simulation = Flight.simulate(sample.from, velocity, spin, 0, params, groundY, math.min(flightTime + 1, 10))
             local passage = goalPassage(simulation, goal, radius)
-            if not passage then return nil end
+            if not passage then break end
+
+            local shiftY, shiftZ = passage.shiftY, passage.shiftZ
             if passage.valid then
-                return {
-                    target = aim, family = family, velocity = velocity, spin = spin,
-                    flightTime = passage.time, miss = miss, sample = sample, passage = passage,
-                    simulation = simulation, side = side, back = back, speed = speed, goal = goal,
-                }
+                local crossing = passage.centre
+                local placementError = if crossing then (crossing - target).Magnitude else miss
+                if (miss <= 1.1 or placementError <= 1.1) and (not bestError or placementError < bestError) then
+                    bestError = placementError
+                    best = {
+                        target = target, aim = aim, family = family, velocity = velocity, spin = spin,
+                        flightTime = passage.time, miss = placementError, solverMiss = miss, sample = sample, passage = passage,
+                        simulation = simulation, side = side, back = back, speed = speed, goal = goal,
+                    }
+                end
+                if not crossing or placementError <= 0.35 then break end
+                shiftY, shiftZ = target.Y - crossing.Y, target.Z - crossing.Z
             end
+
             local nextAim = Vector3.new(goal.x,
-                math.clamp(aim.Y + passage.shiftY * 1.12, goal.ground + radius + 0.2, goal.top - radius - 0.3),
-                math.clamp(aim.Z + passage.shiftZ * 1.12, goal.z - goal.width + radius + 0.3, goal.z + goal.width - radius - 0.3))
-            if (nextAim - aim).Magnitude < 0.01 then return nil end
+                math.clamp(aim.Y + shiftY * 1.12, goal.ground + radius + 0.2, goal.top - radius - 0.3),
+                math.clamp(aim.Z + shiftZ * 1.12, goal.z - goal.width + radius + 0.3, goal.z + goal.width - radius - 0.3))
+            if (nextAim - aim).Magnitude < 0.01 then break end
             aim = nextAim
         end
-        return nil
+        return best
     end
 
     local function clearanceScore(plan, bodies)
@@ -602,6 +616,7 @@ local function trackShot(plan, before, style, motion)
         trackingVersion = "0.3",
         expectedTime = plan.sample.time,
         passageMargin = plan.passage.margin, planningVersion = "0.4",
+        solverMiss = plan.solverMiss,
         plannedSpeed = plan.speed, releaseSpeed = plan.velocity.Magnitude,
         side = plan.side, spin = tostring(plan.spin), spinMagnitude = plan.spin.Magnitude,
         samples = {},
