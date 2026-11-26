@@ -708,6 +708,9 @@ local function trackShot(plan, before, style, motion)
         sampleAge = now() - plan.sample.time,
         contactOffset = motion and motion.contactOffset,
         contactDrift = motion and motion.contactDrift,
+        animationRelayConfirmed = motion and motion.relayed,
+        animationRelayLatency = motion and motion.relayLatency,
+        animationRecovery = motion and motion.recoveryDuration,
         characterId = player.Character and player.Character:GetAttribute("DribbleId"),
     }
     table.insert(S.shots, entry)
@@ -768,9 +771,12 @@ end
 life.onCleanup(function() cancelKickMotion("Hub unloaded") end)
 life.connect(Net:RemoteEvent("KickPlanRelay").OnClientEvent, function(sender, packet)
     local motion = S.lastKickMotion
-    if sender == player and motion and not motion.cancelled and type(packet) == "table" and packet.id == motion.id then
+    if sender == player and motion and not motion.cancelled and not motion.relayed
+        and type(packet) == "table" and packet.id == motion.id then
         motion.relayed = true
         motion.relayAt = now()
+        motion.relayLatency = motion.relayAt - motion.requestedAt
+        motion.relayContactOffset = if finite(packet.t) then packet.t - motion.contactAt else nil
         motion.status = "Server relayed kick motion"
     end
 end)
@@ -785,11 +791,17 @@ Run:BindToRenderStep(motionRenderName, Enum.RenderPriority.Camera.Value - 2, fun
     end
     local remaining = motion.contactAt - now()
     if motion.released then
-        cancelKickMotion()
+        -- Leave the native animator in control during recovery.
+        if now() >= motion.recoveryUntil then cancelKickMotion() end
         return
     end
     if remaining < -0.25 then
         cancelKickMotion("Kick contact expired")
+        return
+    end
+    local active = motion.animator.kick
+    if active and active.id ~= motion.id then
+        cancelKickMotion("Kick animation superseded")
         return
     end
     motion.spec.at = math.max(remaining, 0.001)
@@ -834,6 +846,7 @@ local function beginKickMotion(sample, plan)
         power = 1, plant = plant, plantYaw = plantYaw, plantAt = plantAt}
     local motion = {id = id, character = character, animator = animator, spec = spec, contactAt = contactAt,
         requestedAt = now(), pid = sample.pid, family = plan.family, relayed = false, released = false,
+        recoveryDuration = math.clamp((family.swing or 0.08) + 0.12, 0.16, 0.3),
         status = "Kick motion sent | checking server relay"}
     kickMotion = motion
     S.lastKickMotion = motion
@@ -913,6 +926,7 @@ function S.shoot(silent)
         if motion then
             motion.released = true
             motion.releasedAt = now()
+            motion.recoveryUntil = motion.releasedAt + motion.recoveryDuration
             motion.contactOffset = motion.releasedAt - motion.contactAt
             motion.status = if motion.relayed then "Server relayed kick motion" else "Kick motion sent | relay not confirmed"
         end
