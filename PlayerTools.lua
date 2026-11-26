@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "0.1"
+local VERSION = "0.2"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -211,6 +211,7 @@ local ObjectHoldSettings = {
         HoldGlowParts = {},
         HeldParts = nil,
         HoldBottomOffset = nil,
+        HoldCharacter = nil,
         PickerConnection = nil,
         InputConnection = nil,
         HeartbeatConnection = nil,
@@ -3484,64 +3485,10 @@ do
                 return CFrame.lookAt(Vector3.zero, horizontal.Unit)
         end
 
-        local function buildHoldRig(root, holdCFrame)
-                local attachment = Instance.new("Attachment")
-                attachment.Name = "__PlayerToolsHoldAttachment"
-                attachment.Parent = root
-
-                local alignPosition = Instance.new("AlignPosition")
-                alignPosition.Name = "__PlayerToolsHoldPosition"
-                alignPosition.Mode = Enum.PositionAlignmentMode.OneAttachment
-                alignPosition.Attachment0 = attachment
-                alignPosition.ApplyAtCenterOfMass = true
-                alignPosition.MaxForce = math.huge
-                -- Bounded start value; updateObjectHold retunes it
-                -- every frame from the player's live speed. An
-                -- uncapped servo (math.huge) corrects any
-                -- displacement at unlimited speed - a rider landing
-                -- on the object became a launcher. A fixed low cap
-                -- trails behind at high speed. The live retune does
-                -- neither.
-                alignPosition.MaxVelocity = 200
-                alignPosition.Responsiveness = math.clamp(
-                        tonumber(ObjectHoldSettings.Responsiveness) or 35,
-                        5,
-                        100
-                )
-                alignPosition.RigidityEnabled = false
-                alignPosition.Position = root.Position
-                alignPosition.Parent = root
-
-                local alignOrientation = Instance.new("AlignOrientation")
-                alignOrientation.Name = "__PlayerToolsHoldOrientation"
-                alignOrientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
-                alignOrientation.Attachment0 = attachment
-                alignOrientation.MaxTorque = math.huge
-                alignOrientation.Responsiveness = 25
-                alignOrientation.RigidityEnabled = false
-                alignOrientation.CFrame = holdCFrame
-                alignOrientation.Parent = root
-
-                return {
-                        Attachment = attachment,
-                        AlignPosition = alignPosition,
-                        AlignOrientation = alignOrientation
-                }
-        end
-
-        local function destroyHoldRig()
-                local rig = ObjectHoldSettings.Rig
-                ObjectHoldSettings.Rig = nil
-
-                if not rig then
-                        return
-                end
-
-                for _, object in ipairs({
-                        rig.AlignPosition,
-                        rig.AlignOrientation,
-                        rig.Attachment
-                }) do
+        local function destroyRig(rig)
+                if not rig then return end
+                for _, key in ipairs({"AlignPosition", "AlignOrientation", "Attachment"}) do
+                        local object = rig[key]
                         if object then
                                 pcall(function()
                                         object:Destroy()
@@ -3550,10 +3497,63 @@ do
                 end
         end
 
+        local function buildHoldRig(root, holdCFrame)
+                local rig = {}
+                local ok, err = pcall(function()
+                        local attachment = Instance.new("Attachment")
+                        rig.Attachment = attachment
+                        attachment.Name = "__PlayerToolsHoldAttachment"
+                        attachment.Parent = root
+
+                        local alignPosition = Instance.new("AlignPosition")
+                        rig.AlignPosition = alignPosition
+                        alignPosition.Name = "__PlayerToolsHoldPosition"
+                        alignPosition.Mode = Enum.PositionAlignmentMode.OneAttachment
+                        alignPosition.Attachment0 = attachment
+                        alignPosition.ApplyAtCenterOfMass = true
+                        alignPosition.MaxForce = math.huge
+                        alignPosition.MaxVelocity = 200
+                        alignPosition.Responsiveness = math.clamp(
+                                tonumber(ObjectHoldSettings.Responsiveness) or 35,
+                                5,
+                                100
+                        )
+                        alignPosition.RigidityEnabled = false
+                        alignPosition.Position = root.Position
+                        alignPosition.Parent = root
+
+                        local alignOrientation = Instance.new("AlignOrientation")
+                        rig.AlignOrientation = alignOrientation
+                        alignOrientation.Name = "__PlayerToolsHoldOrientation"
+                        alignOrientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+                        alignOrientation.Attachment0 = attachment
+                        alignOrientation.MaxTorque = math.huge
+                        alignOrientation.Responsiveness = 25
+                        alignOrientation.RigidityEnabled = false
+                        alignOrientation.CFrame = holdCFrame
+                        alignOrientation.Parent = root
+                end)
+
+                if not ok then
+                        destroyRig(rig)
+                        return nil, err
+                end
+                return rig
+        end
+
+        local function destroyHoldRig()
+                local rig = ObjectHoldSettings.Rig
+                ObjectHoldSettings.Rig = nil
+                destroyRig(rig)
+        end
+
         local function releaseObject(message)
                 destroyHoldRig()
 
                 ObjectHoldSettings.Root = nil
+                ObjectHoldSettings.HoldCharacter = nil
+                ObjectHoldSettings.FollowVelocity = nil
+                ObjectHoldSettings.LastHeadPosition = nil
                 ObjectHoldSettings.ErrorCount = 0
                 ObjectHoldSettings.NextGlowRefresh = 0
                 ObjectHoldSettings.HoldBrokenSince = nil
@@ -3596,14 +3596,26 @@ do
         end
 
         local function grabObject(root)
-                releaseObject()
+                local character = LocalPlayer.Character
+                local head = character and character:FindFirstChild("Head")
+                if not head or not head:IsA("BasePart") or not isHoldableRoot(root) then
+                        return false
+                end
+                if ObjectHoldSettings.Root == root and ObjectHoldSettings.Rig then
+                        return true
+                end
 
+                local rig, err = buildHoldRig(root, computeLevelHoldCFrame(root))
+                if not rig then
+                        updateHoldStatus("Could not grab: " .. tostring(err):sub(1, 80))
+                        return false
+                end
+
+                releaseObject()
                 ObjectHoldSettings.Root = root
-                ObjectHoldSettings.ErrorCount = 0
-                ObjectHoldSettings.Rig = buildHoldRig(
-                        root,
-                        computeLevelHoldCFrame(root)
-                )
+                ObjectHoldSettings.HoldCharacter = character
+                ObjectHoldSettings.LastHeadPosition = head.Position
+                ObjectHoldSettings.Rig = rig
 
                 -- Ownership assist: auto-assignment already favors
                 -- this client because the slot floats right above
@@ -3612,9 +3624,13 @@ do
                 -- immediately too.
                 claimHoldOwnership(root)
 
-                refreshHoldGlow(root)
-
+                local ok = pcall(refreshHoldGlow, root)
+                if not ok then
+                        releaseObject("Could not initialize hold")
+                        return false
+                end
                 updateHoldStatus("Holding: " .. tostring(root.Name):sub(1, 32))
+                return true
         end
 
         local function updateObjectHold(stepTime)
@@ -3629,9 +3645,7 @@ do
                         return
                 end
 
-                if not root.Parent
-                        or root.Anchored
-                        or root.AssemblyRootPart ~= root then
+                if not isHoldableRoot(root) then
                         releaseObject("Object lost")
                         return
                 end
@@ -3639,16 +3653,20 @@ do
                 local character = LocalPlayer.Character
                 local head = character and character:FindFirstChild("Head")
 
-                if not head or not head.Parent or not head:IsA("BasePart") then
-                        releaseObject("Character unavailable - object dropped")
+                if character ~= ObjectHoldSettings.HoldCharacter
+                        or not head or not head.Parent or not head:IsA("BasePart") then
+                        releaseObject("Character changed - object dropped")
                         return
                 end
 
                 local rig = ObjectHoldSettings.Rig
 
                 if not rig
-                        or not rig.AlignPosition
-                        or not rig.AlignPosition.Parent then
+                        or not rig.AlignPosition or rig.AlignPosition.Parent ~= root
+                        or not rig.AlignOrientation or rig.AlignOrientation.Parent ~= root
+                        or not rig.Attachment or rig.Attachment.Parent ~= root
+                        or rig.AlignPosition.Attachment0 ~= rig.Attachment
+                        or rig.AlignOrientation.Attachment0 ~= rig.Attachment then
                         releaseObject("Hold rig lost")
                         return
                 end
@@ -3963,8 +3981,7 @@ do
                         end
                 end
 
-                local root = ObjectHoldSettings.HoveredRoot
-                        or castForHoldTarget(false)
+                local root = castForHoldTarget(false)
 
                 if root
                         and root ~= ObjectHoldSettings.Root
@@ -4008,6 +4025,18 @@ do
         ObjectHold.setEnabled = function(value)
                 local enabled = value and true or false
 
+                if enabled and not running then
+                        return
+                end
+
+                if enabled and ObjectHoldSettings.Enabled
+                        and ObjectHoldSettings.PickerConnection and ObjectHoldSettings.PickerConnection.Connected
+                        and ObjectHoldSettings.InputConnection and ObjectHoldSettings.InputConnection.Connected
+                        and ObjectHoldSettings.HeartbeatConnection and ObjectHoldSettings.HeartbeatConnection.Connected then
+                        return
+                end
+
+                ObjectHoldSettings.Enabled = false
                 stopObjectHold()
                 ObjectHoldSettings.Enabled = enabled
 
