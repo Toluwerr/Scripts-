@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "1.1"
+local VERSION = "1.2"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -3262,6 +3262,84 @@ local function setAntiFlingEnabled(value)
         end
 end
 
+local Environment = {
+        records = setmetatable({}, {__mode = "k"}),
+        sleepUsers = {},
+        sleepOriginal = nil
+}
+
+function Environment.read(object, key, hidden)
+        if hidden and type(gethiddenproperty) == "function" then
+                local ok, value = pcall(gethiddenproperty, object, key)
+                if ok then return true, value end
+        end
+        return pcall(function() return object[key] end)
+end
+
+function Environment.write(object, key, value, hidden)
+        if hidden and type(sethiddenproperty) == "function" then
+                local ok = pcall(sethiddenproperty, object, key, value)
+                if ok then return true end
+        end
+        return pcall(function() object[key] = value end)
+end
+
+function Environment.remember(owner, object, key, value, hidden)
+        local fields = Environment.records[object]
+        if not fields then
+                fields = {}
+                Environment.records[object] = fields
+        end
+        local record = fields[key]
+        if not record then
+                local ok, original = Environment.read(object, key, hidden)
+                if not ok then return false end
+                record = {original = original, hidden = hidden, users = {}}
+                fields[key] = record
+        end
+        if not Environment.write(object, key, value, hidden) then
+                if not next(record.users) then fields[key] = nil end
+                return false
+        end
+        record.users[owner] = {value = value}
+        return true
+end
+
+function Environment.keepAwake(owner)
+        if not next(Environment.sleepUsers) then
+                local ok, value = pcall(function() return settings().Physics.AllowSleep end)
+                if not ok then return end
+                Environment.sleepOriginal = value
+        end
+        local ok = pcall(function() settings().Physics.AllowSleep = false end)
+        if ok then Environment.sleepUsers[owner] = true end
+end
+
+function Environment.release(owner)
+        for object, fields in pairs(Environment.records) do
+                for key, record in pairs(fields) do
+                        if record.users[owner] then
+                                record.users[owner] = nil
+                                local _, remaining = next(record.users)
+                                if remaining then
+                                        Environment.write(object, key, remaining.value, record.hidden)
+                                else
+                                        Environment.write(object, key, record.original, record.hidden)
+                                        fields[key] = nil
+                                end
+                        end
+                end
+                if not next(fields) then Environment.records[object] = nil end
+        end
+        if Environment.sleepUsers[owner] then
+                Environment.sleepUsers[owner] = nil
+                if not next(Environment.sleepUsers) then
+                        pcall(function() settings().Physics.AllowSleep = Environment.sleepOriginal end)
+                        Environment.sleepOriginal = nil
+                end
+        end
+end
+
 local PhysicsRig = {
         partStates = setmetatable({}, {__mode = "k"})
 }
@@ -3514,6 +3592,11 @@ do
                         return false
                 end
 
+                if (ObjectPull.IsClaimed and ObjectPull.IsClaimed(root))
+                        or (Shaker.IsClaimed and Shaker.IsClaimed(root)) then
+                        return false
+                end
+
                 return true
         end
 
@@ -3726,6 +3809,7 @@ do
 
         local function releaseObject(message)
                 destroyHoldRig()
+                Environment.release(ObjectHold)
 
                 ObjectHoldSettings.Root = nil
                 ObjectHoldSettings.HoldCharacter = nil
@@ -3757,17 +3841,7 @@ do
                         root:SetNetworkOwner(LocalPlayer)
                 end)
 
-                pcall(function()
-                        sethiddenproperty(
-                                LocalPlayer,
-                                "SimulationRadius",
-                                math.huge
-                        )
-                end)
-
-                pcall(function()
-                        setsimulationradius(math.huge, math.huge)
-                end)
+                Environment.remember(ObjectHold, LocalPlayer, "SimulationRadius", math.huge, true)
         end
 
         local function grabObject(root)
@@ -4299,8 +4373,6 @@ do
         }
 
         local claimedRoots = setmetatable({}, { __mode = "k" })
-        local envOriginals = setmetatable({}, { __mode = "k" })
-        local allowSleepSaved = nil
         local pullFolder = nil
         local walkStack = {}
         local walkSeen = setmetatable({}, { __mode = "k" })
@@ -4328,129 +4400,27 @@ do
                 )
         end
 
-        local function pullReadProperty(object, key, hidden)
-                if hidden and type(gethiddenproperty) == "function" then
-                        local ok, value = pcall(gethiddenproperty, object, key)
-
-                        if ok then
-                                return value
-                        end
-                end
-
-                local ok, value = pcall(function()
-                        return object[key]
-                end)
-
-                if ok then
-                        return value
-                end
-
-                return nil
-        end
-
-        local function pullWriteProperty(object, key, value, hidden)
-                if hidden and type(sethiddenproperty) == "function" then
-                        local ok = pcall(sethiddenproperty, object, key, value)
-
-                        if ok then
-                                return true
-                        end
-                end
-
-                return pcall(function()
-                        object[key] = value
-                end)
-        end
-
-        local function pullRemember(object, key, value, hidden)
-                local saved = envOriginals[object]
-
-                if not saved then
-                        saved = {}
-                        envOriginals[object] = saved
-                end
-
-                if saved[key] == nil then
-                        saved[key] = {
-                                value = pullReadProperty(object, key, hidden),
-                                hidden = hidden
-                        }
-                end
-
-                pullWriteProperty(object, key, value, hidden)
-        end
-
         local function pullSimBoostActive()
-                -- The engine's own default radius is 1000 studs; anything
-                -- six orders of magnitude above that means the hidden
-                -- write genuinely took on this executor.
-                local radius = pullReadProperty(LocalPlayer, "SimulationRadius", true)
-
-                if type(radius) == "number" and radius >= 1e6 then
-                        return true
-                end
-
-                local maximum = pullReadProperty(LocalPlayer, "MaximumSimulationRadius", false)
-
-                return type(maximum) == "number" and maximum >= 1e6
+                local ok, radius = Environment.read(LocalPlayer, "SimulationRadius", true)
+                if ok and type(radius) == "number" and radius >= 1e6 then return true end
+                local readable, maximum = Environment.read(LocalPlayer, "MaximumSimulationRadius", false)
+                return readable and type(maximum) == "number" and maximum >= 1e6
         end
 
         local function assertSelfBoost()
-                -- Re-asserted every single frame, exactly like the
-                -- working bring-parts scripts: the boost decays the
-                -- moment you stop writing it.
-                pullRemember(LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
-                pullRemember(LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
-                pullRemember(LocalPlayer, "NetworkIsSleeping", false, true)
+                Environment.remember(ObjectPull, LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
+                Environment.remember(ObjectPull, LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
+                Environment.remember(ObjectPull, LocalPlayer, "NetworkIsSleeping", false, true)
         end
 
         local function applyPullEnvironment(rootPart)
-                -- Ourselves: maximum simulation reach, always awake,
-                -- replication centred where the pull is.
                 assertSelfBoost()
-                pullRemember(LocalPlayer, "ReplicationFocus", rootPart.CFrame)
-
-                if allowSleepSaved == nil then
-                        local ok, value = pcall(function()
-                                return settings().Physics.AllowSleep
-                        end)
-
-                        allowSleepSaved = ok and value or false
-                end
-
-                pcall(function()
-                        settings().Physics.AllowSleep = false
-                end)
-
-                -- Everyone else pinned to zero radius: the arbitration
-                -- for every loose part near them lands on us instead.
-                -- Local writes, undone on disable.
-                for _, player in ipairs(Players:GetPlayers()) do
-                        if player ~= LocalPlayer then
-                                pullRemember(player, "MaximumSimulationRadius", 0)
-                                pullRemember(player, "SimulationRadius", 0, true)
-                        end
-                end
-
+                Environment.keepAwake(ObjectPull)
                 ObjectPullSettings.SimBoost = pullSimBoostActive()
         end
 
         local function restorePullEnvironment()
-                for object, saved in pairs(envOriginals) do
-                        for key, original in pairs(saved) do
-                                pcall(pullWriteProperty, object, key, original.value, original.hidden)
-                        end
-                end
-
-                table.clear(envOriginals)
-
-                if allowSleepSaved ~= nil then
-                        pcall(function()
-                                settings().Physics.AllowSleep = allowSleepSaved
-                        end)
-
-                        allowSleepSaved = nil
-                end
+                Environment.release(ObjectPull)
         end
 
         local function releasePullRoot(root)
@@ -4918,8 +4888,6 @@ do
         }
 
         local claimedRoots = setmetatable({}, { __mode = "k" })
-        local envOriginals = setmetatable({}, { __mode = "k" })
-        local allowSleepSaved = nil
         local shakerFolder = nil
         local frameTick = 0
 
@@ -4980,126 +4948,27 @@ do
                 )
         end
 
-        local function shakeReadProperty(object, key, hidden)
-                if hidden and type(gethiddenproperty) == "function" then
-                        local ok, value = pcall(gethiddenproperty, object, key)
-
-                        if ok then
-                                return value
-                        end
-                end
-
-                local ok, value = pcall(function()
-                        return object[key]
-                end)
-
-                if ok then
-                        return value
-                end
-
-                return nil
-        end
-
-        local function shakeWriteProperty(object, key, value, hidden)
-                if hidden and type(sethiddenproperty) == "function" then
-                        local ok = pcall(sethiddenproperty, object, key, value)
-
-                        if ok then
-                                return true
-                        end
-                end
-
-                return pcall(function()
-                        object[key] = value
-                end)
-        end
-
-        local function shakeRemember(object, key, value, hidden)
-                local saved = envOriginals[object]
-
-                if not saved then
-                        saved = {}
-                        envOriginals[object] = saved
-                end
-
-                if saved[key] == nil then
-                        saved[key] = {
-                                value = shakeReadProperty(object, key, hidden),
-                                hidden = hidden
-                        }
-                end
-
-                shakeWriteProperty(object, key, value, hidden)
-        end
-
         local function shakeSimBoostActive()
-                -- Same read-back contract as the pull: the engine's own
-                -- default radius is 1000 studs, so anything six orders of
-                -- magnitude above that means the hidden write genuinely
-                -- took on this executor.
-                local radius = shakeReadProperty(LocalPlayer, "SimulationRadius", true)
-
-                if type(radius) == "number" and radius >= 1e6 then
-                        return true
-                end
-
-                local maximum = shakeReadProperty(LocalPlayer, "MaximumSimulationRadius", false)
-
-                return type(maximum) == "number" and maximum >= 1e6
+                local ok, radius = Environment.read(LocalPlayer, "SimulationRadius", true)
+                if ok and type(radius) == "number" and radius >= 1e6 then return true end
+                local readable, maximum = Environment.read(LocalPlayer, "MaximumSimulationRadius", false)
+                return readable and type(maximum) == "number" and maximum >= 1e6
         end
 
         local function assertSelfBoost()
-                -- Re-asserted every single frame exactly like the pull:
-                -- the boost decays the moment you stop writing it.
-                shakeRemember(LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
-                shakeRemember(LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
-                shakeRemember(LocalPlayer, "NetworkIsSleeping", false, true)
+                Environment.remember(Shaker, LocalPlayer, "MaximumSimulationRadius", SIM_RADIUS)
+                Environment.remember(Shaker, LocalPlayer, "SimulationRadius", SIM_RADIUS, true)
+                Environment.remember(Shaker, LocalPlayer, "NetworkIsSleeping", false, true)
         end
 
         local function applyShakeEnvironment(rootPart)
                 assertSelfBoost()
-                shakeRemember(LocalPlayer, "ReplicationFocus", rootPart.CFrame)
-
-                if allowSleepSaved == nil then
-                        local ok, value = pcall(function()
-                                return settings().Physics.AllowSleep
-                        end)
-
-                        allowSleepSaved = ok and value or false
-                end
-
-                pcall(function()
-                        settings().Physics.AllowSleep = false
-                end)
-
-                -- Everyone else pinned to zero radius so every loose
-                -- assembly near them arbitrates to us instead.
-                for _, player in ipairs(Players:GetPlayers()) do
-                        if player ~= LocalPlayer then
-                                shakeRemember(player, "MaximumSimulationRadius", 0)
-                                shakeRemember(player, "SimulationRadius", 0, true)
-                        end
-                end
-
+                Environment.keepAwake(Shaker)
                 ShakerSettings.SimBoost = shakeSimBoostActive()
         end
 
         local function restoreShakeEnvironment()
-                for object, saved in pairs(envOriginals) do
-                        for key, original in pairs(saved) do
-                                pcall(shakeWriteProperty, object, key, original.value, original.hidden)
-                        end
-                end
-
-                table.clear(envOriginals)
-
-                if allowSleepSaved ~= nil then
-                        pcall(function()
-                                settings().Physics.AllowSleep = allowSleepSaved
-                        end)
-
-                        allowSleepSaved = nil
-                end
+                Environment.release(Shaker)
         end
 
         local function releaseShakeRoot(root)
