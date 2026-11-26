@@ -104,7 +104,7 @@ local defaults = {
     autoGK = false, gkPosition = false,
     antiAFK = true, rejoinGK = true, performance = true, reducePostEffects = true, keepShadows = false, fpsCap = 240,
 }
-local S: any = {version = "0.45", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
+local S: any = {version = "0.46", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
 local settingsPath = "Poop/soccer.settings.json"
 pcall(function()
     if isfile(settingsPath) then
@@ -3931,7 +3931,7 @@ end
 S.pokeRecovery = PokeRecovery
 
 Reborn.NotificationsEnabled = cfg.notifications
-local okWindow, window = pcall(Reborn.CreateWindow, Reborn, {Title = "Ragdoll Soccer", Size = Vector2.new(620, 410), Parent = player:WaitForChild("PlayerGui")})
+local okWindow, window = pcall(Reborn.CreateWindow, Reborn, {Title = "Ragdoll Soccer - " .. S.version, Size = Vector2.new(620, 410), Parent = player:WaitForChild("PlayerGui")})
 if not okWindow then life.cleanup(); error(window) end
 window.ToggleKey = "Right Shift"
 S.window = window
