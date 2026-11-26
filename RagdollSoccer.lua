@@ -96,7 +96,7 @@ local defaults = {
     speedEnabled = false, speed = 1.5, sprint = false,
     trajectory = true, marker = true, notifications = true,
     aimDot = true,
-    autoPoke = true, walkfling = false,
+    autoPoke = true,
     jumpEnabled = true, infiniteJump = true, jumpHeight = 18, playerHitboxes = false, playerHitboxSize = 12, hitboxVisuals = true, ballExpander = true, ballHitboxRadius = 4, ballHitboxVisual = true,
     freezeBall = false,
     ballGlue = true, ballOrbit = false, ballGrabRange = 24, orbitRadius = 4, orbitSpeed = 32,
@@ -104,7 +104,7 @@ local defaults = {
     autoGK = false, gkPosition = false,
     antiAFK = true, rejoinGK = true, performance = true, reducePostEffects = true, keepShadows = false, fpsCap = 240,
 }
-local S: any = {version = "0.47", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
+local S: any = {version = "0.48", settings = table.clone(defaults), shots = retainedShots or {}, status = "Ready | F to shoot", pokeStatus = "Watching the opposing ball carrier", pokeHistory = {}, busy = false, controls = {}, }
 local settingsPath = "Poop/soccer.settings.json"
 pcall(function()
     if isfile(settingsPath) then
@@ -2972,196 +2972,6 @@ end)()
 S.protection = Protection
 
 
-local Walkfling = (function()
-    local M: any = {enabled = false, pulses = 0, connections = {}, scale = 10000, lift = 10000, contacts = {}, corrections = 0, blocked = {}}
-    local viewName = "PoopWalkflingView"
-    local replay = module(client, "InstantReplay")
-    local pro = game.ReplicatedStorage:FindFirstChild("ProState")
-    local pending
-    local function ownsBall(ball, character, pid)
-        local ownId = character:GetAttribute("DribbleId")
-        return player.Character == character and Ball.getBall() == ball and ball.Parent ~= nil
-            and finite(ownId) and ownId > 0 and finite(pid)
-            and ball:GetAttribute("Possessor") == ownId and ball:GetAttribute("PossessionId") == pid
-    end
-    local function pulseBall(saved, pulse)
-        local ball = Ball.getBall()
-        if typeof(ball) ~= "Instance" or not ball:IsA("BasePart") then return end
-        local pid = ball:GetAttribute("PossessionId")
-        if not ownsBall(ball, saved.character, pid) then return end
-        if ball.Anchored or not isnetworkowner(ball) or ball.AssemblyRootPart == saved.root.AssemblyRootPart then
-            M.lastBallReason = "Ball is not a separate controllable assembly"
-            return
-        end
-        local velocity = ball.AssemblyLinearVelocity
-        saved.ball = {part = ball, pid = pid, velocity = velocity, assembly = ball.AssemblyRootPart}
-        ball.AssemblyLinearVelocity = pulse
-        M.ballPulses = (M.ballPulses or 0) + 1
-        M.lastBallReason = "Pulse"
-    end
-    function M.restore()
-        local saved = pending
-        pending = nil
-        if not saved then return nil, nil end
-        local ball = saved.ball
-        if ball and ownsBall(ball.part, saved.character, ball.pid) and not ball.part.Anchored
-            and ball.part.AssemblyRootPart == ball.assembly and isnetworkowner(ball.part) then
-            local ok, err = pcall(function() ball.part.AssemblyLinearVelocity = ball.velocity end)
-            if not ok then M.ballError = tostring(err) end
-        end
-        if saved.root.Parent == saved.character and not saved.root.Anchored and isnetworkowner(saved.root) then
-            saved.root.AssemblyLinearVelocity = saved.velocity
-            return saved.root, saved.velocity
-        end
-        return nil, nil
-    end
-    local function clearContacts()
-        if M.folder then M.folder:Destroy(); M.folder = nil end
-        table.clear(M.contacts)
-        M.contactCharacter = nil
-    end
-    function M.syncContacts()
-        local character = player.Character
-        local collider = character and character:FindFirstChild("Collider")
-        if not character or not collider or not collider:IsA("BasePart") then clearContacts(); return end
-        if M.contactCharacter ~= character or not M.folder or not M.folder.Parent then
-            clearContacts()
-            M.folder = Instance.new("Folder")
-            M.folder.Name = "PoopWalkflingContacts"
-            M.folder.Parent = character
-            M.contactCharacter = character
-        end
-        local seen = {}
-        for _, other in ipairs(Players:GetPlayers()) do
-            local model = other ~= player and other.Character
-            if model then
-                for _, part in ipairs(model:GetChildren()) do
-                    if part:IsA("BasePart") and part.CanCollide then
-                        seen[part] = true
-                        if not M.contacts[part] then
-                            local constraint = Instance.new("NoCollisionConstraint")
-                            constraint.Name = "WalkflingContact"
-                            constraint.Part0, constraint.Part1 = collider, part
-                            constraint.Parent = M.folder
-                            M.contacts[part] = constraint
-                        end
-                    end
-                end
-            end
-        end
-        for part, constraint in pairs(M.contacts) do
-            if not seen[part] then constraint:Destroy(); M.contacts[part] = nil end
-        end
-        M.nextContacts = os.clock() + 0.5
-    end
-    function M.stop()
-        M.enabled = false
-        if M.renderBound then
-            Run:UnbindFromRenderStep(viewName)
-            M.renderBound = false
-        end
-        for _, connection in ipairs(M.connections) do connection:Disconnect() end
-        table.clear(M.connections)
-        local restoredRoot, velocity = M.restore()
-        clearContacts()
-        return restoredRoot, velocity
-    end
-    local function guarded(fn)
-        return function(...)
-            local ok, err = pcall(fn, ...)
-            if not ok then M.error = tostring(err); M.stop() end
-        end
-    end
-    local function blocked(reason)
-        M.lastReason = reason
-        M.blocked[reason] = (M.blocked[reason] or 0) + 1
-    end
-    function M.step()
-        M.restore()
-        if not M.enabled or not life.alive() then return end
-        local at = os.clock()
-        if os.clock() >= (M.nextContacts or 0) or player.Character ~= M.contactCharacter then M.syncContacts() end
-        if replay.playing() or (pro and pro:GetAttribute("Phase") ~= "Play") then
-            M.previous = nil
-            blocked("Not playing")
-            return
-        end
-        if S.busy or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then
-            M.previous = nil
-            blocked("Input")
-            return
-        end
-        local character = player.Character
-        local r = character and character:FindFirstChild("Root")
-        if not r or not r:IsA("BasePart") or character:GetAttribute("BodyState") ~= "Animated"
-            or r.Anchored or not isnetworkowner(r) then blocked("Own rig"); return end
-        local velocity = r.AssemblyLinearVelocity
-        local previous = M.previous
-        M.previous = {character = character, position = r.Position, at = at}
-        if previous and previous.character == character and at - previous.at < 0.3
-            and (r.Position - previous.position).Magnitude > math.max(16, velocity.Magnitude * (at - previous.at) * 3 + 3) then
-            M.corrections += 1
-            M.lastCorrection = {from = previous.position, to = r.Position, at = at}
-            M.stop()
-            cfg.walkfling = false
-            if S.controls.walkfling then S.controls.walkfling:Set(false, false) end
-            save()
-            blocked("Position corrected")
-            notify("Walkfling", "Disabled after an unexpected position correction.")
-            return
-        end
-        if at < (M.pauseUntil or 0) then blocked("Jump"); return end
-        local motion = velocity * Vector3.new(1, 0, 1)
-        local manager = character:FindFirstChildOfClass("ControllerManager")
-        local wish = manager and manager.MovingDirection or Vector3.zero
-        if motion.Magnitude < 2 and wish.Magnitude >= 0.01 then
-            motion = wish.Unit * math.max(manager and manager.BaseMoveSpeed or 16, 16)
-        end
-        local closest, distance = nil, 8
-        for _, other in ipairs(Players:GetPlayers()) do
-            local model = other ~= player and other.Character
-            local otherRoot = model and model:FindFirstChild("Root")
-            if otherRoot and otherRoot:IsA("BasePart") and not otherRoot.Anchored then
-                local d = (otherRoot.Position - r.Position).Magnitude
-                if d < distance then closest, distance = otherRoot, d end
-            end
-        end
-        if not closest then blocked("No contact"); return end
-        local pulse = motion * M.scale + Vector3.new(0, M.lift, 0)
-        pending = {root = r, character = character, velocity = velocity}
-        r.AssemblyLinearVelocity = pulse
-        local ok, err = pcall(pulseBall, pending, pulse)
-        if not ok then M.ballError = tostring(err) end
-        M.pulses += 1
-        M.lastReason = "Pulse"
-        M.lastInterval = M.lastPulseAt and at - M.lastPulseAt
-        M.lastPulseAt = at
-        M.lastTargetState = closest.Parent and closest.Parent:GetAttribute("BodyState")
-        M.lastIdle = motion.Magnitude < 2 and wish.Magnitude < 0.01
-        M.lastTarget = closest.Parent and closest.Parent.Name
-        M.lastDistance = (closest.Position - r.Position).Magnitude
-    end
-    function M.setEnabled(enabled)
-        M.stop()
-        if not enabled or not life.alive() then return end
-        M.error = nil
-        M.previous = nil
-        M.enabled = true
-        M.syncContacts()
-        Run:BindToRenderStep(viewName, Enum.RenderPriority.First.Value - 1, guarded(M.restore))
-        M.renderBound = true
-        M.connections[1] = Run.PreAnimation:Connect(guarded(M.restore))
-        M.connections[2] = Run.PreSimulation:Connect(guarded(M.restore))
-        M.connections[3] = Run.Heartbeat:Connect(guarded(M.step))
-    end
-    function M.pending() return pending ~= nil end
-    life.onCleanup(M.stop)
-    M.setEnabled(cfg.walkfling)
-    return M
-end)()
-S.walkfling = Walkfling
-
-
 local Jump = (function()
     local M: any = {queued = false, airborne = false, boosting = false, nextAt = 0, maxHeight = 60}
     local replay = module(client, "InstantReplay")
@@ -3180,7 +2990,6 @@ local Jump = (function()
             M.nextAt = os.clock() + 0.5
             return true
         end
-        Walkfling.restore()
         M.queued, M.character = true, character
         M.nextAt = os.clock() + (if cfg.infiniteJump then 0.12 else 0.45)
         return true
@@ -3199,7 +3008,6 @@ local Jump = (function()
                 local maximum = Tuning.Launch.Speed * math.sqrt(math.max(0.05, 0.9 - (math.max(current.Y, 0) / Tuning.Launch.Rise) ^ 2))
                 if flat.Magnitude > maximum then flat = flat.Unit * maximum end
                 if M.boosting or flat ~= current * Vector3.new(1, 0, 1) then r.AssemblyLinearVelocity = flat + Vector3.new(0, current.Y, 0) end
-                Walkfling.pauseUntil = os.clock() + 0.08
             else M.boosting = false end
         end
         if not M.queued then return end
@@ -3211,7 +3019,6 @@ local Jump = (function()
         local sensor = manager and manager.GroundSensor
         if character ~= M.character or not r or not r:IsA("BasePart") or not manager or not air
             or not sensor or (not sensor.SensedPart and not cfg.infiniteJump) or character:GetAttribute("BodyState") ~= "Animated" then return end
-        Walkfling.restore()
         local height = math.clamp(tonumber(cfg.jumpHeight) or 18, 1, M.maxHeight)
         M.riseSpeed = Tuning.Launch.Rise * 0.88
         local speed = math.min(math.sqrt(2 * workspace.Gravity * height), M.riseSpeed)
@@ -3225,7 +3032,6 @@ local Jump = (function()
         manager.ActiveController = air
         r.AssemblyLinearVelocity = horizontal + Vector3.new(0, speed, 0)
         M.airborne, M.takeoffAt = true, os.clock()
-        Walkfling.pauseUntil = os.clock() + 0.1
     end)
     life.connect(Run.Heartbeat, function()
         if not M.airborne then return end
@@ -4020,8 +3826,6 @@ local ball = playerTab:Section("Ball")
 toggle(ball, "Auto poke", "autoPoke")
 ball:Button({Text = "Poke", Callback = function() S.pokeCarrier(false) end})
 toggle(ball, "Freeze loose ball", "freezeBall", function(enabled) if enabled then if S.controls.ballOrbit then S.controls.ballOrbit:Set(false, true) end; if S.controls.ballGlue then S.controls.ballGlue:Set(false, true) end end; Freeze.setEnabled(enabled) end)
-local tricks = playerTab:Section("Tricks")
-toggle(tricks, "Walkfling", "walkfling", Walkfling.setEnabled)
 local orbitSection = playerTab:Section("Ball control")
 toggle(orbitSection, "Ball glue", "ballGlue", Glue.setEnabled)
 toggle(orbitSection, "Ball orbit", "ballOrbit", Orbit.setEnabled)
@@ -4061,7 +3865,6 @@ slider(performance, "Frame limit", "fpsCap", 60, 360, 10, Performance.apply)
 if retainedClosed then window:SetVisible(false) end
 
 local function onKeyInput(key, processed)
-    Walkfling.restore()
     if processed or Input:GetFocusedTextBox() or GuiService.MenuIsOpen then return end
     if key.KeyCode == Enum.KeyCode.RightShift then window:Toggle(); return end
     if key.KeyCode == Enum.KeyCode.Space and cfg.jumpEnabled then Jump.fire(); return end
