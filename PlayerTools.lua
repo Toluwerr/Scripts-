@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local VERSION = "0.5"
+local VERSION = "0.6"
 
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
@@ -252,6 +252,114 @@ local ShakerSettings = {
 }
 
 local Shaker = {}
+
+local Preferences = {
+        path = "PlayerTools.settings.json",
+        values = {},
+        entries = {
+                {key = "Settings.Enabled", state = Settings, field = "Enabled"},
+                {key = "Settings.TeamCheck", state = Settings, field = "TeamCheck"},
+                {key = "Settings.Highlight", state = Settings, field = "Highlight"},
+                {key = "Settings.ThroughWalls", state = Settings, field = "ThroughWalls"},
+                {key = "Settings.ShowName", state = Settings, field = "ShowName"},
+                {key = "Settings.ShowHealth", state = Settings, field = "ShowHealth"},
+                {key = "Settings.ShowDistance", state = Settings, field = "ShowDistance"},
+                {key = "Settings.MaxDistance", state = Settings, field = "MaxDistance", min = 100, max = 5000},
+                {key = "Settings.FillTransparency", state = Settings, field = "FillTransparency", min = 0, max = 1},
+                {key = "Settings.Color", state = Settings, field = "Color"},
+                {key = "MovementSettings.Enabled", state = MovementSettings, field = "Enabled", active = true},
+                {key = "MovementSettings.Speed", state = MovementSettings, field = "Speed", min = 0},
+                {key = "MovementSettings.InfiniteJump", state = MovementSettings, field = "InfiniteJump"},
+                {key = "MovementSettings.Noclip", state = MovementSettings, field = "Noclip", active = true},
+                {key = "ClickTeleportSettings.Enabled", state = ClickTeleportSettings, field = "Enabled"},
+                {key = "PlatformSettings.Enabled", state = PlatformSettings, field = "Enabled", active = true},
+                {key = "ObjectHoldSettings.Enabled", state = ObjectHoldSettings, field = "Enabled", active = true},
+                {key = "ObjectHoldSettings.Responsiveness", state = ObjectHoldSettings, field = "Responsiveness", min = 10, max = 60},
+                {key = "ObjectPullSettings.Enabled", state = ObjectPullSettings, field = "Enabled", active = true},
+                {key = "ObjectPullSettings.KeepDistance", state = ObjectPullSettings, field = "KeepDistance", min = 3, max = 50},
+                {key = "ShakerSettings.Enabled", state = ShakerSettings, field = "Enabled", active = true},
+                {key = "FlySettings.Enabled", state = FlySettings, field = "Enabled", active = true},
+                {key = "FlySettings.Speed", state = FlySettings, field = "Speed", min = 10, max = 250},
+                {key = "AimlockSettings.Enabled", state = AimlockSettings, field = "Enabled", active = true},
+                {key = "AimlockSettings.TeamCheck", state = AimlockSettings, field = "TeamCheck"},
+                {key = "AimlockSettings.CursorRadius", state = AimlockSettings, field = "CursorRadius", min = 50, max = 600},
+                {key = "AimlockSettings.MaxDistance", state = AimlockSettings, field = "MaxDistance", min = 100, max = 5000},
+                {key = "FlingSettings.Enabled", state = FlingSettings, field = "Enabled", active = true},
+                {key = "FlingSettings.AntiFling", state = FlingSettings, field = "AntiFling", active = true},
+                {key = "FlingSettings.Power", state = FlingSettings, field = "Power", min = 1, max = 1000},
+                {key = "VehicleSettings.Speed", state = VehicleSettings, field = "Speed", min = 0},
+                {key = "VehicleSettings.SteeringStrength", state = VehicleSettings, field = "SteeringStrength", min = 0},
+                {key = "VehicleFlySettings.Enabled", state = VehicleFlySettings, field = "Enabled", active = true},
+                {key = "VehicleFlySettings.Speed", state = VehicleFlySettings, field = "Speed", min = 0},
+                {key = "VehicleJumpSettings.Power", state = VehicleJumpSettings, field = "Power", min = 0},
+                {key = "VehicleSpeedBoostSettings.Power", state = VehicleSpeedBoostSettings, field = "Power", min = 0},
+                {key = "VehicleFlingSettings.Enabled", state = VehicleFlingSettings, field = "Enabled", active = true},
+                {key = "VehicleFlingSettings.Power", state = VehicleFlingSettings, field = "Power", min = 0},
+                {key = "VehicleTeleportSettings.Enabled", state = VehicleTeleportSettings, field = "Enabled", active = true},
+        }
+}
+
+do
+        local http = game:GetService("HttpService")
+        local saved = Global.__PlayerToolsPreferences
+        if type(saved) ~= "table" and type(readfile) == "function" then
+                local ok, data = pcall(function()
+                        return http:JSONDecode(readfile(Preferences.path))
+                end)
+                if ok and type(data) == "table" then saved = data end
+        end
+        if type(saved) ~= "table" then saved = {} end
+
+        local function normalize(entry, value)
+                local default = entry.state[entry.field]
+                if typeof(default) == "Color3" then
+                        if type(value) == "string" and value:match("^%x%x%x%x%x%x$") then
+                                local ok, color = pcall(Color3.fromHex, value)
+                                if ok then return color:ToHex(), color end
+                        end
+                        return default:ToHex(), default
+                elseif type(default) == "boolean" then
+                        local result = if type(value) == "boolean" then value else default
+                        return result, result
+                elseif type(default) == "number" then
+                        if type(value) ~= "number" or value ~= value or math.abs(value) == math.huge then
+                                value = entry.default
+                        end
+                        if entry.min then value = math.max(entry.min, value) end
+                        if entry.max then value = math.min(entry.max, value) end
+                        return value, value
+                end
+        end
+
+        for _, entry in ipairs(Preferences.entries) do
+                entry.default = entry.state[entry.field]
+                local serialized, value = normalize(entry, saved[entry.key])
+                Preferences.values[entry.key] = serialized
+                if not entry.active then entry.state[entry.field] = value end
+        end
+
+        function Preferences.save()
+                local snapshot = {}
+                local changed = Preferences.lastSaved == nil
+                for _, entry in ipairs(Preferences.entries) do
+                        local value = entry.state[entry.field]
+                        if typeof(value) == "Color3" then value = value:ToHex() end
+                        local serialized = normalize(entry, value)
+                        snapshot[entry.key] = serialized
+                        if not changed and Preferences.lastSaved[entry.key] ~= serialized then
+                                changed = true
+                        end
+                end
+                if not changed then return end
+                Global.__PlayerToolsPreferences = snapshot
+                Preferences.lastSaved = snapshot
+                if type(writefile) == "function" then
+                        pcall(function()
+                                writefile(Preferences.path, http:JSONEncode(snapshot))
+                        end)
+                end
+        end
+end
 
 local Window
 local stopVehicleFlyRuntime
@@ -5479,6 +5587,7 @@ local function cleanup()
                 return
         end
 
+        Preferences.save()
         running = false
         Settings.Enabled = false
         AimlockSettings.Enabled = false
@@ -5586,7 +5695,7 @@ local MainSection = ESPTab:Section("Player ESP")
 
 MainSection:Toggle({
         Text = "Enable ESP",
-        Value = false,
+        Value = Preferences.values["Settings.Enabled"],
         Callback = function(value)
                 Settings.Enabled = value
                 refreshAll()
@@ -5595,7 +5704,7 @@ MainSection:Toggle({
 
 MainSection:Toggle({
         Text = "Team Check",
-        Value = true,
+        Value = Preferences.values["Settings.TeamCheck"],
         Callback = function(value)
                 Settings.TeamCheck = value
                 refreshAll()
@@ -5604,7 +5713,7 @@ MainSection:Toggle({
 
 MainSection:Toggle({
         Text = "Through Walls",
-        Value = true,
+        Value = Preferences.values["Settings.ThroughWalls"],
         Callback = function(value)
                 Settings.ThroughWalls = value
                 refreshAll()
@@ -5615,7 +5724,7 @@ local LabelSection = ESPTab:Section("ESP Elements")
 
 LabelSection:Toggle({
         Text = "Highlight",
-        Value = true,
+        Value = Preferences.values["Settings.Highlight"],
         Callback = function(value)
                 Settings.Highlight = value
                 refreshAll()
@@ -5624,7 +5733,7 @@ LabelSection:Toggle({
 
 LabelSection:Toggle({
         Text = "Show Name",
-        Value = true,
+        Value = Preferences.values["Settings.ShowName"],
         Callback = function(value)
                 Settings.ShowName = value
                 refreshAll()
@@ -5633,7 +5742,7 @@ LabelSection:Toggle({
 
 LabelSection:Toggle({
         Text = "Show Health",
-        Value = true,
+        Value = Preferences.values["Settings.ShowHealth"],
         Callback = function(value)
                 Settings.ShowHealth = value
                 refreshAll()
@@ -5642,7 +5751,7 @@ LabelSection:Toggle({
 
 LabelSection:Toggle({
         Text = "Show Distance",
-        Value = true,
+        Value = Preferences.values["Settings.ShowDistance"],
         Callback = function(value)
                 Settings.ShowDistance = value
                 refreshAll()
@@ -5666,7 +5775,7 @@ StyleSection:Slider({
         Text = "Fill Opacity",
         Min = 0,
         Max = 100,
-        Value = 26,
+        Value = (1 - Settings.FillTransparency) * 100,
         Callback = function(value)
                 Settings.FillTransparency = 1 - (value / 100)
                 refreshAll()
@@ -5677,7 +5786,7 @@ StyleSection:Slider({
         Text = "Maximum Distance",
         Min = 100,
         Max = 5000,
-        Value = 1500,
+        Value = Settings.MaxDistance,
         Callback = function(value)
                 Settings.MaxDistance = value
                 refreshAll()
@@ -5690,7 +5799,7 @@ local MovementSection = MovementTab:Section("Walk Speed")
 
 local speedToggle = MovementSection:Toggle({
         Text = "Enable Speed",
-        Value = false,
+        Value = Preferences.values["MovementSettings.Enabled"],
         Callback = function(value)
                 setSpeedEnabled(value)
         end
@@ -5730,7 +5839,7 @@ MovementSection:Button({
 
 MovementSection:Toggle({
         Text = "Infinite Jump",
-        Value = false,
+        Value = Preferences.values["MovementSettings.InfiniteJump"],
         Callback = function(value)
                 MovementSettings.InfiniteJump = value and true or false
         end
@@ -5738,7 +5847,7 @@ MovementSection:Toggle({
 
 MovementSection:Toggle({
         Text = "Noclip",
-        Value = false,
+        Value = Preferences.values["MovementSettings.Noclip"],
         Callback = function(value)
                 setNoclipEnabled(value)
         end
@@ -5750,7 +5859,7 @@ local ClickTeleportSection = MovementTab:Section("Click Teleport")
 
 ClickTeleportSection:Toggle({
         Text = "Enable Click Teleport",
-        Value = false,
+        Value = Preferences.values["ClickTeleportSettings.Enabled"],
         Callback = function(value)
                 ClickTeleportSettings.Enabled = value and true or false
         end
@@ -5762,7 +5871,7 @@ local PlatformSection = MovementTab:Section("Platform")
 
 PlatformSection:Toggle({
         Text = "Enable Platform",
-        Value = false,
+        Value = Preferences.values["PlatformSettings.Enabled"],
         Callback = function(value)
                 setPlatformEnabled(value)
         end
@@ -5770,7 +5879,7 @@ PlatformSection:Toggle({
 end
 
 do
-local function bindFeature(name, feature, settings)
+local function bindFeature(name, feature, settings, preferenceKey)
         local section = FunTab:Section(name)
         local offStatus = name .. " off"
         local statusLabel = section:Paragraph({Text = offStatus})
@@ -5783,7 +5892,7 @@ local function bindFeature(name, feature, settings)
 
         toggle = section:Toggle({
                 Text = "Enable " .. name,
-                Value = enabled,
+                Value = Preferences.values[preferenceKey],
                 Callback = function(value)
                         local desired = value == true
                         if desired == enabled then
@@ -5808,7 +5917,7 @@ local function bindFeature(name, feature, settings)
         return section
 end
 
-local ObjectHoverSection = bindFeature("Object Hover", ObjectHold, ObjectHoldSettings)
+local ObjectHoverSection = bindFeature("Object Hover", ObjectHold, ObjectHoldSettings, "ObjectHoldSettings.Enabled")
 
 ObjectHoverSection:Button({
         Text = "Release Object",
@@ -5839,7 +5948,7 @@ ObjectHoverSection:Slider({
         end
 })
 
-local ObjectPullSection = bindFeature("Object Pull", ObjectPull, ObjectPullSettings)
+local ObjectPullSection = bindFeature("Object Pull", ObjectPull, ObjectPullSettings, "ObjectPullSettings.Enabled")
 
 ObjectPullSection:Slider({
         Text = "Keep Distance",
@@ -5851,7 +5960,7 @@ ObjectPullSection:Slider({
         end
 })
 
-bindFeature("Object Shaker", Shaker, ShakerSettings)
+bindFeature("Object Shaker", Shaker, ShakerSettings, "ShakerSettings.Enabled")
 end
 
 do
@@ -5859,7 +5968,7 @@ local FlySection = MovementTab:Section("Fly")
 
 FlySection:Toggle({
         Text = "Enable Fly",
-        Value = false,
+        Value = Preferences.values["FlySettings.Enabled"],
         Callback = function(value)
                 setFlyEnabled(value)
         end
@@ -5881,7 +5990,7 @@ local AimlockSection = MovementTab:Section("Aimlock")
 
 AimlockSection:Toggle({
         Text = "Enable Aimlock",
-        Value = false,
+        Value = Preferences.values["AimlockSettings.Enabled"],
         Callback = function(value)
                 setAimlockEnabled(value)
         end
@@ -5889,7 +5998,7 @@ AimlockSection:Toggle({
 
 AimlockSection:Toggle({
         Text = "Team Check",
-        Value = true,
+        Value = Preferences.values["AimlockSettings.TeamCheck"],
         Callback = function(value)
                 AimlockSettings.TeamCheck = value
         end
@@ -5925,7 +6034,7 @@ local FlingSection = MovementTab:Section("Fling")
 
 FlingSection:Toggle({
         Text = "Fling",
-        Value = false,
+        Value = Preferences.values["FlingSettings.Enabled"],
         Callback = function(value)
                 setFlingEnabled(value)
         end
@@ -5933,7 +6042,7 @@ FlingSection:Toggle({
 
 FlingSection:Toggle({
         Text = "Anti Fling",
-        Value = false,
+        Value = Preferences.values["FlingSettings.AntiFling"],
         Callback = function(value)
                 setAntiFlingEnabled(value)
         end
@@ -6003,7 +6112,7 @@ local VehicleFlySection = VehicleMovementTab:Section("Vehicle Fly")
 
 VehicleFlySection:Toggle({
         Text = "Enable Vehicle Fly",
-        Value = false,
+        Value = Preferences.values["VehicleFlySettings.Enabled"],
         Callback = function(value)
                 setVehicleFlyEnabled(value)
         end
@@ -6068,7 +6177,7 @@ local VehicleFlingSection = VehicleMovementTab:Section("Vehicle Fling")
 
 VehicleFlingSection:Toggle({
         Text = "Vehicle Fling",
-        Value = false,
+        Value = Preferences.values["VehicleFlingSettings.Enabled"],
         Callback = function(value)
                 setVehicleFlingEnabled(value)
         end
@@ -6095,7 +6204,7 @@ local VehicleTeleportSection = VehicleMovementTab:Section("Vehicle Teleport")
 
 VehicleTeleportSection:Toggle({
         Text = "Enable Vehicle Teleport",
-        Value = false,
+        Value = Preferences.values["VehicleTeleportSettings.Enabled"],
         Callback = function(value)
                 setVehicleTeleportEnabled(value)
         end
@@ -6267,3 +6376,30 @@ end))
 track(Window.Gui.Destroying:Connect(cleanup))
 
 updateAimStatus()
+
+do
+        if Preferences.values["MovementSettings.Enabled"] then pcall(setSpeedEnabled, true) end
+        if Preferences.values["MovementSettings.Noclip"] then pcall(setNoclipEnabled, true) end
+        if Preferences.values["PlatformSettings.Enabled"] then pcall(setPlatformEnabled, true) end
+        if Preferences.values["ObjectHoldSettings.Enabled"] then pcall(ObjectHold.setEnabled, true) end
+        if Preferences.values["ObjectPullSettings.Enabled"] then pcall(ObjectPull.setEnabled, true) end
+        if Preferences.values["ShakerSettings.Enabled"] then pcall(Shaker.setEnabled, true) end
+        if Preferences.values["FlySettings.Enabled"] then pcall(setFlyEnabled, true) end
+        if Preferences.values["AimlockSettings.Enabled"] then pcall(setAimlockEnabled, true) end
+        if Preferences.values["FlingSettings.Enabled"] then pcall(setFlingEnabled, true) end
+        if Preferences.values["FlingSettings.AntiFling"] then pcall(setAntiFlingEnabled, true) end
+        if Preferences.values["VehicleFlySettings.Enabled"] then pcall(setVehicleFlyEnabled, true) end
+        if Preferences.values["VehicleFlingSettings.Enabled"] then pcall(setVehicleFlingEnabled, true) end
+        if Preferences.values["VehicleTeleportSettings.Enabled"] then pcall(setVehicleTeleportEnabled, true) end
+        refreshAll()
+        Preferences.save()
+
+        local elapsed = 0
+        track(RunService.Heartbeat:Connect(function(deltaTime)
+                if not running then return end
+                elapsed += deltaTime
+                if elapsed < 0.5 then return end
+                elapsed = 0
+                Preferences.save()
+        end))
+end
