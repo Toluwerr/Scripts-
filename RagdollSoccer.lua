@@ -523,9 +523,9 @@ if goalRemote then
         end
     end)
 end
-local function trackShot(plan, before)
+local function trackShot(plan, before, style, motion)
     local entry = {
-        at = now(), family = plan.family, style = cfg.style, miss = plan.miss,
+        at = now(), family = plan.family, style = style, miss = plan.miss,
         from = tostring(plan.sample.from), target = tostring(plan.target), velocity = tostring(plan.velocity),
         accepted = false, goalConfirmed = false, result = "Awaiting server", pid = plan.sample.pid,
         trackingVersion = "0.3",
@@ -533,6 +533,9 @@ local function trackShot(plan, before)
         passageMargin = plan.passage.margin, planningVersion = "0.4",
         side = plan.side, spin = tostring(plan.spin),
         samples = {},
+        sampleAge = now() - plan.sample.time,
+        contactOffset = motion and motion.contactOffset,
+        contactDrift = motion and motion.contactDrift,
         characterId = player.Character and player.Character:GetAttribute("DribbleId"),
     }
     table.insert(S.shots, entry)
@@ -546,10 +549,17 @@ local function trackShot(plan, before)
             if flight and flight ~= before then
                 local fields = string.split(flight, "|")
                 local by = tonumber(fields[13])
-                if entry.characterId and by == entry.characterId and fields[14] == plan.family
+                if not entry.accepted and entry.characterId and by == entry.characterId and fields[14] == plan.family
                     and type(entry.pid) == "number" and tonumber(fields[2]) == entry.pid + 1 then
                     entry.accepted = true
                     entry.serverFlight = flight
+                    local decoded, event = pcall(Flight.decode, flight)
+                    if decoded and event then
+                        if typeof(event.pos) == "Vector3" then entry.serverPositionError = (event.pos - plan.sample.from).Magnitude end
+                        if typeof(event.vel) == "Vector3" then entry.serverVelocityError = (event.vel - plan.velocity).Magnitude end
+                        if typeof(event.spin) == "Vector3" then entry.serverSpinError = (event.spin - plan.spin).Magnitude end
+                        if finite(event.t) then entry.serverTimeOffset = event.t - plan.sample.time end
+                    end
                 end
             end
             if entry.goalConfirmed then
@@ -621,6 +631,19 @@ local function beginKickMotion(sample, plan)
     local contactAt = now() + lead
     local contact = if sample.state then Path.sample(sample.state.seg, contactAt, sample.state.P) else Ball.freeSample(contactAt)
     if not contact or contact == Vector3.zero then contact = sample.from end
+    if (contact - plan.sample.from).Magnitude > 0.1 then
+        local predicted = {ball = sample.ball, from = contact, time = contactAt, state = sample.state, pid = sample.pid}
+        local adjusted = fitShot(predicted, plan.target, plan.goal, plan.family, plan.speed, plan.side, plan.back)
+        if not adjusted then return nil, nil, "No valid shot from the predicted contact position" end
+        plan = adjusted
+    end
+    local remaining = contactAt - now()
+    if remaining <= (family.plantAt or 0.12) then
+        return nil, nil, "Shot calculation exceeded the windup; try F again"
+    end
+    if player.Character ~= character or Ball.getBall() ~= sample.ball or possessionId() ~= sample.pid then
+        return nil, nil, "Possession changed before the kick"
+    end
     local direction = plan.velocity * Vector3.new(1, 0, 1)
     if direction.Magnitude < 0.01 then direction = r.CFrame.LookVector * Vector3.new(1, 0, 1) end
     direction = direction.Unit
@@ -630,7 +653,7 @@ local function beginKickMotion(sample, plan)
     env.__PoopSoccerKickId = (env.__PoopSoccerKickId or 1000000) + 1
     local id = env.__PoopSoccerKickId
     local plantAt = family.plantAt or 0.12
-    local spec = {id = id, leg = leg, at = lead, ball = contact, dir = direction, family = family,
+    local spec = {id = id, leg = leg, at = remaining, ball = contact, dir = direction, family = family,
         power = 1, plant = plant, plantYaw = plantYaw, plantAt = plantAt}
     local motion = {id = id, character = character, animator = animator, spec = spec, contactAt = contactAt,
         requestedAt = now(), pid = sample.pid, family = plan.family, relayed = false, released = false,
@@ -642,34 +665,66 @@ local function beginKickMotion(sample, plan)
     kickPlanRemote:FireServer({id = id, leg = leg, t = contactAt, shift = 0, ball = contact, dir = direction,
         family = plan.family, power = 1, plant = plant, plantYaw = plantYaw, plantAt = plantAt,
         vel = plan.velocity, spin = plan.spin or Vector3.zero})
-    return motion
+    return motion, plan
 end
 function S.shoot(silent)
     if not life.alive() then return false end
     if S.busy or os.clock() - lastAction < 0.5 then return false end
     S.busy = true
+    local style = cfg.style
     local ok, sent, reason = pcall(function()
         local sample, why = ballSample()
         if not sample then return false, why end
+        local character = player.Character
+        local function resample()
+            if not life.alive() then return nil, "Hub unloaded" end
+            if player.Character ~= character then return nil, "Character changed; try F again" end
+            local current, message = ballSample()
+            if not current or current.ball ~= sample.ball or current.pid ~= sample.pid then
+                return nil, message or "Possession changed; try F again"
+            end
+            return current
+        end
+
         local plan, whyPlan = calculate(sample)
         if not plan then return false, whyPlan end
-        local motion = beginKickMotion(sample, plan)
+        local windupSample, windupWhy = resample()
+        if not windupSample then return false, windupWhy end
+        local motion, motionPlan, motionWhy = beginKickMotion(windupSample, plan)
+        if motionWhy then return false, motionWhy end
         if motion then
-            S.status = "Planting foot | " .. cfg.style
+            plan = motionPlan
+            S.status = "Planting foot | " .. style
             while life.alive() and now() < motion.contactAt do
-                if player.Character ~= motion.character or motion.character:GetAttribute("BodyState") ~= "Animated" then
+                if player.Character ~= motion.character or motion.character:GetAttribute("BodyState") ~= "Animated"
+                    or kickMotion ~= motion or Ball.getBall() ~= sample.ball then
                     return false, "Kick interrupted; try F again when standing"
                 end
                 Run.Heartbeat:Wait()
             end
-            if not life.alive() then return false, "Hub unloaded" end
+            if kickMotion ~= motion or player.Character ~= motion.character or motion.character:GetAttribute("BodyState") ~= "Animated" then
+                return false, "Kick interrupted; try F again when standing"
+            end
         end
 
-        local fresh, freshWhy = ballSample()
-        if not fresh or fresh.pid ~= sample.pid then return false, freshWhy or "Possession changed; try F again" end
+        local fresh, freshWhy = resample()
+        if not fresh then return false, freshWhy end
         plan = fitShot(fresh, plan.target, plan.goal, plan.family, plan.speed, plan.side, plan.back)
         if not plan then return false, "The ball moved out of this shot's route; try F again" end
+        local latest, latestWhy = resample()
+        if not latest then return false, latestWhy end
+        if (latest.from - fresh.from).Magnitude > 0.25 then
+            fresh = latest
+            plan = fitShot(fresh, plan.target, plan.goal, plan.family, plan.speed, plan.side, plan.back)
+            if not plan then return false, "The ball moved out of this shot's route; try F again" end
+            latest, latestWhy = resample()
+            if not latest then return false, latestWhy end
+            if (latest.from - fresh.from).Magnitude > 0.25 then
+                return false, "The ball is moving too quickly for this shot; try F again"
+            end
+        end
         sample = fresh
+        if motion then motion.contactDrift = (sample.from - motion.spec.ball).Magnitude end
         local before = sample.ball:GetAttribute("KickFlight")
         local released
         if sample.state then
@@ -686,8 +741,8 @@ function S.shoot(silent)
         end
         guardRelease(sample)
         lastAction = os.clock()
-        S.status = cfg.style .. " released | checking goal"
-        trackShot(plan, before)
+        S.status = style .. " released | checking goal"
+        trackShot(plan, before, style, motion)
         return true
     end)
     S.busy = false
