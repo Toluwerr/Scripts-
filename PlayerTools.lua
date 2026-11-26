@@ -3,6 +3,8 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
+local VERSION = "0.1"
+
 local AIMLOCK_BIND_NAME = "__PlayerToolsAimlock"
 local FLY_BIND_NAME = "__PlayerToolsFly"
 local VEHICLE_FLY_BIND_NAME = "__PlayerToolsVehicleFly"
@@ -5598,7 +5600,7 @@ end
 bindMovementCharacter(LocalPlayer.Character)
 
 Window = Reborn:CreateWindow({
-        Title = "PlayerTools",
+        Title = "PlayerTools - " .. VERSION,
         Size = Vector2.new(680, 480)
 })
 
@@ -5801,36 +5803,45 @@ PlatformSection:Toggle({
 end
 
 do
-local ObjectHoverSection = FunTab:Section("Object Hover")
+local function bindFeature(name, feature, settings)
+        local section = FunTab:Section(name)
+        local offStatus = name .. " off"
+        local statusLabel = section:Paragraph({Text = offStatus})
+        local enabled = settings.Enabled == true
+        local toggle
 
-local objectHoverStatusLabel = ObjectHoverSection:Paragraph({
-        Text = "Object Hover off"
-})
-
-ObjectHold.OnStatusChanged = function(status)
-        objectHoverStatusLabel:Set(tostring(status or "Object Hover off"))
-end
-
-local objectHoverToggleValue = false
-local objectHoverToggle = ObjectHoverSection:Toggle({
-        Text = "Enable Object Hover",
-        Value = false,
-        Callback = function(value)
-                objectHoverToggleValue = value and true or false
-                ObjectHold.setEnabled(objectHoverToggleValue)
-        end
-})
-
-ObjectHold.OnEnabledChanged = function(enabled)
-        local desiredValue = enabled and true or false
-
-        if objectHoverToggleValue == desiredValue then
-                return
+        feature.OnStatusChanged = function(status)
+                statusLabel:Set(tostring(status or offStatus))
         end
 
-        objectHoverToggleValue = desiredValue
-        objectHoverToggle:Set(desiredValue)
+        toggle = section:Toggle({
+                Text = "Enable " .. name,
+                Value = enabled,
+                Callback = function(value)
+                        local desired = value == true
+                        if desired == enabled then
+                                return
+                        end
+
+                        enabled = desired
+                        feature.setEnabled(desired)
+                end
+        })
+
+        feature.OnEnabledChanged = function(value)
+                local desired = value == true
+                if enabled == desired then
+                        return
+                end
+
+                enabled = desired
+                toggle:Set(desired)
+        end
+
+        return section
 end
+
+local ObjectHoverSection = bindFeature("Object Hover", ObjectHold, ObjectHoldSettings)
 
 ObjectHoverSection:Button({
         Text = "Release Object",
@@ -5861,36 +5872,7 @@ ObjectHoverSection:Slider({
         end
 })
 
-local ObjectPullSection = FunTab:Section("Object Pull")
-
-local objectPullStatusLabel = ObjectPullSection:Paragraph({
-        Text = "Object Pull off"
-})
-
-ObjectPull.OnStatusChanged = function(status)
-        objectPullStatusLabel:Set(tostring(status or "Object Pull off"))
-end
-
-local objectPullToggleValue = false
-local objectPullToggle = ObjectPullSection:Toggle({
-        Text = "Enable Object Pull",
-        Value = false,
-        Callback = function(value)
-                objectPullToggleValue = value and true or false
-                ObjectPull.setEnabled(objectPullToggleValue)
-        end
-})
-
-ObjectPull.OnEnabledChanged = function(enabled)
-        local desiredValue = enabled and true or false
-
-        if objectPullToggleValue == desiredValue then
-                return
-        end
-
-        objectPullToggleValue = desiredValue
-        objectPullToggle:Set(desiredValue)
-end
+local ObjectPullSection = bindFeature("Object Pull", ObjectPull, ObjectPullSettings)
 
 ObjectPullSection:Slider({
         Text = "Keep Distance",
@@ -5902,36 +5884,7 @@ ObjectPullSection:Slider({
         end
 })
 
-local ObjectShakerSection = FunTab:Section("Object Shaker")
-
-local objectShakerStatusLabel = ObjectShakerSection:Paragraph({
-        Text = "Object Shaker off"
-})
-
-Shaker.OnStatusChanged = function(status)
-        objectShakerStatusLabel:Set(tostring(status or "Object Shaker off"))
-end
-
-local objectShakerToggleValue = false
-local objectShakerToggle = ObjectShakerSection:Toggle({
-        Text = "Enable Object Shaker",
-        Value = false,
-        Callback = function(value)
-                objectShakerToggleValue = value and true or false
-                Shaker.setEnabled(objectShakerToggleValue)
-        end
-})
-
-Shaker.OnEnabledChanged = function(enabled)
-        local desiredValue = enabled and true or false
-
-        if objectShakerToggleValue == desiredValue then
-                return
-        end
-
-        objectShakerToggleValue = desiredValue
-        objectShakerToggle:Set(desiredValue)
-end
+bindFeature("Object Shaker", Shaker, ShakerSettings)
 end
 
 do
