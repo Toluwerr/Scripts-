@@ -2,14 +2,13 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "0.3"
+local VERSION = "0.4"
 local MIDI_FOLDER = "midis"
 local REBORN_URL = "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau"
 local UNLOAD_KEY = "AutoPlayerInstance"
 local NOTE_OFFSET = 35
 local MIN_NOTE = -14
 local MAX_NOTE = 73
-local SCHEDULE_AHEAD = 0.15
 local MIN_NOTE_SECONDS = 0.03
 local PROGRESS_INTERVAL = 0.25
 local RECAPTURE_INTERVAL = 2
@@ -425,12 +424,10 @@ function Scheduler.new()
     self.running = false
     self.paused = false
     self.anchor = 0
-    self.pausedTotal = 0
-    self.pauseStart = 0
+    self.anchorSong = 0
     self.pausedAt = 0
     self.cursor = 1
-    self.firedUpTo = 0
-    self.pending = {}
+    self.pausedHeld = nil
     self.held = {}
     self.conn = nil
     self.onState = nil
@@ -449,11 +446,7 @@ function Scheduler:songTime()
     if self.paused then
         return self.pausedAt
     end
-    local t = os.clock() - self.anchor - self.pausedTotal
-    if t < 0 then
-        return 0
-    end
-    return t * self.speed
+    return math.max(0, self.anchorSong + (os.clock() - self.anchor) * self.speed)
 end
 
 function Scheduler:load(song)
@@ -500,8 +493,9 @@ function Scheduler:fire(ev)
         if entry then
             entry.count += 1
             entry.g = g
+            entry.volume = vol
         else
-            self.held[ev.midi] = {g = g, count = 1}
+            self.held[ev.midi] = {g = g, count = 1, volume = vol}
         end
         self.playedCount += 1
     elseif ev.kind == 1 then
@@ -522,21 +516,6 @@ function Scheduler:fire(ev)
     end
 end
 
-function Scheduler:cancelPending()
-    local first = self.firedUpTo + 1
-    for thread, idx in pairs(self.pending) do
-        pcall(task.cancel, thread)
-        if idx < first then
-            first = idx
-        end
-    end
-    table.clear(self.pending)
-    if first < self.cursor then
-        self.cursor = first
-    end
-    self.firedUpTo = self.cursor - 1
-end
-
 function Scheduler:releaseAll()
     for midi, entry in pairs(self.held) do
         if Api.release and entry.g then
@@ -548,74 +527,55 @@ function Scheduler:releaseAll()
     table.clear(self.held)
 end
 
-function Scheduler:tick()
-    if not self.running or self.paused then
-        return
+function Scheduler:setPedal(on)
+    if Api.sustain then
+        pcall(Api.sustain, on == true)
     end
+end
+
+function Scheduler:pedalAt(t)
+    if self.sustainMode == "On" then return true end
+    if self.sustainMode == "Off" then return false end
+    for i = self.cursor - 1, 1, -1 do
+        local ev = self.timeline[i]
+        if ev.kind == 2 and ev.time <= t then return ev.on end
+    end
+    return false
+end
+
+function Scheduler:tick()
+    if not self.running or self.paused then return end
     local now = os.clock()
     if now - self.lastRecapture > RECAPTURE_INTERVAL then
         self.lastRecapture = now
         pcall(captureApi)
+        if not self.running or self.paused then return end
     end
     local st = self:songTime()
     local tl = self.timeline
-    local i = self.cursor
-    local horizon = st + SCHEDULE_AHEAD * self.speed
-    while i <= #tl do
-        local ev = tl[i]
-        if ev.time <= st then
-            self:fire(ev)
-            self.firedUpTo = i
-            i += 1
-        elseif ev.time <= horizon then
-            local idx = i
-            local thread
-            thread = task.delay((ev.time - st) / self.speed, function()
-                if not self.running or self.paused or self.pending[thread] ~= idx then
-                    return
-                end
-                self.pending[thread] = nil
-                self:fire(ev)
-                if self.firedUpTo < idx then
-                    self.firedUpTo = idx
-                end
-            end)
-            self.pending[thread] = idx
-            i += 1
-        else
-            break
-        end
+    while self.cursor <= #tl and tl[self.cursor].time <= st do
+        local ev = tl[self.cursor]
+        self.cursor += 1
+        self:fire(ev)
+        if not self.running or self.paused then return end
     end
-    self.cursor = i
 
     if self.onProgress and now - self.lastProgressPush >= PROGRESS_INTERVAL then
         self.lastProgressPush = now
-        self.onProgress(st, self.totalSeconds)
+        self.onProgress(math.min(st, self.totalSeconds), self.totalSeconds)
     end
 
     if self.cursor > #tl and st >= self.totalSeconds + 0.2 then
+        self:releaseAll()
+        self:setPedal(false)
         if self.loop then
-            self:releaseAll()
-            if Api.sustain and Api.sustainOn then
-                Api.sustain(false)
-            end
             self.cursor = 1
-            self.firedUpTo = 0
             self.playedCount = 0
-            self.pausedTotal = 0
+            self.anchorSong = 0
             self.anchor = os.clock()
+            self:setPedal(self.sustainMode == "On")
         else
-            self.running = false
-            if self.conn then
-                self.conn:Disconnect()
-                self.conn = nil
-            end
-            if Api.sustain and Api.sustainOn then
-                Api.sustain(false)
-            end
-            if self.onState then
-                self.onState("Stopped")
-            end
+            self:stop()
             if self.onProgress then
                 self.onProgress(self.totalSeconds, self.totalSeconds)
             end
@@ -632,10 +592,11 @@ function Scheduler:start()
     end
     self.running = true
     self.paused = false
-    self.pausedTotal = 0
+    self.anchorSong = 0
     self.anchor = os.clock()
+    self.pausedAt = 0
     self.cursor = 1
-    self.firedUpTo = 0
+    self.pausedHeld = nil
     self.playedCount = 0
     self.lastProgressPush = 0
     self.lastRecapture = 0
@@ -659,10 +620,14 @@ function Scheduler:pause()
     if not self.running or self.paused then
         return
     end
-    self.paused = true
     self.pausedAt = self:songTime()
-    self.pauseStart = os.clock()
-    self:cancelPending()
+    self.paused = true
+    self.pausedHeld = table.clone(self.held)
+    self:releaseAll()
+    self:setPedal(false)
+    if self.onProgress then
+        self.onProgress(math.min(self.pausedAt, self.totalSeconds), self.totalSeconds)
+    end
     if self.onState then
         self.onState("Paused")
     end
@@ -672,9 +637,22 @@ function Scheduler:resume()
     if not self.running or not self.paused then
         return
     end
+    self.anchorSong = self.pausedAt
+    self.anchor = os.clock()
+    self:setPedal(self:pedalAt(self.pausedAt))
+    if self.pausedHeld then
+        for midi, entry in pairs(self.pausedHeld) do
+            if Api.play then
+                for _ = 1, entry.count do
+                    pcall(Api.play, entry.g, entry.volume)
+                end
+                self.held[midi] = entry
+            end
+        end
+        self.pausedHeld = nil
+    end
     self.paused = false
-    self.pausedTotal += os.clock() - self.pauseStart
-    self.anchor = os.clock() - self.pausedTotal - self.pausedAt / self.speed
+    self.anchor = os.clock()
     if self.onState then
         self.onState("Playing")
     end
@@ -685,42 +663,46 @@ function Scheduler:seek(t)
         return
     end
     t = math.clamp(t, 0, self.totalSeconds)
-    self:cancelPending()
     self:releaseAll()
+    self.pausedHeld = nil
     local tl = self.timeline
     local lo, hi = 1, #tl + 1
     while lo < hi do
         local mid = (lo + hi) // 2
-        if tl[mid] and tl[mid].time <= t then
+        if tl[mid] and tl[mid].time < t then
             lo = mid + 1
         else
             hi = mid
         end
     end
     self.cursor = lo
-    self.firedUpTo = lo - 1
+    self:setPedal(false)
     if self.paused then
         self.pausedAt = t
     else
-        self.anchor = os.clock() - self.pausedTotal - t / self.speed
+        self.anchorSong = t
+        self.anchor = os.clock()
+        self:setPedal(self:pedalAt(t))
+    end
+    if self.onProgress then
+        self.onProgress(t, self.totalSeconds)
     end
 end
 
 function Scheduler:setSpeed(v)
+    if type(v) ~= "number" or v ~= v or v <= 0 or v == math.huge then return end
     if self.running and not self.paused then
-        local st = self:songTime()
-        self.speed = v
-        self.anchor = os.clock() - self.pausedTotal - st / v
-    else
-        self.speed = v
+        self.anchorSong = self:songTime()
+        self.anchor = os.clock()
     end
+    self.speed = v
 end
 
 function Scheduler:stop()
     local wasRunning = self.running
     self.running = false
     self.paused = false
-    self:cancelPending()
+    self.pausedHeld = nil
     if self.conn then
         self.conn:Disconnect()
         self.conn = nil
@@ -769,6 +751,7 @@ end
 local Window = Reborn:CreateWindow({
     Title = "Auto Player - " .. VERSION,
     Size = Vector2.new(640, 520),
+    SharpRendering = true,
 })
 
 local unloaded = false
@@ -1074,7 +1057,7 @@ PedalSection:Dropdown({
     Value = "Auto",
     Callback = function(value)
         scheduler.sustainMode = value
-        if scheduler.running then
+        if scheduler.running and not scheduler.paused then
             if value == "On" and Api.sustain then
                 Api.sustain(true)
             elseif value ~= "Auto" and Api.sustain and Api.sustainOn then
