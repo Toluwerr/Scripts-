@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
 
-local VERSION = "0.9"
+local VERSION = "0.9.1"
 local MIDI_FOLDER = "midis"
 local CONFIG_FILE = "AutoPlayer.json"
 local REBORN_URL = "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau"
@@ -461,6 +461,7 @@ function Scheduler.new()
     self.lastRecapture = 0
     self.recovering = false
     self.connectionError = nil
+    self.noteFailures = 0
     return self
 end
 
@@ -577,16 +578,13 @@ function Scheduler:beginRecovery(reason)
 end
 
 function Scheduler:refreshConnection()
-    local wasPlaying = not self.paused
-    local ok, captured, reason = pcall(captureApi, function()
-        if self.running and not self.paused then self:pause() end
-    end)
+    local ok, captured, reason = pcall(captureApi)
     if not self.running then return false end
     if not ok or not captured then
         self:beginRecovery(ok and reason or captured)
         return false
     end
-    if self.recovering or (wasPlaying and self.paused) then
+    if self.recovering then
         return self:resume()
     end
     return true
@@ -603,23 +601,27 @@ function Scheduler:tick()
         return
     end
     if self.paused then return end
-    if now - self.lastRecapture >= RECAPTURE_INTERVAL then
-        self.lastRecapture = now
-        if not self:refreshConnection() then return end
-        if not self.running or self.paused then return end
-    end
     local st = self:songTime()
     local tl = self.timeline
     while self.cursor <= #tl and tl[self.cursor].time <= st do
         local ev = tl[self.cursor]
-        self:fire(ev)
+        local ok, err = pcall(self.fire, self, ev)
+        if ok then
+            self.noteFailures = 0
+        else
+            self.noteFailures += 1
+            if self.noteFailures >= 3 then
+                self:beginRecovery(err)
+                return
+            end
+        end
         self.cursor += 1
         if not self.running or self.paused then return end
     end
 
     if self.onProgress and now - self.lastProgressPush >= PROGRESS_INTERVAL then
         self.lastProgressPush = now
-        self.onProgress(math.min(st, self.totalSeconds), self.totalSeconds)
+        pcall(self.onProgress, math.min(st, self.totalSeconds), self.totalSeconds)
     end
 
     if self.cursor > #tl and st >= self.totalSeconds + 0.2 then
@@ -659,6 +661,7 @@ function Scheduler:start()
     self.lastRecapture = os.clock()
     self.recovering = false
     self.connectionError = nil
+    self.noteFailures = 0
     self:setPedal(self.sustainMode == "On")
     if self.conn then
         self.conn:Disconnect()
@@ -688,7 +691,7 @@ function Scheduler:pause()
     self:releaseAll()
     self:setPedal(false)
     if self.onProgress then
-        self.onProgress(math.min(self.pausedAt, self.totalSeconds), self.totalSeconds)
+        pcall(self.onProgress, math.min(self.pausedAt, self.totalSeconds), self.totalSeconds)
     end
     if self.onState then
         self.onState("Paused")
@@ -721,6 +724,7 @@ function Scheduler:resume()
     self.paused = false
     self.recovering = false
     self.connectionError = nil
+    self.noteFailures = 0
     self.lastRecapture = self.anchor
     if self.onState then
         self.onState("Playing")
@@ -1071,9 +1075,9 @@ scheduler.onState = function(state, reason)
 end
 
 scheduler.onProgress = function(elapsed, total)
-    timePara:Set(fmtTime(elapsed) .. " / " .. fmtTime(total))
-    progressHandle:Set(elapsed, true)
-    seekSlider:Set(elapsed, false)
+    pcall(function() timePara:Set(fmtTime(elapsed) .. " / " .. fmtTime(total)) end)
+    pcall(function() progressHandle:Set(elapsed, true) end)
+    pcall(function() seekSlider:Set(elapsed, false) end)
 end
 
 scheduler.onFinish = function(completed)
