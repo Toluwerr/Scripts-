@@ -13,10 +13,13 @@ local MIN_NOTE_SECONDS = 0.03
 local PROGRESS_INTERVAL = 0.25
 local RECAPTURE_INTERVAL = 2
 
-local previousInstance = getgenv()[UNLOAD_KEY]
-if previousInstance then
+local global = getgenv()
+local previousInstance = global[UNLOAD_KEY]
+if type(previousInstance) == "function" then
     pcall(previousInstance)
-    getgenv()[UNLOAD_KEY] = nil
+end
+if global[UNLOAD_KEY] == previousInstance then
+    global[UNLOAD_KEY] = nil
 end
 
 local Reborn = loadstring(game:HttpGet(REBORN_URL))()
@@ -551,7 +554,7 @@ function Scheduler:releaseAll()
     for midi, entry in pairs(self.held) do
         if Api.release and entry.g then
             for _ = 1, entry.count do
-                Api.release(entry.g)
+                pcall(Api.release, entry.g)
             end
         end
     end
@@ -581,6 +584,9 @@ function Scheduler:tick()
             local idx = i
             local thread
             thread = task.delay((ev.time - st) / self.speed, function()
+                if not self.running or self.paused or self.pending[thread] ~= idx then
+                    return
+                end
                 self.pending[thread] = nil
                 self:fire(ev)
                 if self.firedUpTo < idx then
@@ -724,9 +730,7 @@ function Scheduler:setSpeed(v)
 end
 
 function Scheduler:stop()
-    if not self.running then
-        return
-    end
+    local wasRunning = self.running
     self.running = false
     self.paused = false
     self:cancelPending()
@@ -736,9 +740,10 @@ function Scheduler:stop()
     end
     self:releaseAll()
     if Api.sustain and Api.sustainOn then
-        Api.sustain(false)
+        pcall(Api.sustain, false)
+        Api.sustainOn = false
     end
-    if self.onState then
+    if wasRunning and self.onState then
         self.onState("Stopped")
     end
 end
@@ -778,6 +783,35 @@ local Window = Reborn:CreateWindow({
     Title = "Auto Player",
     Size = Vector2.new(640, 520),
 })
+
+local unloaded = false
+local destroyConnection
+
+local function unloadAll(external)
+    if unloaded then
+        return
+    end
+    unloaded = true
+    if destroyConnection then
+        destroyConnection:Disconnect()
+        destroyConnection = nil
+    end
+    scheduler.onState = nil
+    scheduler.onProgress = nil
+    scheduler.onFinish = nil
+    scheduler:stop()
+    if global[UNLOAD_KEY] == unloadAll then
+        global[UNLOAD_KEY] = nil
+    end
+    if not external then
+        Window:Destroy()
+    end
+end
+
+global[UNLOAD_KEY] = unloadAll
+destroyConnection = Window.Gui.Destroying:Connect(function()
+    unloadAll(true)
+end)
 
 local PlayerTab = Window:Tab("Player", "music")
 local SettingsTab = Window:Tab("Settings", "settings")
@@ -1095,22 +1129,9 @@ local unloadRow = StatusSection:Row()
 unloadRow:Button({
     Text = "Stop & Unload",
     Callback = function()
-        scheduler:stop()
-        getgenv()[UNLOAD_KEY] = nil
-        Reborn:Unload()
+        unloadAll()
     end,
 })
-
-local function unloadAll()
-    pcall(function()
-        scheduler:stop()
-    end)
-    getgenv()[UNLOAD_KEY] = nil
-    pcall(function()
-        Reborn:Unload()
-    end)
-end
-getgenv()[UNLOAD_KEY] = unloadAll
 
 if #names == 0 then
     ensureFolder()
