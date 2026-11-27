@@ -2,7 +2,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "0.2"
+local VERSION = "0.3"
 local MIDI_FOLDER = "midis"
 local REBORN_URL = "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau"
 local UNLOAD_KEY = "AutoPlayerInstance"
@@ -111,23 +111,25 @@ function MidiParser.parse(data)
     local function be16(p)
         return u8(p) * 256 + u8(p + 1)
     end
-    local function vlq(p)
+    local function be32(p)
+        return u8(p) * 16777216 + u8(p + 1) * 65536 + u8(p + 2) * 256 + u8(p + 3)
+    end
+    local function vlq(p, limit)
         local v = 0
-        while p < len do
+        for _ = 1, 4 do
+            if p >= limit then return nil, p end
             local b = u8(p)
             p += 1
-            v = bit32.bor(bit32.lshift(v, 7), bit32.band(b, 0x7F))
-            if bit32.band(b, 0x80) == 0 then
-                return v, p
-            end
+            v = v * 128 + bit32.band(b, 0x7F)
+            if b < 0x80 then return v, p end
         end
-        return v, p
+        return nil, p
     end
 
     if data:sub(1, 4) ~= "MThd" then
         return nil, "missing MThd header"
     end
-    local headerLen = u8(4) * 16777216 + u8(5) * 65536 + u8(6) * 256 + u8(7)
+    local headerLen = be32(4)
     if headerLen < 6 or 8 + headerLen > len then
         return nil, "bad header length"
     end
@@ -156,127 +158,111 @@ function MidiParser.parse(data)
     local pos = 8 + headerLen
     local tracksRead = 0
 
-    while tracksRead < trackCount and pos + 8 <= len do
-        if data:sub(pos + 1, pos + 4) ~= "MTrk" then
-            local nextChunk = data:find("MTrk", pos + 1, true)
-            if not nextChunk then
-                break
-            end
-            pos = nextChunk - 1
-        end
-        local trackLen = u8(pos + 4) * 16777216 + u8(pos + 5) * 65536 + u8(pos + 6) * 256 + u8(pos + 7)
+    while tracksRead < trackCount do
+        if pos + 8 > len then return nil, "missing track header" end
+        local chunk = data:sub(pos + 1, pos + 4)
+        local trackLen = be32(pos + 4)
         local p = pos + 8
-        local trackEnd = math.min(p + trackLen, len)
+        local trackEnd = p + trackLen
+        if trackEnd > len then return nil, "truncated track chunk" end
         pos = trackEnd
+        if chunk ~= "MTrk" then continue end
 
         local ticks = 0
         local running = nil
-        local events = {}
+        local open = {}
+
+        local function finishNote(first, note, at)
+            allNotes[#allNotes + 1] = {
+                startTicks = first.t,
+                durTicks = math.max(at - first.t, 1),
+                note = note,
+                vel = first.vel,
+            }
+        end
 
         while p < trackEnd do
-            local delta, np = vlq(p)
+            local delta, np = vlq(p, trackEnd)
+            if delta == nil or np >= trackEnd then
+                return nil, "invalid event delta"
+            end
             ticks += delta
             p = np
-            if p >= trackEnd then
-                break
-            end
             local status = u8(p)
             if status == 0xFF then
-                p += 1
-                local metaType = u8(p)
-                p += 1
-                local mlen, np2 = vlq(p)
-                p = np2
+                if p + 2 >= trackEnd then return nil, "truncated meta event" end
+                local metaType = u8(p + 1)
+                local mlen, payload = vlq(p + 2, trackEnd)
+                if mlen == nil or payload + mlen > trackEnd then
+                    return nil, "invalid meta event length"
+                end
                 if metaType == 0x51 and mlen == 3 then
-                    local tempo = u8(p) * 65536 + u8(p + 1) * 256 + u8(p + 2)
+                    local tempo = u8(payload) * 65536 + u8(payload + 1) * 256 + u8(payload + 2)
                     if tempo > 0 then
-                        table.insert(tempoChanges, {ticks = ticks, tempo = tempo})
+                        tempoChanges[#tempoChanges + 1] = {ticks = ticks, tempo = tempo, order = #tempoChanges + 1}
                     end
                 end
-                p += mlen
+                p = payload + mlen
+                if metaType == 0x2F then break end
             elseif status == 0xF0 or status == 0xF7 then
-                p += 1
-                local slen, np3 = vlq(p)
-                p = np3 + slen
+                running = nil
+                local slen, payload = vlq(p + 1, trackEnd)
+                if slen == nil or payload + slen > trackEnd then
+                    return nil, "invalid SysEx length"
+                end
+                p = payload + slen
             else
                 local op
-                if status >= 0x80 then
+                if status >= 0x80 and status <= 0xEF then
                     op = status
                     running = status
                     p += 1
-                else
+                elseif status < 0x80 then
                     op = running
                 end
-                if not op then
-                    break
-                end
+                if not op then return nil, "invalid running status" end
                 local hi = bit32.band(op, 0xF0)
+                local size = (hi == 0xC0 or hi == 0xD0) and 1 or 2
+                if p + size > trackEnd then return nil, "truncated channel event" end
+                local first = u8(p)
+                local second = size == 2 and u8(p + 1) or 0
+                if first >= 0x80 or second >= 0x80 then
+                    return nil, "invalid channel data"
+                end
+                p += size
+
                 if hi == 0x90 or hi == 0x80 then
-                    local note = u8(p)
-                    local vel = u8(p + 1)
-                    p += 2
-                    if hi == 0x90 and vel > 0 then
-                        table.insert(events, {t = ticks, on = true, note = note, vel = vel})
-                    else
-                        table.insert(events, {t = ticks, on = false, note = note})
+                    local key = bit32.band(op, 0x0F) * 128 + first
+                    local queue = open[key]
+                    if hi == 0x90 and second > 0 then
+                        if not queue then
+                            queue = {head = 1, tail = 0, notes = {}}
+                            open[key] = queue
+                        end
+                        queue.tail += 1
+                        queue.notes[queue.tail] = {t = ticks, vel = second}
+                    elseif queue then
+                        finishNote(queue.notes[queue.head], first, ticks)
+                        queue.notes[queue.head] = nil
+                        queue.head += 1
+                        if queue.head > queue.tail then open[key] = nil end
                     end
-                elseif hi == 0xB0 then
-                    local cc = u8(p)
-                    local val = u8(p + 1)
-                    p += 2
-                    if cc == 64 then
-                        table.insert(sustainRaw, {t = ticks, on = val >= 64})
-                    end
-                elseif hi == 0xC0 or hi == 0xD0 then
-                    p += 1
-                elseif hi == 0xA0 or hi == 0xE0 then
-                    p += 2
-                else
-                    break
+                elseif hi == 0xB0 and first == 64 then
+                    sustainRaw[#sustainRaw + 1] = {t = ticks, on = second >= 64}
                 end
             end
         end
 
-        local open = {}
-        for _, ev in ipairs(events) do
-            if ev.on then
-                local stack = open[ev.note]
-                if not stack then
-                    stack = {}
-                    open[ev.note] = stack
-                end
-                table.insert(stack, ev)
-            else
-                local stack = open[ev.note]
-                if stack and #stack > 0 then
-                    local first = table.remove(stack, 1)
-                    table.insert(allNotes, {
-                        startTicks = first.t,
-                        durTicks = math.max(ev.t - first.t, 1),
-                        note = first.note,
-                        vel = first.vel,
-                    })
-                end
-            end
-        end
-        for _, stack in pairs(open) do
-            for _, first in ipairs(stack) do
-                table.insert(allNotes, {
-                    startTicks = first.t,
-                    durTicks = math.max(ticks - first.t, 1),
-                    note = first.note,
-                    vel = first.vel,
-                })
+        for key, queue in pairs(open) do
+            for index = queue.head, queue.tail do
+                finishNote(queue.notes[index], key % 128, ticks)
             end
         end
         tracksRead += 1
     end
 
-    if tracksRead == 0 then
-        return nil, "no tracks"
-    end
-
     table.sort(tempoChanges, function(a, b)
+        if a.ticks == b.ticks then return a.order < b.order end
         return a.ticks < b.ticks
     end)
     local map = {}
