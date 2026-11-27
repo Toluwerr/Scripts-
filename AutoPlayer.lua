@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local VERSION = "0.2"
 local MIDI_FOLDER = "midis"
 local REBORN_URL = "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau"
 local UNLOAD_KEY = "AutoPlayerInstance"
@@ -780,7 +781,7 @@ local function updateStatsDisplay()
 end
 
 local Window = Reborn:CreateWindow({
-    Title = "Auto Player",
+    Title = "Auto Player - " .. VERSION,
     Size = Vector2.new(640, 520),
 })
 
