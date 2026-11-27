@@ -2,7 +2,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "0.5"
+local VERSION = "0.6"
 local MIDI_FOLDER = "midis"
 local REBORN_URL = "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau"
 local UNLOAD_KEY = "AutoPlayerInstance"
@@ -372,8 +372,11 @@ local Api = {
     sustainRaw = nil,
 }
 
-local function captureApi()
-    local ok, MidiConnect = pcall(require, ReplicatedStorage.PianoClient.MidiConnect)
+local function captureApi(beforeChange)
+    local pianoClient = ReplicatedStorage:FindFirstChild("PianoClient")
+    local midiModule = pianoClient and pianoClient:FindFirstChild("MidiConnect")
+    if not midiModule then return false, "MidiConnect unavailable" end
+    local ok, MidiConnect = pcall(require, midiModule)
     if not ok or type(MidiConnect) ~= "table" or type(MidiConnect.init) ~= "function" then
         return false, "MidiConnect unavailable"
     end
@@ -385,10 +388,13 @@ local function captureApi()
     if type(play) ~= "function" or type(release) ~= "function" then
         return false, "sit at a piano first"
     end
-    if Api.playRaw ~= play or Api.releaseRaw ~= release then
+    sustain = type(sustain) == "function" and sustain or nil
+    local changed = Api.playRaw ~= play or Api.releaseRaw ~= release or Api.sustainRaw ~= sustain
+    if changed then
+        if Api.playRaw and beforeChange then beforeChange() end
         Api.playRaw = play
         Api.releaseRaw = release
-        Api.sustainRaw = type(sustain) == "function" and sustain or nil
+        Api.sustainRaw = sustain
         Api.play = function(gameNote, volume)
             return play(gameNote, nil, nil, volume)
         end
@@ -397,15 +403,16 @@ local function captureApi()
         end
         if Api.sustainRaw then
             Api.sustain = function(on)
-                Api.sustainOn = on and true or false
-                return Api.sustainRaw(on)
+                local result = sustain(on)
+                Api.sustainOn = on == true
+                return result
             end
         else
             Api.sustain = nil
         end
         Api.sustainOn = false
     end
-    return true
+    return true, nil, changed
 end
 
 local Scheduler = {}
@@ -437,6 +444,8 @@ function Scheduler.new()
     self.playedCount = 0
     self.lastProgressPush = 0
     self.lastRecapture = 0
+    self.recovering = false
+    self.connectionError = nil
     return self
 end
 
@@ -493,15 +502,15 @@ end
 function Scheduler:release(id)
     local entry = self.held[id]
     if not entry then return end
-    self.held[id] = nil
     local key = entry.g
     local count = (self.keyCounts[key] or 1) - 1
     if count <= 0 then
-        self.keyCounts[key] = nil
         if Api.release then Api.release(key) end
+        self.keyCounts[key] = nil
     else
         self.keyCounts[key] = count
     end
+    self.held[id] = nil
 end
 
 function Scheduler:fire(ev)
@@ -543,20 +552,53 @@ function Scheduler:pedalAt(t)
     return false
 end
 
+function Scheduler:beginRecovery(reason)
+    if not self.running then return end
+    if not self.paused then self:pause() end
+    self.recovering = true
+    self.connectionError = tostring(reason or "Piano unavailable")
+    self.lastRecapture = os.clock()
+    if self.onState then self.onState("Reconnecting", self.connectionError) end
+end
+
+function Scheduler:refreshConnection()
+    local wasPlaying = not self.paused
+    local ok, captured, reason = pcall(captureApi, function()
+        if self.running and not self.paused then self:pause() end
+    end)
+    if not self.running then return false end
+    if not ok or not captured then
+        self:beginRecovery(ok and reason or captured)
+        return false
+    end
+    if self.recovering or (wasPlaying and self.paused) then
+        return self:resume()
+    end
+    return true
+end
+
 function Scheduler:tick()
-    if not self.running or self.paused then return end
+    if not self.running then return end
     local now = os.clock()
-    if now - self.lastRecapture > RECAPTURE_INTERVAL then
+    if self.recovering then
+        if now - self.lastRecapture >= RECAPTURE_INTERVAL then
+            self.lastRecapture = now
+            self:refreshConnection()
+        end
+        return
+    end
+    if self.paused then return end
+    if now - self.lastRecapture >= RECAPTURE_INTERVAL then
         self.lastRecapture = now
-        pcall(captureApi)
+        if not self:refreshConnection() then return end
         if not self.running or self.paused then return end
     end
     local st = self:songTime()
     local tl = self.timeline
     while self.cursor <= #tl and tl[self.cursor].time <= st do
         local ev = tl[self.cursor]
-        self.cursor += 1
         self:fire(ev)
+        self.cursor += 1
         if not self.running or self.paused then return end
     end
 
@@ -599,17 +641,22 @@ function Scheduler:start()
     self.pausedHeld = nil
     self.playedCount = 0
     self.lastProgressPush = 0
-    self.lastRecapture = 0
-    if self.sustainMode == "On" and Api.sustain then
-        Api.sustain(true)
-    elseif self.sustainMode == "Off" and Api.sustain then
-        Api.sustain(false)
-    end
+    self.lastRecapture = os.clock()
+    self.recovering = false
+    self.connectionError = nil
+    self:setPedal(self.sustainMode == "On")
     if self.conn then
         self.conn:Disconnect()
     end
+    local ticking = false
     self.conn = RunService.Heartbeat:Connect(function()
-        self:tick()
+        if ticking or not self.running then return end
+        ticking = true
+        local ok, err = pcall(self.tick, self)
+        ticking = false
+        if not ok and self.running then
+            self:beginRecovery(err)
+        end
     end)
     if self.onState then
         self.onState("Playing")
@@ -637,8 +684,6 @@ function Scheduler:resume()
     if not self.running or not self.paused then
         return
     end
-    self.anchorSong = self.pausedAt
-    self.anchor = os.clock()
     self:setPedal(self:pedalAt(self.pausedAt))
     if self.pausedHeld then
         local ids = {}
@@ -646,15 +691,26 @@ function Scheduler:resume()
         table.sort(ids)
         for _, id in ipairs(ids) do
             local entry = self.pausedHeld[id]
-            pcall(self.press, self, id, entry.g, entry.volume)
+            local ok, err = pcall(self.press, self, id, entry.g, entry.volume)
+            if not ok then
+                self:releaseAll()
+                self:setPedal(false)
+                self:beginRecovery(err)
+                return false
+            end
         end
         self.pausedHeld = nil
     end
-    self.paused = false
+    self.anchorSong = self.pausedAt
     self.anchor = os.clock()
+    self.paused = false
+    self.recovering = false
+    self.connectionError = nil
+    self.lastRecapture = self.anchor
     if self.onState then
         self.onState("Playing")
     end
+    return true
 end
 
 function Scheduler:seek(t)
@@ -701,6 +757,8 @@ function Scheduler:stop()
     local wasRunning = self.running
     self.running = false
     self.paused = false
+    self.recovering = false
+    self.connectionError = nil
     self.pausedHeld = nil
     if self.conn then
         self.conn:Disconnect()
@@ -863,10 +921,11 @@ local function tryLoad(name)
 end
 
 local function startPlayback()
-    local okCap = captureApi()
-    if not okCap then
-        setStatus("Sit at a piano first")
-        Window:Notify({Title = "Auto Player", Description = "Sit at a piano, then press Play", Type = "error"})
+    local ok, captured, reason = pcall(captureApi)
+    if not ok or not captured then
+        local message = tostring(ok and reason or captured)
+        setStatus(message)
+        Window:Notify({Title = "Auto Player", Description = message, Type = "error"})
         return false
     end
     scheduler:start()
@@ -878,8 +937,9 @@ local function togglePlayPause()
         scheduler:pause()
         setStatus("Paused")
     elseif scheduler.running and scheduler.paused then
-        scheduler:resume()
-        setStatus("Playing " .. (songState.name or ""))
+        if scheduler:refreshConnection() and scheduler.paused then
+            scheduler:resume()
+        end
     else
         if not songState.song then
             setStatus("Select a MIDI file first")
@@ -891,11 +951,15 @@ local function togglePlayPause()
     end
 end
 
-scheduler.onState = function(state)
+scheduler.onState = function(state, reason)
     if state == "Playing" then
         playBtn:Set("Pause")
+        setStatus("Playing " .. (songState.name or ""))
     elseif state == "Paused" then
         playBtn:Set("Resume")
+    elseif state == "Reconnecting" then
+        playBtn:Set("Resume")
+        setStatus("Reconnecting: " .. tostring(reason))
     else
         playBtn:Set("Play")
     end
