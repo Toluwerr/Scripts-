@@ -1,9 +1,11 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
 
-local VERSION = "0.8"
+local VERSION = "0.9"
 local MIDI_FOLDER = "midis"
+local CONFIG_FILE = "AutoPlayer.json"
 local REBORN_URL = "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau"
 local UNLOAD_KEY = "AutoPlayerInstance"
 local NOTE_OFFSET = 35
@@ -788,15 +790,74 @@ function Scheduler:stop()
 end
 
 local scheduler = Scheduler.new()
+
+local function validateNumber(value, default, minimum, maximum, step)
+    if type(value) ~= "number" or value ~= value or math.abs(value) == math.huge then
+        return default
+    end
+    return math.clamp(math.round(value / step) * step, minimum, maximum)
+end
+
+local function readSettings()
+    local read = fileFunction("readfile")
+    if not read then return {} end
+    local ok, data = pcall(read, CONFIG_FILE)
+    if not ok or type(data) ~= "string" or #data > 16384 then return {} end
+    local decoded, settings = pcall(HttpService.JSONDecode, HttpService, data)
+    if decoded and type(settings) == "table" then return settings end
+    return {}
+end
+
+local settings = readSettings()
+scheduler.speed = validateNumber(settings.speed, 1, 0.25, 3, 0.05)
+scheduler.transpose = validateNumber(settings.transpose, 0, -48, 48, 1)
+scheduler.volumeMult = validateNumber(settings.volume, 1, 0, 1, 0.05)
+scheduler.loop = settings.loop == true
+scheduler.sustainMode = table.find({"Auto", "On", "Off"}, settings.sustain) and settings.sustain or "Auto"
+scheduler.velocityMode = settings.velocity == "Fixed" and "Fixed" or "MIDI"
+
 local songState = {
     song = nil,
     name = nil,
-    selected = nil,
+    selected = isMidiName(settings.selected) and settings.selected or nil,
     files = {},
     cachedData = nil,
     cachedSong = nil,
 }
 local statsPara
+local settingsReady = false
+local settingsDirty = false
+local saveGeneration = 0
+local writeSettings = fileFunction("writefile")
+
+local function saveSettings()
+    if not settingsDirty or not writeSettings then return end
+    local snapshot = {
+        speed = scheduler.speed,
+        transpose = scheduler.transpose,
+        volume = scheduler.volumeMult,
+        loop = scheduler.loop,
+        sustain = scheduler.sustainMode,
+        velocity = scheduler.velocityMode,
+        selected = songState.selected,
+    }
+    local ok, encoded = pcall(HttpService.JSONEncode, HttpService, snapshot)
+    if ok and pcall(writeSettings, CONFIG_FILE, encoded) then
+        settingsDirty = false
+    end
+end
+
+local function queueSave()
+    if not settingsReady or not writeSettings then return end
+    settingsDirty = true
+    saveGeneration += 1
+    local generation = saveGeneration
+    task.delay(0.5, function()
+        if settingsReady and generation == saveGeneration then
+            saveSettings()
+        end
+    end)
+end
 
 local function updateStatsDisplay()
     if not songState.song then
@@ -835,6 +896,9 @@ local function unloadAll(external)
         return
     end
     unloaded = true
+    settingsReady = false
+    saveGeneration += 1
+    saveSettings()
     if destroyConnection then
         destroyConnection:Disconnect()
         destroyConnection = nil
@@ -897,7 +961,10 @@ local function refreshLibrary()
         selected = table.find(names, songState.name or "") and songState.name or names[1]
     end
     songState.files = names
-    songState.selected = selected
+    if songState.selected ~= selected then
+        songState.selected = selected
+        queueSave()
+    end
     fileDd:SetOptions(names)
     fileDd:Set(selected, false)
     libraryPara:Set(#names .. (#names == 1 and " MIDI file" or " MIDI files"))
@@ -1019,14 +1086,17 @@ end
 local names, libraryError = listMidiNames()
 names = names or {}
 songState.files = names
-songState.selected = names[1]
+if not table.find(names, songState.selected or "") then
+    songState.selected = names[1]
+end
 libraryPara = FileSection:Paragraph(#names .. (#names == 1 and " MIDI file" or " MIDI files"))
 fileDd = FileSection:Dropdown({
     Text = "MIDI File",
     Options = names,
-    Value = names[1],
+    Value = songState.selected,
     Callback = function(value)
         songState.selected = table.find(songState.files, value) and value or nil
+        queueSave()
     end,
 })
 
@@ -1114,10 +1184,11 @@ AdjustSection:Slider({
     Min = 0.25,
     Max = 3,
     Step = 0.05,
-    Value = 1,
+    Value = scheduler.speed,
     Suffix = "x",
     Callback = function(value)
         scheduler:setSpeed(value)
+        queueSave()
     end,
 })
 
@@ -1126,10 +1197,11 @@ AdjustSection:Slider({
     Min = -48,
     Max = 48,
     Step = 1,
-    Value = 0,
+    Value = scheduler.transpose,
     Suffix = " st",
     Callback = function(value)
         scheduler.transpose = value
+        queueSave()
     end,
 })
 
@@ -1138,27 +1210,30 @@ PedalSection:Slider({
     Min = 0,
     Max = 1,
     Step = 0.05,
-    Value = 1,
+    Value = scheduler.volumeMult,
     Suffix = "x",
     Callback = function(value)
         scheduler.volumeMult = value
+        queueSave()
     end,
 })
 
 AdjustSection:Toggle({
     Text = "Loop",
-    Value = false,
+    Value = scheduler.loop,
     Callback = function(value)
         scheduler.loop = value
+        queueSave()
     end,
 })
 
 PedalSection:Dropdown({
     Text = "Sustain Mode",
     Options = {"Auto", "On", "Off"},
-    Value = "Auto",
+    Value = scheduler.sustainMode,
     Callback = function(value)
         scheduler.sustainMode = value
+        queueSave()
         if scheduler.running and not scheduler.paused then
             if value == "On" and Api.sustain then
                 Api.sustain(true)
@@ -1172,9 +1247,10 @@ PedalSection:Dropdown({
 PedalSection:Dropdown({
     Text = "Velocity",
     Options = {"MIDI", "Fixed"},
-    Value = "MIDI",
+    Value = scheduler.velocityMode,
     Callback = function(value)
         scheduler.velocityMode = value
+        queueSave()
     end,
 })
 
@@ -1196,6 +1272,8 @@ SessionSection:Button({
         unloadAll()
     end,
 })
+
+settingsReady = true
 
 if libraryError then
     setStatus(libraryError)
