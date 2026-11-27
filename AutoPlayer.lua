@@ -744,30 +744,32 @@ function Scheduler:stop()
 end
 
 local scheduler = Scheduler.new()
-local currentSong = nil
-local currentName = nil
-local pendingPick = nil
+local songState = {
+    song = nil,
+    name = nil,
+    selected = nil,
+}
 local statsPara
 
 local function updateStatsDisplay()
-    if not currentSong then
+    if not songState.song then
         if statsPara then
             statsPara:Set("No song loaded")
         end
         return
     end
     local rangeText = "None"
-    if currentSong.minMidi <= currentSong.maxMidi then
-        rangeText = midiName(currentSong.minMidi) .. " - " .. midiName(currentSong.maxMidi)
+    if songState.song.minMidi <= songState.song.maxMidi then
+        rangeText = midiName(songState.song.minMidi) .. " - " .. midiName(songState.song.maxMidi)
     end
     if statsPara then
         statsPara:Set(string.format(
             "Notes: %d\nDuration: %s\nRange: %s\nAverage velocity: %d\nOctave-shifted: %d",
-            currentSong.noteCount,
-            fmtTime(currentSong.totalSeconds),
+            songState.song.noteCount,
+            fmtTime(songState.song.totalSeconds),
             rangeText,
-            math.floor(currentSong.avgVel + 0.5),
-            currentSong.shifted
+            math.floor(songState.song.avgVel + 0.5),
+            songState.song.shifted
         ))
     end
 end
@@ -795,7 +797,6 @@ local timePara = StatusSection:Paragraph("0:00 / 0:00")
 
 local fileDd
 local playBtn
-local stopBtn
 local progressHandle
 local seekSlider
 local playingNamePara
@@ -806,8 +807,8 @@ end
 
 local function refreshLibrary(keepSelection)
     local names = listMidiNames()
-    if keepSelection and currentName then
-        fileDd:Set(currentName)
+    if keepSelection and songState.name then
+        fileDd:Set(songState.name)
     end
     fileDd:SetOptions(names)
     if #names == 0 then
@@ -828,13 +829,9 @@ local function loadSong(name)
     if scheduler.running then
         scheduler:stop()
     end
-    currentSong = song
-    currentName = name
+    songState.song = song
+    songState.name = name
     scheduler:load(song)
-    local rangeText = "None"
-    if song.minMidi <= song.maxMidi then
-        rangeText = midiName(song.minMidi) .. " - " .. midiName(song.maxMidi)
-    end
     local shiftNote = ""
     if song.shifted > 0 then
         shiftNote = string.format(", %d octave-shifted", song.shifted)
@@ -863,13 +860,14 @@ local function tryLoad(name)
 end
 
 local function startPlayback()
-    local okCap, capErr = captureApi()
+    local okCap = captureApi()
     if not okCap then
         setStatus("Sit at a piano first")
         Window:Notify({Title = "Auto Player", Description = "Sit at a piano, then press Play", Type = "error"})
-        return
+        return false
     end
     scheduler:start()
+    return true
 end
 
 local function togglePlayPause()
@@ -878,14 +876,15 @@ local function togglePlayPause()
         setStatus("Paused")
     elseif scheduler.running and scheduler.paused then
         scheduler:resume()
-        setStatus("Playing " .. (currentName or ""))
+        setStatus("Playing " .. (songState.name or ""))
     else
-        if not currentSong then
+        if not songState.song then
             setStatus("Select a MIDI file first")
             return
         end
-        startPlayback()
-        setStatus("Playing " .. (currentName or ""))
+        if startPlayback() then
+            setStatus("Playing " .. (songState.name or ""))
+        end
     end
 end
 
@@ -906,8 +905,8 @@ end
 
 scheduler.onFinish = function(completed)
     if completed then
-        setStatus("Finished " .. (currentName or ""))
-        Window:Notify({Title = "Auto Player", Description = "Finished: " .. (currentName or ""), Type = "success"})
+        setStatus("Finished " .. (songState.name or ""))
+        Window:Notify({Title = "Auto Player", Description = "Finished: " .. (songState.name or ""), Type = "success"})
     end
 end
 
@@ -919,7 +918,7 @@ fileDd = FileSection:Dropdown({
     Options = names,
     Value = names[1],
     Callback = function(value)
-        pendingPick = value
+        songState.selected = value
     end,
 })
 
@@ -936,8 +935,8 @@ loadRow:Button({
     Text = "Load",
     Primary = true,
     Callback = function()
-        if pendingPick then
-            tryLoad(pendingPick)
+        if songState.selected then
+            tryLoad(songState.selected)
         else
             setStatus("Pick a file from the dropdown")
         end
@@ -949,10 +948,10 @@ playBtn = controlsRow:Button({
     Text = "Play",
     Primary = true,
     Callback = function()
-        if not currentSong and pendingPick then
-            tryLoad(pendingPick)
+        if not songState.song and songState.selected then
+            tryLoad(songState.selected)
         end
-        if currentSong then
+        if songState.song then
             togglePlayPause()
         else
             setStatus("Select a MIDI file first")
@@ -960,7 +959,7 @@ playBtn = controlsRow:Button({
         end
     end,
 })
-stopBtn = controlsRow:Button({
+controlsRow:Button({
     Text = "Stop",
     Callback = function()
         scheduler:stop()
@@ -998,7 +997,7 @@ PlaySection:Keybind({
         if processed then
             return
         end
-        if currentSong then
+        if songState.song then
             togglePlayPause()
         end
     end,
@@ -1073,13 +1072,13 @@ PedalSection:Dropdown({
     end,
 })
 
-local statsPara = StatsSection:Paragraph("No song loaded")
+statsPara = StatsSection:Paragraph("No song loaded")
 
 StatsSection:Button({
     Text = "Reload Song",
     Callback = function()
-        if currentName then
-            loadSong(currentName)
+        if songState.name then
+            loadSong(songState.name)
         end
     end,
 })
@@ -1117,11 +1116,11 @@ if #names == 0 then
     ensureFolder()
     Window:Notify({Title = "Auto Player", Description = "No MIDI files in '" .. MIDI_FOLDER .. "'. Add files and press Refresh Files.", Type = "info"})
 else
-    pendingPick = names[1]
+    songState.selected = names[1]
 end
 
-local okCap, _ = pcall(captureApi)
-if okCap then
+local okCap, captured = pcall(captureApi)
+if okCap and captured then
     setStatus("Ready")
 else
     setStatus("Sit at a piano, then press Play")
