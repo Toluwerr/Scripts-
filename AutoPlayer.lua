@@ -24,7 +24,7 @@ if global[UNLOAD_KEY] == previousInstance then
     global[UNLOAD_KEY] = nil
 end
 
-local Reborn = loadstring(game:HttpGet(REBORN_URL))()
+local Reborn = loadstring(game:HttpGet(REBORN_URL .. "?t=" .. tostring(DateTime.now().UnixTimestampMillis)))()
 
 local function fileFunction(name)
     local fn = getfenv()[name]
