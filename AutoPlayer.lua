@@ -2,7 +2,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "0.6"
+local VERSION = "0.7"
 local MIDI_FOLDER = "midis"
 local REBORN_URL = "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau"
 local UNLOAD_KEY = "AutoPlayerInstance"
@@ -24,55 +24,68 @@ end
 
 local Reborn = loadstring(game:HttpGet(REBORN_URL))()
 
-local function hasGlobal(name)
-    local env = getfenv()
-    if type(env[name]) == "function" then
-        return true
-    end
-    local genv = getgenv()
-    if type(genv[name]) == "function" then
-        return true
-    end
-    return type(rawget(_G, name)) == "function"
+local function fileFunction(name)
+    local fn = getfenv()[name]
+    if type(fn) == "function" then return fn end
+    fn = global[name]
+    if type(fn) == "function" then return fn end
+    fn = rawget(_G, name)
+    if type(fn) == "function" then return fn end
 end
 
 local function ensureFolder()
-    if hasGlobal("isfolder") and hasGlobal("makefolder") and not isfolder(MIDI_FOLDER) then
-        pcall(makefolder, MIDI_FOLDER)
+    local exists, create = fileFunction("isfolder"), fileFunction("makefolder")
+    if not exists or not create then return true end
+    local ok, found = pcall(exists, MIDI_FOLDER)
+    if not ok then return false, "Could not check MIDI folder" end
+    if found then return true end
+    local made = pcall(create, MIDI_FOLDER)
+    if not made then
+        local checked, present = pcall(exists, MIDI_FOLDER)
+        if not checked or not present then return false, "Could not create MIDI folder" end
     end
+    return true
+end
+
+local function isMidiName(name)
+    return type(name) == "string"
+        and not name:find("[/\\]")
+        and not name:find("%z")
+        and name:lower():match("%.midi?$") ~= nil
 end
 
 local function listMidiNames()
-    if not hasGlobal("listfiles") then
-        return {}
-    end
-    ensureFolder()
-    local ok, files = pcall(listfiles, MIDI_FOLDER)
-    if not ok or type(files) ~= "table" then
-        return {}
-    end
-    local names = {}
-    for _, raw in ipairs(files) do
-        local path = tostring(raw)
-        local name = path:match("[^/\\]+$")
-        if name and name:lower():match("%.midi?$") then
-            table.insert(names, name)
+    local list = fileFunction("listfiles")
+    if not list then return nil, "File listing unavailable" end
+    local ready, err = ensureFolder()
+    if not ready then return nil, err end
+    local ok, files = pcall(list, MIDI_FOLDER)
+    if not ok or type(files) ~= "table" then return nil, "Could not list MIDI files" end
+    local names, seen = {}, {}
+    for _, path in ipairs(files) do
+        if type(path) == "string" then
+            local name = path:match("[^/\\]+$")
+            if isMidiName(name) and not seen[name] then
+                seen[name] = true
+                names[#names + 1] = name
+            end
         end
     end
     table.sort(names, function(a, b)
-        return a:lower() < b:lower()
+        local lowerA, lowerB = a:lower(), b:lower()
+        if lowerA == lowerB then return a < b end
+        return lowerA < lowerB
     end)
     return names
 end
 
 local function readMidiFile(name)
-    if not hasGlobal("readfile") then
-        return nil
-    end
-    local ok, data = pcall(readfile, MIDI_FOLDER .. "/" .. name)
-    if not ok or type(data) ~= "string" or #data == 0 then
-        return nil
-    end
+    if not isMidiName(name) then return nil, "Invalid MIDI filename" end
+    local read = fileFunction("readfile")
+    if not read then return nil, "File reading unavailable" end
+    local ok, data = pcall(read, MIDI_FOLDER .. "/" .. name)
+    if not ok or type(data) ~= "string" then return nil, "Could not read file" end
+    if #data == 0 then return nil, "MIDI file is empty" end
     return data
 end
 
@@ -779,6 +792,9 @@ local songState = {
     song = nil,
     name = nil,
     selected = nil,
+    files = {},
+    cachedData = nil,
+    cachedSong = nil,
 }
 local statsPara
 
@@ -827,6 +843,8 @@ local function unloadAll(external)
     scheduler.onProgress = nil
     scheduler.onFinish = nil
     scheduler:stop()
+    songState.cachedData = nil
+    songState.cachedSong = nil
     if global[UNLOAD_KEY] == unloadAll then
         global[UNLOAD_KEY] = nil
     end
@@ -866,26 +884,47 @@ local function setStatus(text)
     statusPara:Set(text)
 end
 
-local function refreshLibrary(keepSelection)
-    local names = listMidiNames()
-    if keepSelection and songState.name then
-        fileDd:Set(songState.name)
+local function refreshLibrary()
+    local names, err = listMidiNames()
+    if not names then
+        if not scheduler.running then setStatus(err) end
+        Window:Notify({Title = "Auto Player", Description = err, Type = "error"})
+        return
     end
+    local selected = songState.selected
+    if not table.find(names, selected or "") then
+        selected = table.find(names, songState.name or "") and songState.name or names[1]
+    end
+    songState.files = names
+    songState.selected = selected
     fileDd:SetOptions(names)
-    if #names == 0 then
-        setStatus("No MIDI files found in '" .. MIDI_FOLDER .. "'")
+    fileDd:Set(selected, false)
+    local message = #names == 0 and ("No MIDI files found in '" .. MIDI_FOLDER .. "'") or ("Found " .. #names .. " MIDI files")
+    if not scheduler.running then
+        setStatus(message)
+    else
+        Window:Notify({Title = "Auto Player", Description = message, Type = "info"})
     end
-    return names
 end
 
 local function loadSong(name)
-    local data = readMidiFile(name)
-    if not data then
-        return false, "could not read file"
-    end
-    local song, err = MidiParser.parse(data)
-    if not song then
-        return false, err or "parse failed"
+    local data, readError = readMidiFile(name)
+    if not data then return false, readError end
+    local song
+    if songState.cachedData == data and songState.cachedSong then
+        song = songState.cachedSong
+    else
+        local ok, parsed, err = pcall(MidiParser.parse, data)
+        if not ok then return false, tostring(parsed) end
+        if not parsed then return false, err or "Parse failed" end
+        song = parsed
+        if #data <= 2 * 1024 * 1024 then
+            songState.cachedData = data
+            songState.cachedSong = song
+        else
+            songState.cachedData = nil
+            songState.cachedSong = nil
+        end
     end
     if scheduler.running then
         scheduler:stop()
@@ -979,21 +1018,23 @@ end
 
 playingNamePara = FileSection:Paragraph("No file selected")
 
-local names = listMidiNames()
+local names, libraryError = listMidiNames()
+names = names or {}
+songState.files = names
+songState.selected = names[1]
 fileDd = FileSection:Dropdown({
     Text = "MIDI File",
     Options = names,
     Value = names[1],
     Callback = function(value)
-        songState.selected = value
+        songState.selected = table.find(songState.files, value) and value or nil
     end,
 })
 
 FileSection:Button({
     Text = "Refresh Files",
     Callback = function()
-        refreshLibrary(false)
-        setStatus("Library refreshed")
+        refreshLibrary()
     end,
 })
 
@@ -1145,7 +1186,7 @@ StatsSection:Button({
     Text = "Reload Song",
     Callback = function()
         if songState.name then
-            loadSong(songState.name)
+            tryLoad(songState.name)
         end
     end,
 })
@@ -1166,16 +1207,17 @@ unloadRow:Button({
     end,
 })
 
-if #names == 0 then
-    ensureFolder()
+if libraryError then
+    setStatus(libraryError)
+    Window:Notify({Title = "Auto Player", Description = libraryError, Type = "error"})
+elseif #names == 0 then
+    setStatus("No MIDI files found in '" .. MIDI_FOLDER .. "'")
     Window:Notify({Title = "Auto Player", Description = "No MIDI files in '" .. MIDI_FOLDER .. "'. Add files and press Refresh Files.", Type = "info"})
 else
-    songState.selected = names[1]
-end
-
-local okCap, captured = pcall(captureApi)
-if okCap and captured then
-    setStatus("Ready")
-else
-    setStatus("Sit at a piano, then press Play")
+    local okCap, captured = pcall(captureApi)
+    if okCap and captured then
+        setStatus("Ready")
+    else
+        setStatus("Sit at a piano, then press Play")
+    end
 end
