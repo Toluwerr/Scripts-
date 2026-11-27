@@ -2,7 +2,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "0.7"
+local VERSION = "0.8"
 local MIDI_FOLDER = "midis"
 local REBORN_URL = "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau"
 local UNLOAD_KEY = "AutoPlayerInstance"
@@ -823,7 +823,7 @@ end
 
 local Window = Reborn:CreateWindow({
     Title = "Auto Player - " .. VERSION,
-    Size = Vector2.new(640, 520),
+    Size = Vector2.new(640, 440),
     SharpRendering = true,
 })
 
@@ -866,19 +866,20 @@ SettingsTab:SetColumns(2)
 
 local PlaySection = PlayerTab:Section("Playback")
 local FileSection = PlayerTab:Section("Library")
-local AdjustSection = SettingsTab:Section("Adjustments")
-local PedalSection = SettingsTab:Section("Pedal")
-local StatusSection = InfoTab:Section("Status")
+local AdjustSection = SettingsTab:Section("Playback")
+local PedalSection = SettingsTab:Section("Expression")
 local StatsSection = InfoTab:Section("Song")
+local SessionSection = InfoTab:Section("Session")
 
-local statusPara = StatusSection:Paragraph("Idle")
-local timePara = StatusSection:Paragraph("0:00 / 0:00")
+local playingNamePara = PlaySection:Paragraph("No song loaded")
+local timePara = PlaySection:Paragraph("0:00 / 0:00")
+local statusPara = PlaySection:Paragraph("Idle")
 
 local fileDd
 local playBtn
 local progressHandle
 local seekSlider
-local playingNamePara
+local libraryPara
 
 local function setStatus(text)
     statusPara:Set(text)
@@ -899,12 +900,9 @@ local function refreshLibrary()
     songState.selected = selected
     fileDd:SetOptions(names)
     fileDd:Set(selected, false)
+    libraryPara:Set(#names .. (#names == 1 and " MIDI file" or " MIDI files"))
     local message = #names == 0 and ("No MIDI files found in '" .. MIDI_FOLDER .. "'") or ("Found " .. #names .. " MIDI files")
-    if not scheduler.running then
-        setStatus(message)
-    else
-        Window:Notify({Title = "Auto Player", Description = message, Type = "info"})
-    end
+    Window:Notify({Title = "Auto Player", Description = message, Type = "info"})
 end
 
 local function loadSong(name)
@@ -939,9 +937,9 @@ local function loadSong(name)
     playingNamePara:Set(name)
     timePara:Set("0:00 / " .. fmtTime(song.totalSeconds))
     progressHandle:SetRange(0, math.max(song.totalSeconds, 0.1))
-    progressHandle:Set(0)
-    seekSlider:SetRange(0, math.max(math.floor(song.totalSeconds), 1))
-    seekSlider:Set(0)
+    progressHandle:Set(0, false)
+    seekSlider:SetRange(0, math.max(song.totalSeconds, 0.1))
+    seekSlider:Set(0, false)
     setStatus(string.format("Loaded %d notes, %s%s", song.noteCount, fmtTime(song.totalSeconds), shiftNote))
     updateStatsDisplay()
     Window:Notify({Title = "Auto Player", Description = name .. " loaded (" .. song.noteCount .. " notes)", Type = "success"})
@@ -954,9 +952,10 @@ local function tryLoad(name)
     end
     local ok, err = loadSong(name)
     if not ok then
-        setStatus("Load failed: " .. tostring(err))
+        if not scheduler.running then setStatus("Load failed: " .. tostring(err)) end
         Window:Notify({Title = "Auto Player", Description = "Could not load: " .. tostring(err), Type = "error"})
     end
+    return ok
 end
 
 local function startPlayback()
@@ -974,7 +973,6 @@ end
 local function togglePlayPause()
     if scheduler.running and not scheduler.paused then
         scheduler:pause()
-        setStatus("Paused")
     elseif scheduler.running and scheduler.paused then
         if scheduler:refreshConnection() and scheduler.paused then
             scheduler:resume()
@@ -996,6 +994,7 @@ scheduler.onState = function(state, reason)
         setStatus("Playing " .. (songState.name or ""))
     elseif state == "Paused" then
         playBtn:Set("Resume")
+        setStatus("Paused")
     elseif state == "Reconnecting" then
         playBtn:Set("Resume")
         setStatus("Reconnecting: " .. tostring(reason))
@@ -1007,6 +1006,7 @@ end
 scheduler.onProgress = function(elapsed, total)
     timePara:Set(fmtTime(elapsed) .. " / " .. fmtTime(total))
     progressHandle:Set(elapsed, true)
+    seekSlider:Set(elapsed, false)
 end
 
 scheduler.onFinish = function(completed)
@@ -1016,12 +1016,11 @@ scheduler.onFinish = function(completed)
     end
 end
 
-playingNamePara = FileSection:Paragraph("No file selected")
-
 local names, libraryError = listMidiNames()
 names = names or {}
 songState.files = names
 songState.selected = names[1]
+libraryPara = FileSection:Paragraph(#names .. (#names == 1 and " MIDI file" or " MIDI files"))
 fileDd = FileSection:Dropdown({
     Text = "MIDI File",
     Options = names,
@@ -1031,15 +1030,12 @@ fileDd = FileSection:Dropdown({
     end,
 })
 
-FileSection:Button({
-    Text = "Refresh Files",
-    Callback = function()
-        refreshLibrary()
-    end,
+local libraryRow = FileSection:Row()
+libraryRow:Button({
+    Text = "Refresh",
+    Callback = refreshLibrary,
 })
-
-local loadRow = FileSection:Row()
-loadRow:Button({
+libraryRow:Button({
     Text = "Load",
     Primary = true,
     Callback = function()
@@ -1057,7 +1053,7 @@ playBtn = controlsRow:Button({
     Primary = true,
     Callback = function()
         if not songState.song and songState.selected then
-            tryLoad(songState.selected)
+            if not tryLoad(songState.selected) then return end
         end
         if songState.song then
             togglePlayPause()
@@ -1072,6 +1068,8 @@ controlsRow:Button({
     Callback = function()
         scheduler:stop()
         setStatus("Stopped")
+        local total = songState.song and songState.song.totalSeconds or 0
+        scheduler.onProgress(0, total)
     end,
 })
 
@@ -1088,7 +1086,7 @@ seekSlider = PlaySection:Slider({
     Text = "Seek",
     Min = 0,
     Max = 100,
-    Step = 1,
+    Step = 0.1,
     Value = 0,
     Suffix = "s",
     Callback = function(value)
@@ -1135,7 +1133,7 @@ AdjustSection:Slider({
     end,
 })
 
-AdjustSection:Slider({
+PedalSection:Slider({
     Text = "Volume",
     Min = 0,
     Max = 1,
@@ -1191,16 +1189,8 @@ StatsSection:Button({
     end,
 })
 
-InfoTab:Section("Usage"):Paragraph(
-    "1. Put .mid or .midi files in the '" .. MIDI_FOLDER .. "' folder inside your executor workspace\n" ..
-    "2. Press Refresh Files\n" ..
-    "3. Pick a song and press Load\n" ..
-    "4. Sit at any piano and press Play\n\n" ..
-    "Notes outside the 88-key range are octave-shifted into range automatically."
-)
-
-local unloadRow = StatusSection:Row()
-unloadRow:Button({
+SessionSection:Paragraph("MIDI folder: " .. MIDI_FOLDER .. "\nAdd .mid or .midi files, refresh the library, and sit at a piano before playing.")
+SessionSection:Button({
     Text = "Stop & Unload",
     Callback = function()
         unloadAll()
