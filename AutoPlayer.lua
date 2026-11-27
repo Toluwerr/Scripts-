@@ -2,7 +2,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "0.4"
+local VERSION = "0.5"
 local MIDI_FOLDER = "midis"
 local REBORN_URL = "https://raw.githubusercontent.com/Toluwer/Reborn/main/src/Reborn.luau"
 local UNLOAD_KEY = "AutoPlayerInstance"
@@ -429,6 +429,7 @@ function Scheduler.new()
     self.cursor = 1
     self.pausedHeld = nil
     self.held = {}
+    self.keyCounts = {}
     self.conn = nil
     self.onState = nil
     self.onProgress = nil
@@ -451,64 +452,64 @@ end
 
 function Scheduler:load(song)
     local tl = {}
-    for _, n in ipairs(song.notes) do
-        tl[#tl + 1] = {time = n.startTime, kind = 3, midi = n.midi, vel = n.vel}
-        tl[#tl + 1] = {time = n.endTime, kind = 1, midi = n.midi}
+    for id, n in ipairs(song.notes) do
+        tl[#tl + 1] = {time = n.startTime, kind = 3, id = id, midi = n.midi, vel = n.vel}
+        tl[#tl + 1] = {time = n.endTime, kind = 1, id = id}
     end
-    for _, s in ipairs(song.sustain) do
-        tl[#tl + 1] = {time = s.time, kind = 2, on = s.on}
+    for id, s in ipairs(song.sustain) do
+        tl[#tl + 1] = {time = s.time, kind = 2, id = id, on = s.on}
     end
     table.sort(tl, function(a, b)
-        if a.time ~= b.time then
-            return a.time < b.time
-        end
-        return a.kind < b.kind
+        if a.time ~= b.time then return a.time < b.time end
+        if a.kind ~= b.kind then return a.kind < b.kind end
+        return a.id < b.id
     end)
     self.timeline = tl
     self.totalSeconds = song.totalSeconds
 end
 
+local function mapNote(midi, transpose)
+    local key = midi - NOTE_OFFSET + transpose
+    if key < MIN_NOTE then
+        key += math.ceil((MIN_NOTE - key) / 12) * 12
+    elseif key > MAX_NOTE then
+        key -= math.ceil((key - MAX_NOTE) / 12) * 12
+    end
+    return key
+end
+
+function Scheduler:noteVolume(velocity)
+    local effective = self.velocityMode == "MIDI" and velocity or 100
+    return math.clamp(5 * effective / 127 * self.volumeMult, 0, 5)
+end
+
+function Scheduler:press(id, key, volume)
+    if self.held[id] or not Api.play then return end
+    Api.play(key, volume)
+    self.held[id] = {g = key, volume = volume}
+    self.keyCounts[key] = (self.keyCounts[key] or 0) + 1
+end
+
+function Scheduler:release(id)
+    local entry = self.held[id]
+    if not entry then return end
+    self.held[id] = nil
+    local key = entry.g
+    local count = (self.keyCounts[key] or 1) - 1
+    if count <= 0 then
+        self.keyCounts[key] = nil
+        if Api.release then Api.release(key) end
+    else
+        self.keyCounts[key] = count
+    end
+end
+
 function Scheduler:fire(ev)
     if ev.kind == 3 then
-        local g = ev.midi - NOTE_OFFSET + self.transpose
-        while g < MIN_NOTE do
-            g += 12
-        end
-        while g > MAX_NOTE do
-            g -= 12
-        end
-        local vol
-        if self.velocityMode == "MIDI" then
-            vol = 5 * ev.vel / 127 * self.volumeMult
-        else
-            vol = 500 / 127 * self.volumeMult
-        end
-        if vol > 5 then
-            vol = 5
-        end
-        if Api.play then
-            Api.play(g, vol)
-        end
-        local entry = self.held[ev.midi]
-        if entry then
-            entry.count += 1
-            entry.g = g
-            entry.volume = vol
-        else
-            self.held[ev.midi] = {g = g, count = 1, volume = vol}
-        end
+        self:press(ev.id, mapNote(ev.midi, self.transpose), self:noteVolume(ev.vel))
         self.playedCount += 1
     elseif ev.kind == 1 then
-        local entry = self.held[ev.midi]
-        if entry and entry.count > 0 then
-            if Api.release then
-                Api.release(entry.g)
-            end
-            entry.count -= 1
-            if entry.count == 0 then
-                self.held[ev.midi] = nil
-            end
-        end
+        self:release(ev.id)
     elseif ev.kind == 2 then
         if self.sustainMode == "Auto" and Api.sustain then
             Api.sustain(ev.on)
@@ -517,14 +518,13 @@ function Scheduler:fire(ev)
 end
 
 function Scheduler:releaseAll()
-    for midi, entry in pairs(self.held) do
-        if Api.release and entry.g then
-            for _ = 1, entry.count do
-                pcall(Api.release, entry.g)
-            end
+    if Api.release then
+        for key in pairs(self.keyCounts) do
+            pcall(Api.release, key)
         end
     end
     table.clear(self.held)
+    table.clear(self.keyCounts)
 end
 
 function Scheduler:setPedal(on)
@@ -641,13 +641,12 @@ function Scheduler:resume()
     self.anchor = os.clock()
     self:setPedal(self:pedalAt(self.pausedAt))
     if self.pausedHeld then
-        for midi, entry in pairs(self.pausedHeld) do
-            if Api.play then
-                for _ = 1, entry.count do
-                    pcall(Api.play, entry.g, entry.volume)
-                end
-                self.held[midi] = entry
-            end
+        local ids = {}
+        for id in pairs(self.pausedHeld) do ids[#ids + 1] = id end
+        table.sort(ids)
+        for _, id in ipairs(ids) do
+            local entry = self.pausedHeld[id]
+            pcall(self.press, self, id, entry.g, entry.volume)
         end
         self.pausedHeld = nil
     end
